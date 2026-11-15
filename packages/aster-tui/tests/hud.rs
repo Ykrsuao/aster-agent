@@ -223,6 +223,78 @@ fn responsive_hud_keeps_usage_and_cost_below_composer_and_preserves_the_title() 
 }
 
 #[test]
+fn full_hud_preserves_conversation_space_in_short_windows() {
+    let mut state = state();
+    state.hud.configure("full").unwrap();
+    state.entries.push(Entry::Assistant(
+        (1..=30)
+            .map(|row| format!("Conversation line {row}\n"))
+            .collect(),
+    ));
+    for layout in [Layout::Compact, Layout::Expanded] {
+        state.hud.config.layout = layout;
+        for (height, max_hud_rows) in [(12, 1), (18, 2), (24, 3), (32, 4), (48, 6), (96, 12)] {
+            for columns in [24, 48, 80, 120] {
+                let mut terminal = Terminal::new(TestBackend::new(columns, height)).unwrap();
+                let mut hits = ui::HitAreas::default();
+                terminal
+                    .draw(|frame| hits = ui::draw(frame, &mut state))
+                    .unwrap();
+                assert!(
+                    hits.transcript.height >= height / 2,
+                    "only {} conversation rows remain with {} HUD rows in {columns}x{height}",
+                    hits.transcript.height,
+                    hits.hud_rows.len(),
+                );
+                assert!(hits.hud_rows.len() <= max_hud_rows);
+                assert!(hits
+                    .hud_rows
+                    .iter()
+                    .any(|(_, command)| *command == "/context"));
+                assert!(hits.transcript.bottom() <= hits.composer.y);
+                assert_eq!(hits.hud_rows.last().unwrap().0.bottom(), height - 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn default_hud_stays_compact_when_tools_and_jobs_are_active() {
+    let mut state = state();
+    state.phase = Phase::Busy;
+    state.tasks = json!({"steps":[{"status":"pending","title":"check"}],
+        "jobs":[{"status":"running","title":"review"}]});
+    state.entries.push(Entry::Tool(Tool {
+        id: "one".into(),
+        title: "Inspect source".into(),
+        status: "running".into(),
+        content: "Source contents".into(),
+        diff: String::new(),
+        expanded: false,
+        started: None,
+        elapsed: None,
+    }));
+    for (columns, height) in [(48, 24), (80, 24), (120, 24), (160, 40)] {
+        let mut terminal = Terminal::new(TestBackend::new(columns, height)).unwrap();
+        let mut hits = ui::HitAreas::default();
+        terminal
+            .draw(|frame| hits = ui::draw(frame, &mut state))
+            .unwrap();
+        assert!(hits.hud_rows.len() <= 3);
+        assert!(hits.transcript.height >= height / 2);
+        assert!(height - hits.composer.bottom() <= 4);
+        if columns >= 120 {
+            assert_eq!(hits.hud_rows[0].1, "/context");
+            let y = hits.hud_rows[0].0.y;
+            let summary: String = (0..columns)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect();
+            assert!(summary.contains("project") && summary.contains("86%"));
+        }
+    }
+}
+
+#[test]
 fn full_details_use_real_values_cancelled_jobs_and_unknown_fields() {
     let mut state = state();
     state.hud.configure("full").unwrap();

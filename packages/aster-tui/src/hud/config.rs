@@ -13,8 +13,8 @@ use serde_json::Value;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Layout {
-    Compact,
     #[default]
+    Compact,
     Expanded,
     Hidden,
 }
@@ -58,12 +58,12 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            layout: Layout::Expanded,
+            layout: Layout::Compact,
             elements: ["project", "usage", "tools", "tasks", "agents"]
                 .map(str::to_owned)
                 .into(),
             path_levels: 1,
-            max_rows: 8,
+            max_rows: 3,
             max_width: 160,
             context_value: "percent".into(),
             context_bar: true,

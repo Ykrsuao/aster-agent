@@ -3861,7 +3861,7 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
                 || state.exit_confirmation.is_some()),
     );
     let gap = u16::from(screen.height >= 12);
-    let fixed_footer = if spacious { 3 } else { 1 };
+    let fixed_footer = 1;
     let above = queue_height + attachment_height + plan_height + activity_height + gap;
     let body_reserve = if screen.height >= 24 {
         6
@@ -3889,6 +3889,8 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
         .height
         .saturating_sub(header_height + fixed_footer + above + body_reserve + composer_height)
         as usize;
+    // Status must stay smaller than the conversation even when every metric is enabled.
+    let hud_budget = hud_budget.min(usize::from((screen.height / 8).max(1)));
     let hud_rows = crate::hud::rows(state, inner.width as usize, hud_budget);
     if (steps.is_none_or(|items| items.is_empty())
         || hud_rows.iter().any(|row| row.element == "tasks"))
@@ -4282,12 +4284,7 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
     if !choices.is_empty() {
         slash_menu(frame, state, body, p, &mut hits);
     }
-    let footer = Rect::new(
-        inner.x,
-        screen.height - if spacious { 2 } else { 1 },
-        inner.width,
-        1,
-    );
+    let footer = Rect::new(inner.x, screen.height - 1, inner.width, 1);
     if state
         .reading_selection
         .selected_text(&state.text_scope())
@@ -5632,7 +5629,7 @@ mod tests {
                     state.confirm_copy(5);
                     let (text, hits) = snapshot(&mut state, columns, rows);
                     let hint_y = hits.composer.y.saturating_sub(1);
-                    let footer_y = rows - if rows >= 18 { 2 } else { 1 };
+                    let footer_y = rows - 1;
                     assert!(
                         text.lines()
                             .nth(hint_y as usize)

@@ -74,10 +74,13 @@ overrides the environment. See
 
 The HUD adapts [claude-hud](https://github.com/jarrodwatts/claude-hud)'s status
 display ideas to Aster's ACP events, runtime tasks and local workspace. The default
-shows project and usage rows, followed by tool, plan and background-job activity
-when available. It shares the available height with the conversation, growing
-composer, attachments and queued messages. Short windows prioritize usage and
-cost when only one HUD row fits.
+is compact and uses at most three rows: project and usage share a row when the
+width allows, followed by tool, plan and background-job activity when space is
+available. Every layout is also limited to one eighth of the window height
+(at least one row when space permits), so even a saved full layout leaves room
+for the conversation. Growing drafts, attachments and queued messages can reduce
+this further. Short windows prioritize usage and cost when only one HUD row fits.
+The shortcut hint sits immediately below the HUD, without extra blank rows.
 
 `/hud` opens a searchable settings menu; `/hud info` shows current values, their
 sources, configuration paths and collection errors. Click a HUD row to open the
@@ -88,7 +91,7 @@ matching inspector (`/status`, `/context`, `/tools` or `/tasks`); metric rows op
 | --- | --- |
 | `/hud compact` | Combine project and usage on wide terminals |
 | `/hud expanded` | Give each enabled element its own row |
-| `/hud full` | Enable all elements, Git details and day/week costs; allow up to 16 rows |
+| `/hud full` | Enable all elements, Git details and day/week costs; allow up to 16 rows within the window's height budget |
 | `/hud off` | Hide the HUD; `/hud expanded` shows it again |
 | `/hud show ELEMENT` / `/hud hide ELEMENT` | Add or remove an element |
 | `/hud set KEY VALUE` | Change a setting; values accept JSON or a plain string |
@@ -115,10 +118,10 @@ For example:
 
 | Setting | Default and accepted values |
 | --- | --- |
-| `layout` | `expanded`; also `compact`, `hidden` |
+| `layout` | `compact`; also `expanded`, `hidden` |
 | `elements` | Ordered array: `project`, `usage`, `tools`, `tasks`, `agents`; additional names: `tokens`, `cache`, `cost`, `skills`, `memory`, `limits`, `session`, `custom` |
 | `path_levels` | `1` trailing workspace component; `0` shows the full path; maximum `8` |
-| `max_rows`, `max_width` | `8` rows (1–16), `160` columns (20–400); also bounded by the terminal |
+| `max_rows`, `max_width` | `3` rows (1–16), `160` columns (20–400); the row count is also limited by window height and available conversation space |
 | `context_value` | `percent`; also `tokens`, `remaining`, `both` |
 | `context_bar` | `true`; hide the bar with `false` |
 | `token_scope` | `session`; `request` shows token/cache counts for the latest foreground response |
