@@ -148,10 +148,12 @@ class CodingACPAdapter:
         self,
         llm_factory: Callable[[], UnifiedLLM],
         *,
+        model_factory: Callable[[str], UnifiedLLM] | None = None,
         sandbox: bool = False,
         sandbox_config: SandboxConfig | None = None,
     ) -> None:
         self._llm_factory = llm_factory
+        self._model_factory = model_factory
         self._sandbox = sandbox
         self._sandbox_config = sandbox_config or SandboxConfig()
         self._client: Client | None = None
@@ -196,6 +198,8 @@ class CodingACPAdapter:
                     "userSteering": True,
                     "runtimeControls": True,
                     "structuredProgress": True,
+                    "contextInspection": True,
+                    "modelSelection": True,
                     "attachments": True,
                 }
             },
@@ -349,6 +353,22 @@ class CodingACPAdapter:
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """ASTER extensions; the ACP router removes the leading `_`."""
+        if method == "aster/models/list":
+            from aster.unifiedllm.connect.configuration import saved_models
+
+            return {"models": await asyncio.to_thread(saved_models)}
+        if method == "aster/models/select":
+            from aster.unifiedllm import get_llm_client
+            from aster.unifiedllm.connect.configuration import saved_models
+
+            model = params.get("model")
+            if not isinstance(model, str) or model not in {item["id"] for item in saved_models()}:
+                raise RequestError.invalid_params({"reason": "Choose a configured model."})
+            model_factory = self._model_factory
+            if model_factory is None:
+                model_factory = get_llm_client
+            self._llm_factory = lambda: model_factory(model)
+            return {"model": model}
         if method not in {
             "aster/session/checkpoints",
             "aster/session/rewind",
@@ -359,6 +379,7 @@ class CodingACPAdapter:
             "aster/session/configure",
             "aster/session/tasks",
             "aster/session/stop_task",
+            "aster/session/context",
         }:
             raise RequestError.method_not_found(f"_{method}")
         session_id = params.get("sessionId")
@@ -374,6 +395,18 @@ class CodingACPAdapter:
             if not isinstance(query, str) or len(query) > 4096:
                 raise RequestError.invalid_params(
                     {"reason": "query must be a string of at most 4096 characters"}
+                )
+        if method == "aster/session/context":
+            for name in ("requestId", "category"):
+                value = params.get(name)
+                if not isinstance(value, str) or not value or len(value) > 128:
+                    raise RequestError.invalid_params(
+                        {"reason": f"{name} must be a nonempty string of at most 128 characters"}
+                    )
+            key = params.get("key")
+            if key is not None and (not isinstance(key, str) or not key or len(key) > 120):
+                raise RequestError.invalid_params(
+                    {"reason": "key must be null or a nonempty string of at most 120 characters"}
                 )
         if method == "aster/session/navigate":
             node_id = params.get("nodeId")
@@ -395,12 +428,20 @@ class CodingACPAdapter:
                 "aster/session/runtime",
                 "aster/session/tasks",
                 "aster/session/stop_task",
+                "aster/session/context",
             }:
                 async with runtime.access() as session:
                     if method == "aster/session/runtime":
                         return self._require_controls(session).status()
                     if method == "aster/session/tasks":
                         return session.bridge.task_snapshot()
+                    if method == "aster/session/context":
+                        try:
+                            return session.bridge.inspect_context(
+                                params["requestId"], params["category"], params.get("key")
+                            )
+                        except ValueError as exc:
+                            raise RequestError.invalid_params({"reason": str(exc)}) from exc
                     task_id = params.get("taskId")
                     if not isinstance(task_id, str) or not task_id or len(task_id) > 256:
                         raise RequestError.invalid_params(
@@ -892,6 +933,7 @@ class CodingACPAdapter:
             if session.controls is not None:
                 session.controls.publish()
             session.bridge.refresh_tasks()
+            session.bridge.refresh_usage()
             if session.startup_warnings:
                 details = "\n".join(f"- {warning}" for warning in session.startup_warnings)
                 session.bridge.publish_best_effort(
@@ -975,10 +1017,15 @@ class CodingACPAdapter:
         await self._sessions.close()
 
 
-async def serve(llm_factory: Callable[[], UnifiedLLM], *, sandbox: bool = False) -> None:
+async def serve(
+    llm_factory: Callable[[], UnifiedLLM],
+    *,
+    model_factory: Callable[[str], UnifiedLLM] | None = None,
+    sandbox: bool = False,
+) -> None:
     reader, writer = await protocol_streams()
     with diagnostic_stdout():
-        adapter = CodingACPAdapter(llm_factory, sandbox=sandbox)
+        adapter = CodingACPAdapter(llm_factory, model_factory=model_factory, sandbox=sandbox)
         try:
             # Bind protocol streams before redirecting ordinary Python output.
             # Provider initialization, model calls and cleanup can all print.

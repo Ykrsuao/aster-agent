@@ -5,6 +5,7 @@
 import os
 import shutil
 import subprocess
+from unittest.mock import AsyncMock, Mock
 
 import click.testing
 import pytest
@@ -16,8 +17,9 @@ def stubbed_serve(monkeypatch):
     """Capture the llm_factory the command builds instead of serving."""
     captured = {}
 
-    def fake_serve(llm_factory, **options):
+    def fake_serve(llm_factory, *, model_factory=None, **options):
         captured["llm_factory"] = llm_factory
+        captured["model_factory"] = model_factory
         captured["options"] = options
         return "coroutine-placeholder"
 
@@ -35,6 +37,14 @@ def test_model_is_required(monkeypatch):
     # No default model: the caller has to choose one.
     assert result.exit_code == 2
     assert "--model" in result.output
+
+
+def test_model_selection_mode_serves_before_a_model_is_selected(monkeypatch, stubbed_serve):
+    monkeypatch.delenv("ASTER_MODEL", raising=False)
+    result = click.testing.CliRunner().invoke(command, ["--select-model"])
+    assert result.exit_code == 0, result.output
+    with pytest.raises(ValueError, match="Choose a model"):
+        stubbed_serve["llm_factory"]()
 
 
 def test_model_is_read_from_the_environment(monkeypatch, stubbed_serve):
@@ -78,7 +88,41 @@ def test_no_sandbox_overrides_environment(monkeypatch, stubbed_serve):
     monkeypatch.setenv("ASTER_SANDBOX", "true")
     result = click.testing.CliRunner().invoke(command, ["--model", "fake-model", "--no-sandbox"])
     assert result.exit_code == 0, result.output
-    assert stubbed_serve["options"] == {}
+    assert stubbed_serve["options"] == {"sandbox": False}
+
+
+@pytest.mark.parametrize("client_type", [None, "completion", "responses"])
+@pytest.mark.parametrize("selected_model", ["saved-model", "nvidia_nim/test-model"])
+def test_selected_model_preserves_cli_client_overrides(
+    monkeypatch: pytest.MonkeyPatch, client_type: str | None, selected_model: str
+) -> None:
+    from aster_acp.server import CodingACPAdapter
+
+    monkeypatch.delenv("ASTER_MODEL", raising=False)
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test")
+    monkeypatch.setattr("aster.secrets.load_secrets_into_env", lambda: None)
+    monkeypatch.setattr(
+        "aster.unifiedllm.connect.configuration.saved_models",
+        lambda: [{"id": selected_model, "name": selected_model}],
+    )
+    get_llm_client = Mock()
+    monkeypatch.setattr("aster.unifiedllm.get_llm_client", get_llm_client)
+    monkeypatch.setattr("aster_acp.server.protocol_streams", AsyncMock(return_value=(None, None)))
+
+    async def select_model(adapter: CodingACPAdapter, **kwargs: object) -> None:
+        await adapter.ext_method("aster/models/select", {"model": selected_model})
+        get_llm_client.assert_not_called()
+        adapter._llm_factory()
+
+    monkeypatch.setattr("aster_acp.server.run_agent", select_model)
+    arguments = ["--select-model", "--no-sandbox"]
+    if client_type is not None:
+        arguments.extend(["--client-type", client_type])
+    result = click.testing.CliRunner().invoke(command, arguments)
+
+    assert result.exit_code == 0, result.output
+    overrides = {"api_key": "nvapi-test"} if selected_model.startswith("nvidia_nim/") else {}
+    get_llm_client.assert_called_once_with(selected_model, client_type=client_type, **overrides)
 
 
 def _console_script() -> str:

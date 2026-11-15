@@ -1079,6 +1079,10 @@ def configure_entry(
         raise ValueError("cache_enabled must be a boolean or None")
     _validate_structured_output(entry, structured_output_mode)
     reject_credentials(entry)
+    if "provider_params" in entry or "provider_credentials" in entry:
+        from aster.unifiedllm.provider_settings import validate_provider_settings
+
+        validate_provider_settings(entry)
     from aster.unifiedllm.media_inputs import validate_media_inputs
 
     result = deepcopy(entry)

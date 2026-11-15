@@ -76,7 +76,7 @@ def command(
         from aster_cli._tui_model import resolve_tui_model
 
         try:
-            model = resolve_tui_model(workspace)
+            model = resolve_tui_model(workspace, allow_unselected=True)
         except ValueError as exc:
             raise click.UsageError(str(exc)) from exc
 

@@ -58,6 +58,148 @@ pub struct WorkspaceChanges {
     pub notice: Option<String>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct GitSummary {
+    pub branch: String,
+    pub dirty: bool,
+    pub ahead: u64,
+    pub behind: u64,
+    pub modified: usize,
+    pub added: usize,
+    pub deleted: usize,
+    pub untracked: usize,
+    pub conflicts: usize,
+    pub lines_added: u64,
+    pub lines_deleted: u64,
+    pub line_counts_available: bool,
+    pub worktree: bool,
+}
+
+/// A small HUD snapshot: no patches, index refresh, external diff or synchronous UI work.
+pub async fn summary(workspace: &Path, details: bool) -> Result<Option<GitSummary>> {
+    let output = run(
+        git(workspace).args([
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "-z",
+            "--untracked-files=all",
+        ]),
+        MAX_STATUS_BYTES,
+        Duration::from_secs(2),
+    )
+    .await?;
+    if !output.success() || output.truncated {
+        if String::from_utf8_lossy(&output.stderr).contains("not a git repository") {
+            return Ok(None);
+        }
+        bail!("Git status unavailable or exceeded the HUD limit");
+    }
+    let mut result = parse_summary(&output.stdout);
+    if details {
+        let output = run(
+            git(workspace).args([
+                "diff",
+                "HEAD",
+                "--numstat",
+                "-z",
+                "--no-ext-diff",
+                "--no-textconv",
+            ]),
+            MAX_STATUS_BYTES,
+            Duration::from_secs(2),
+        )
+        .await?;
+        if output.success() && !output.truncated {
+            result.line_counts_available = true;
+            let mut records = output.stdout.split(|byte| *byte == 0);
+            while let Some(record) = records.next() {
+                let mut fields = record.splitn(3, |byte| *byte == b'\t');
+                let added = fields.next().unwrap_or_default();
+                let deleted = fields.next().unwrap_or_default();
+                if let Some(path) = fields.next() {
+                    result.lines_added = result
+                        .lines_added
+                        .saturating_add(String::from_utf8_lossy(added).parse::<u64>().unwrap_or(0));
+                    result.lines_deleted = result.lines_deleted.saturating_add(
+                        String::from_utf8_lossy(deleted).parse::<u64>().unwrap_or(0),
+                    );
+                    if path.is_empty() {
+                        records.next();
+                        records.next();
+                    }
+                }
+            }
+        }
+    }
+    let paths = run(
+        git(workspace).args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+        ]),
+        16 * 1024,
+        Duration::from_secs(2),
+    )
+    .await?;
+    if paths.success() {
+        let text = String::from_utf8_lossy(&paths.stdout);
+        let mut lines = text.lines();
+        result.worktree = lines.next() != lines.next();
+    }
+    Ok(Some(result))
+}
+
+fn parse_summary(bytes: &[u8]) -> GitSummary {
+    let mut summary = GitSummary::default();
+    let mut oid = String::new();
+    let mut records = bytes.split(|byte| *byte == 0);
+    while let Some(record) = records.next() {
+        let text = String::from_utf8_lossy(record);
+        if let Some(head) = text.strip_prefix("# branch.head ") {
+            summary.branch = head.into();
+        } else if let Some(value) = text.strip_prefix("# branch.oid ") {
+            oid = value.into();
+        } else if let Some(value) = text.strip_prefix("# branch.ab ") {
+            let mut counts = value.split_whitespace();
+            summary.ahead = counts
+                .next()
+                .and_then(|value| value.strip_prefix('+'))
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            summary.behind = counts
+                .next()
+                .and_then(|value| value.strip_prefix('-'))
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+        } else if text.starts_with("? ") {
+            summary.untracked += 1;
+            summary.dirty = true;
+        } else if matches!(record.first(), Some(b'1' | b'2' | b'u')) && record.len() >= 4 {
+            summary.dirty = true;
+            if record[0] == b'u' {
+                summary.conflicts += 1;
+            }
+            let xy = &record[2..4];
+            if xy.contains(&b'A') {
+                summary.added += 1;
+            } else if xy.contains(&b'D') {
+                summary.deleted += 1;
+            } else {
+                summary.modified += 1;
+            }
+            if record[0] == b'2' {
+                records.next();
+            }
+        }
+    }
+    if summary.branch == "(detached)" {
+        summary.branch = format!("detached:{}", oid.chars().take(7).collect::<String>());
+    }
+    summary
+}
+
 struct StatusEntry {
     file: ChangedFile,
     path: PathBuf,
@@ -545,6 +687,88 @@ mod tests {
 
     fn write(root: &Path, path: &str, text: impl AsRef<[u8]>) {
         std::fs::write(root.join(path), text).unwrap();
+    }
+
+    #[tokio::test]
+    async fn hud_summary_reports_unborn_dirty_file_counts_and_detached_worktrees() {
+        let repository = fixture();
+        let root = repository.path();
+        let empty = summary(root, true).await.unwrap().unwrap();
+        assert!(!empty.branch.is_empty());
+        assert!(!empty.dirty);
+        assert!(!empty.line_counts_available);
+        write(root, "tracked.txt", "before\n");
+        git_ok(root, &["add", "tracked.txt"]);
+        git_ok(root, &["commit", "--quiet", "-m", "fixture"]);
+        let clean = summary(root, true).await.unwrap().unwrap();
+        assert!(!clean.dirty && clean.line_counts_available && !clean.worktree);
+        write(root, "tracked.txt", "after\n");
+        std::fs::create_dir(root.join("new files")).unwrap();
+        write(root, "new files/one.txt", "one");
+        write(root, "new files/中文.txt", "two");
+        let dirty = summary(root, true).await.unwrap().unwrap();
+        assert!(dirty.dirty);
+        assert_eq!(dirty.modified, 1);
+        assert_eq!(dirty.untracked, 2);
+        assert_eq!((dirty.lines_added, dirty.lines_deleted), (1, 1));
+        let linked = tempfile::tempdir().unwrap();
+        let checkout = linked.path().join("checkout");
+        git_ok(
+            root,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                checkout.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let detached = summary(&checkout, false).await.unwrap().unwrap();
+        assert!(detached.worktree && detached.branch.starts_with("detached:"));
+        assert!(!detached.dirty);
+        let outside = tempfile::tempdir().unwrap();
+        assert!(summary(outside.path(), true).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn hud_porcelain_parser_keeps_rename_origins_out_of_file_counts() {
+        let status = b"# branch.oid abcdef0123456789\0# branch.head topic\0# branch.ab +2 -3\x002 R. N... 100644 100644 100644 abc def R100 new name\0? old name\0? real untracked\0u UU N... 100644 100644 100644 100644 a b c conflict.txt\0";
+        let result = parse_summary(status);
+        assert_eq!(result.branch, "topic");
+        assert_eq!((result.ahead, result.behind), (2, 3));
+        assert_eq!(result.untracked, 1);
+        assert_eq!(result.conflicts, 1);
+        assert_eq!(result.modified, 2);
+    }
+
+    #[tokio::test]
+    async fn hud_summary_distinguishes_worktrees_from_checkout_subdirectories() {
+        let repository = fixture();
+        let root = repository.path();
+        write(root, "tracked.txt", "content\n");
+        git_ok(root, &["add", "tracked.txt"]);
+        git_ok(root, &["commit", "--quiet", "-m", "fixture"]);
+        let nested = root.join("packages/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(!summary(&nested, false).await.unwrap().unwrap().worktree);
+
+        let linked = tempfile::tempdir().unwrap();
+        let checkout = linked.path().join("checkout");
+        git_ok(
+            root,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                checkout.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let nested = checkout.join("packages/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(summary(&nested, false).await.unwrap().unwrap().worktree);
     }
 
     fn test_python() -> PathBuf {

@@ -7,6 +7,7 @@ import os
 import sys
 import threading
 from contextlib import suppress
+from pathlib import Path
 from typing import Literal
 from unittest.mock import AsyncMock, Mock, call, patch
 
@@ -24,6 +25,7 @@ from acp.schema import (
     SseMcpServer,
     TextContentBlock,
     ToolCallProgress,
+    UsageUpdate,
     UserMessageChunk,
 )
 from aster_acp.cli import command
@@ -31,6 +33,7 @@ from aster_acp.server import CodingACPAdapter
 from aster_cli.commands import discover_commands
 from click.testing import CliRunner
 
+from aster import Context
 from aster.context_blocks.events import ToolCallEvent
 from aster.errors import GenerationError
 from aster.interactive import Done, Waiting
@@ -133,6 +136,59 @@ class _RejectFirstCommandsClient(_RecordingClient):
 
 async def _session(adapter: CodingACPAdapter, session_id: str):
     return (await adapter._sessions.get(session_id)).value
+
+
+async def test_context_inspection_reads_actual_content_while_a_foreground_turn_is_claimed(
+    tmp_path: Path,
+) -> None:
+    llm = _completed_llm()
+    client = _RecordingClient()
+    adapter = CodingACPAdapter(lambda: llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+    initialized = await adapter.initialize(PROTOCOL_VERSION)
+    assert initialized.field_meta is not None
+    assert initialized.field_meta["aster"]["contextInspection"] is True
+    created = await adapter.new_session(str(tmp_path))
+    runtime = await adapter._sessions.get(created.session_id)
+    runtime.value.agent.context["system_prompt"] = Context("VIEW_SYSTEM\n第二行", prefix=True)
+    await adapter.prompt(created.session_id, [text_block("VIEW_QUESTION 中文")])
+    updates = [update for update in client.updates if isinstance(update, UsageUpdate)]
+    latest = updates[-1]
+    assert latest.field_meta is not None
+    metadata = latest.field_meta["aster"]["context"]
+    params = {"sessionId": created.session_id, "requestId": metadata["requestId"]}
+    calls = llm.call_count
+
+    async with runtime.turn():
+        system = await asyncio.wait_for(
+            adapter.ext_method(
+                "aster/session/context",
+                {**params, "category": "system_prompt", "key": "system_prompt"},
+            ),
+            1,
+        )
+        assert system["sections"][0]["text"] == (
+            "<system_prompt>\nVIEW_SYSTEM\n第二行\n</system_prompt>"
+        )
+        messages = await adapter.ext_method(
+            "aster/session/context", {**params, "category": "messages"}
+        )
+        assert any("VIEW_QUESTION 中文" in section["text"] for section in messages["sections"])
+        output = await adapter.ext_method("aster/session/context", {**params, "category": "output"})
+        assert output["source"] == "model_response"
+        assert any("ACP response" in section["text"] for section in output["sections"])
+        with pytest.raises(RequestError) as stale:
+            await adapter.ext_method(
+                "aster/session/context",
+                {**params, "category": "system_prompt", "requestId": "old-request"},
+            )
+        assert stale.value.code == -32602
+        assert stale.value.data is not None
+        assert "no longer available" in stale.value.data["reason"]
+
+    assert llm.call_count == calls == 1
+    assert "VIEW_SYSTEM" not in str(metadata)
+    await adapter.close()
 
 
 @pytest.mark.parametrize("sandbox", [False, True])
@@ -604,8 +660,13 @@ async def test_initial_commands_are_deferred_until_new_session_returns(tmp_path)
     await runtime.bridge.flush()
 
     assert client.dropped == []
-    assert len(client.accepted) == 1
+    assert len(client.accepted) == 2
     assert isinstance(client.accepted[0][1], AvailableCommandsUpdate)
+    initial_usage = client.accepted[1][1]
+    assert isinstance(initial_usage, UsageUpdate)
+    assert initial_usage.field_meta is not None
+    assert initial_usage.field_meta["aster"]["hud"]["calls"] == 0
+    assert initial_usage.field_meta["aster"]["usagePending"] is True
     await adapter.close()
 
 
@@ -618,7 +679,8 @@ async def test_first_prompt_resends_commands_if_initial_update_was_dropped(tmp_p
     await asyncio.sleep(0)
     runtime = await _session(adapter, created.session_id)
     await runtime.bridge.flush()
-    assert len(client.dropped) == 1
+    assert len(client.dropped) == 2
+    assert {type(update) for _, update in client.dropped} == {AvailableCommandsUpdate, UsageUpdate}
 
     client.registered.add(created.session_id)
     response = await adapter.prompt(created.session_id, [text_block("hello")])
@@ -1143,6 +1205,7 @@ async def test_adapter_rejects_conflicting_packaged_skills_without_contamination
     with pytest.raises(RequestError) as error:
         await adapter.new_session(str(beta))
     assert error.value.code == -32600
+    assert error.value.data is not None
     assert "Launch a separate ACP server" in error.value.data["reason"]
 
     alpha_response = await adapter.prompt(
@@ -1276,6 +1339,17 @@ async def test_adapter_lists_closes_loads_and_replays_durable_session(tmp_path):
         if isinstance(update, UserMessageChunk)
     ]
     assert replayed_user_text == ["remember this\n"]
+    await asyncio.sleep(0)
+    runtime = await _session(replay_adapter, created.session_id)
+    await runtime.bridge.flush()
+    restored_usage = [
+        update for update in replay_client.updates if isinstance(update, UsageUpdate)
+    ][-1]
+    assert restored_usage.field_meta is not None
+    metrics = restored_usage.field_meta["aster"]["hud"]
+    assert metrics["calls"] == metrics["restoredCalls"] == 1
+    assert metrics["days"] == {}
+    assert metrics["latest"] == {}
     await replay_adapter.close()
 
 

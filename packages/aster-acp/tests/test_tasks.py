@@ -45,6 +45,37 @@ async def test_plan_snapshot_tracks_active_completed_and_blocked_steps(tmp_path)
         await agent.close()
 
 
+async def test_job_duration_is_measured_at_spawn_and_stops_after_cancellation(
+    tmp_path, monkeypatch
+):
+    clock = [10.0]
+    monkeypatch.setattr("aster.runtime.channels.perf_counter", lambda: clock[0])
+    monkeypatch.setattr("aster.runtime.channels.time", lambda: 1_800_000_000.0)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    tracker = TaskTracker(agent)
+    started = asyncio.Event()
+
+    async def work():
+        started.set()
+        await asyncio.Event().wait()
+
+    agent.queue_manager.queue("timing")
+    agent.queue_manager.spawn(work(), channel="timing", label="Timed check")
+    try:
+        await started.wait()
+        clock[0] = 12.5
+        running = tracker.snapshot()["jobs"][0]
+        assert running["startedAt"] == 1_800_000_000
+        assert running["elapsedSeconds"] == 2.5
+        assert await tracker.stop(running["id"])
+        clock[0] = 100
+        stopped = tracker.snapshot()["jobs"][0]
+        assert stopped["status"] == "cancelled"
+        assert stopped["elapsedSeconds"] == 2.5
+    finally:
+        await agent.close()
+
+
 async def test_stop_selected_background_job_leaves_other_work_running(tmp_path):
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     tracker = TaskTracker(agent)

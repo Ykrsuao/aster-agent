@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tui_textarea::TextArea;
 
 #[derive(Clone, Debug)]
@@ -37,6 +37,12 @@ pub enum Entry {
     Notice { text: String, error: bool },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CopyConfirmation {
+    pub characters: usize,
+    pub expires_at: Instant,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Session {
     pub id: String,
@@ -61,6 +67,14 @@ pub enum Phase {
     Failed,
 }
 
+#[derive(Default)]
+pub struct ModelSelection {
+    pub supported: bool,
+    pub loading: bool,
+    pub error: String,
+    pub generation: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Overlay {
     Commands,
@@ -70,6 +84,9 @@ pub enum Overlay {
     Changes,
     Help,
     Diagnostics,
+    Hud,
+    HudInfo,
+    Context,
     Queue,
     Search,
     Rewind,
@@ -246,6 +263,8 @@ pub struct State {
     pub exit_confirmation: Option<Instant>,
     /// Only an idle, unconsumed Esc press can start the double-Esc gesture.
     pub escape_confirmation: Option<Instant>,
+    /// Brief success feedback after the clipboard writer completes.
+    pub copy_confirmation: Option<CopyConfirmation>,
     pub rewind_points: Vec<RewindPoint>,
     pub rewind_loading: bool,
     pub session_tree: crate::session_tree::SessionTree,
@@ -263,6 +282,8 @@ pub struct State {
     pub commands: Vec<Command>,
     pub editor: TextArea<'static>,
     pub(crate) composer: crate::composer::ComposerState,
+    pub(crate) reading_selection: crate::text_selection::SelectionState,
+    pub(crate) reading_cache: crate::text_selection::Cache,
     /// Invalidates asynchronous edits even when a later draft has identical text.
     pub draft_revision: u64,
     pub overlay: Option<Overlay>,
@@ -277,6 +298,7 @@ pub struct State {
     pub(crate) image_preview: crate::image_preview::PreviewCache,
     pub terminal_graphics: crate::terminal_input::GraphicsCapabilities,
     pub terminal_image: crate::terminal_image::PreviewCache,
+    pub context_grid: crate::context::GridRasterCache,
     /// Image-viewer status remains visible while the attachment inspector is open.
     pub original_image_notice: Option<(String, bool)>,
     pub attachments_supported: bool,
@@ -288,6 +310,7 @@ pub struct State {
     pub recovery: Option<crate::drafts::MessageDraft>,
     pub runtime_supported: bool,
     pub runtime: Value,
+    pub model_selection: ModelSelection,
     pub mode: String,
     pub approval_policy: String,
     pub approvals: VecDeque<ApprovalRequest>,
@@ -306,7 +329,13 @@ pub struct State {
     pub(crate) approval_page_rows: u16,
     pub show_sidebar: bool,
     pub usage: String,
+    pub hud: crate::hud::Hud,
     pub context_ratio: Option<f64>,
+    pub context_snapshot: Option<crate::context::ContextSnapshot>,
+    pub context_expanded: bool,
+    pub context_view: Option<crate::context_detail::View>,
+    pub context_view_generation: u64,
+    pub context_reveal_selection: bool,
     pub cost: String,
     pub started: Option<Instant>,
     pub last_elapsed: Option<f64>,
@@ -332,6 +361,7 @@ impl State {
             status: "Starting agent…".into(),
             exit_confirmation: None,
             escape_confirmation: None,
+            copy_confirmation: None,
             rewind_points: Vec::new(),
             rewind_loading: false,
             session_tree: crate::session_tree::SessionTree::default(),
@@ -348,6 +378,8 @@ impl State {
             commands: default_commands(),
             editor: TextArea::default(),
             composer: crate::composer::ComposerState::default(),
+            reading_selection: crate::text_selection::SelectionState::default(),
+            reading_cache: crate::text_selection::Cache::default(),
             draft_revision: 0,
             overlay: None,
             query: String::new(),
@@ -360,6 +392,7 @@ impl State {
             image_preview: crate::image_preview::PreviewCache::default(),
             terminal_graphics: crate::terminal_input::GraphicsCapabilities::default(),
             terminal_image: crate::terminal_image::PreviewCache::default(),
+            context_grid: crate::context::GridRasterCache::default(),
             original_image_notice: None,
             attachments_supported: false,
             image_input_supported: false,
@@ -370,6 +403,7 @@ impl State {
             recovery: None,
             runtime_supported: false,
             runtime: Value::Null,
+            model_selection: ModelSelection::default(),
             mode: "code".into(),
             approval_policy: "backend".into(),
             approvals: VecDeque::new(),
@@ -385,7 +419,13 @@ impl State {
             approval_page_rows: 1,
             show_sidebar: false,
             usage: String::new(),
+            hud: crate::hud::Hud::default(),
             context_ratio: None,
+            context_snapshot: None,
+            context_expanded: false,
+            context_view: None,
+            context_view_generation: 0,
+            context_reveal_selection: false,
             cost: String::new(),
             started: None,
             last_elapsed: None,
@@ -417,12 +457,38 @@ impl State {
     }
 
     pub(crate) fn draft_changed(&mut self) {
+        self.reading_selection.clear();
         self.draft_revision = self.draft_revision.wrapping_add(1);
         self.removed_attachment = None;
         self.composer.reset_navigation();
     }
 
+    pub(crate) fn overlay_searchable(&self) -> bool {
+        matches!(
+            self.overlay,
+            Some(
+                Overlay::Commands
+                    | Overlay::Sessions
+                    | Overlay::Drafts
+                    | Overlay::Tools
+                    | Overlay::Search
+                    | Overlay::Queue
+                    | Overlay::Rewind
+                    | Overlay::Tree
+                    | Overlay::Files
+                    | Overlay::Attachments
+                    | Overlay::Models
+                    | Overlay::Modes
+                    | Overlay::Permissions
+                    | Overlay::Tasks
+                    | Overlay::Hud
+            )
+        ) || (self.overlay == Some(Overlay::Changes) && !self.conversation_changes)
+    }
+
     pub fn open(&mut self, overlay: Overlay) {
+        self.reading_selection.clear();
+        self.reading_cache.clear();
         self.escape_confirmation = None;
         self.original_image_notice = None;
         self.composer.cancel_pointer();
@@ -431,12 +497,47 @@ impl State {
         self.selected = 0;
         self.detail_scroll = 0;
         self.approval_page_rows = 1;
+        self.context_view = None;
+        self.context_view_generation = self.context_view_generation.wrapping_add(1);
+        self.context_reveal_selection = false;
+    }
+
+    pub(crate) fn text_scope(&self) -> crate::text_selection::Scope {
+        let subject = if self.overlay.is_some() {
+            if let Some(view) = self.context_view.as_ref() {
+                format!("{}:{}", view.generation, view.request_id)
+            } else {
+                self.choices()
+                    .get(self.selected)
+                    .map(|choice| choice.value.clone())
+                    .unwrap_or_default()
+            }
+        } else {
+            String::new()
+        };
+        crate::text_selection::Scope {
+            conversation: self.conversation_generation,
+            overlay: self.overlay,
+            subject,
+            query: if self.overlay.is_some() {
+                self.query.clone()
+            } else {
+                String::new()
+            },
+        }
     }
 
     pub fn notice(&mut self, text: impl Into<String>, error: bool) {
         self.entries.push(Entry::Notice {
             text: clean(&text.into()),
             error,
+        });
+    }
+
+    pub fn confirm_copy(&mut self, characters: usize) {
+        self.copy_confirmation = Some(CopyConfirmation {
+            characters,
+            expires_at: Instant::now() + Duration::from_secs(2),
         });
     }
 
@@ -469,6 +570,23 @@ impl State {
     }
 
     pub fn choices(&self) -> Vec<Choice> {
+        if self.overlay == Some(Overlay::Context) {
+            return self
+                .context_snapshot
+                .as_ref()
+                .map_or_else(Vec::new, |snapshot| {
+                    snapshot
+                        .targets(self.context_expanded)
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, target)| Choice {
+                            label: target.label(),
+                            detail: "Enter to view actual content".into(),
+                            value: index.to_string(),
+                        })
+                        .collect()
+                });
+        }
         if self.overlay == Some(Overlay::Tree) {
             return if self.tree_loading
                 || self.tree_search_pending()
@@ -508,6 +626,7 @@ impl State {
         }
         let query = self.query.to_lowercase();
         let choices: Vec<Choice> = match self.overlay {
+            Some(Overlay::Hud) => self.hud.choices(),
             Some(Overlay::Rollback) => {
                 let mut scopes = vec![Choice {
                     label: "All unstaged hunks in this file".into(),
@@ -838,7 +957,7 @@ pub fn default_commands() -> Vec<Command> {
             "Restore interrupted input for editing before resending",
         ),
         ("/undo", "Review and undo the last file rollback"),
-        ("/model", "Choose a configured model for this session"),
+        ("/model", "Switch this session to a configured model"),
         ("/mode", "Choose Code or Plan mode"),
         ("/plan", "Enter planning mode with execution disabled"),
         ("/code", "Return to Code mode"),
@@ -850,6 +969,14 @@ pub fn default_commands() -> Vec<Command> {
             "Find a message or tool output in this conversation",
         ),
         ("/status", "Show workspace, model and session"),
+        (
+            "/hud",
+            "Configure status rows, layout, colors and usage sources",
+        ),
+        (
+            "/context",
+            "Read system prompts, messages and model output; all lists blocks",
+        ),
         ("/logs", "Inspect backend diagnostics"),
         ("/help", "Keyboard shortcuts and commands"),
         ("/cancel", "Stop the current request"),

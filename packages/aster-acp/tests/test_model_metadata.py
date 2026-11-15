@@ -213,10 +213,23 @@ async def test_first_reply_reports_endpoint_context_and_keeps_missing_price_unkn
         session = (await adapter._sessions.get(created.session_id)).value
         await session.bridge.flush()
         usage = [update for update in receiver.updates if isinstance(update, UsageUpdate)]
-        assert len(usage) == 1
-        assert usage[0].used == 262_144
-        assert usage[0].size == (_WINDOW if metadata_status == 200 else 0)
-        assert usage[0].cost is None
+        pending = [
+            update
+            for update in usage
+            if (update.field_meta or {}).get("aster", {}).get("usagePending") is True
+        ]
+        assert pending
+        assert all(
+            update.used == 0
+            and update.size == 0
+            and (update.field_meta or {})["aster"]["usageAvailable"] is False
+            for update in pending
+        )
+        reported = [update for update in usage if update not in pending]
+        assert len(reported) == 1
+        assert reported[0].used == 262_144
+        assert reported[0].size == (_WINDOW if metadata_status == 200 else 0)
+        assert reported[0].cost is None
         assert simulated.call_count == 1
         assert len(requests) == 1
     finally:

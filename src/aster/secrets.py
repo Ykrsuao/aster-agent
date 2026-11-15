@@ -105,16 +105,24 @@ def _write_secret_env(path, name: str, value: str, *, create_only=False) -> byte
             YAML or has no ``env`` mapping, the variable exists and
             ``create_only`` is set, or the file changed during the write.
     """
+    return _write_secret_envs(path, {name: value}, create_only=create_only)
+
+
+def _write_secret_envs(path, values: dict[str, str], *, create_only=False) -> bytes:
+    """Write a group of credential fields under the caller's single file lock."""
     import re
     import tempfile
     from pathlib import Path
 
     import yaml
 
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
-        raise ValueError("Secret variable must be a valid environment variable name")
-    if not isinstance(value, str) or not value:
-        raise ValueError("Secret value cannot be empty")
+    if not values:
+        raise ValueError("Secret values cannot be empty")
+    for name, value in values.items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise ValueError("Secret variable must be a valid environment variable name")
+        if not isinstance(value, str) or not value:
+            raise ValueError("Secret value cannot be empty")
     path = Path(path).resolve()
     original = path.read_text() if path.exists() else None
     try:
@@ -128,11 +136,11 @@ def _write_secret_env(path, name: str, value: str, *, create_only=False) -> byte
         data["env"] = {}
     if not isinstance(data, dict) or not isinstance(data.get("env", {}), dict):
         raise ValueError(f"Secrets file {path} must contain an env mapping")
-    if create_only and name in data.get("env", {}):
+    if create_only and any(name in data.get("env", {}) for name in values):
         raise ValueError(
             "Secret variable already exists; choose another name or review it separately"
         )
-    data.setdefault("env", {})[name] = value
+    data.setdefault("env", {}).update(values)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
@@ -154,7 +162,7 @@ def _write_secret_env(path, name: str, value: str, *, create_only=False) -> byte
             temporary.unlink(missing_ok=True)
 
 
-__all__ = ["load_secrets_into_env", "write_secret_env", "new_secret_env"]
+__all__ = ["load_secrets_into_env", "write_secret_env", "new_secret_env", "new_secret_envs"]
 
 
 def write_secret_env(path, name: str, value: str) -> None:
@@ -239,13 +247,26 @@ def new_secret_env(path, name: str, value: str, *, model_may_be_saved=None, roll
             variable already exists or the secrets file changed during the
             block.
     """
+    with new_secret_envs(
+        path, {name: value}, model_may_be_saved=model_may_be_saved, rollback_guard=rollback_guard
+    ):
+        yield
+
+
+@contextmanager
+def new_secret_envs(path, values: dict[str, str], *, model_may_be_saved=None, rollback_guard=None):
+    """Create several credential fields together; roll back the group on save failure.
+
+    Uses the same lock order and rollback contract as :func:`new_secret_env`.
+    This avoids nesting locks on the same secrets file for cloud providers.
+    """
     import tempfile
     from pathlib import Path
 
     with _secret_lock(path) as path:
         original = path.read_bytes() if path.exists() else None
         mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
-        owned = _write_secret_env(path, name, value, create_only=True)
+        owned = _write_secret_envs(path, values, create_only=True)
         try:
             yield
             if path.read_bytes() != owned:

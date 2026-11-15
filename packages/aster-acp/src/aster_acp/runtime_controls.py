@@ -121,6 +121,8 @@ class RuntimeControls:
         return {
             "model": self._model_id,
             "modelName": self.agent.llm.model,
+            "reasoningLevel": getattr(self.agent.llm, "reasoning_level", None)
+            or getattr(self.agent.llm, "reasoning_default", None),
             "models": [{"id": name, "name": name} for name in names],
             "mode": self.mode,
             "modes": [mode.model_dump(by_alias=True, exclude_none=True) for mode in _MODES],

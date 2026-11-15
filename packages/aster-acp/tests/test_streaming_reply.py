@@ -6,9 +6,10 @@ import asyncio
 import json
 from time import perf_counter
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
-from acp.schema import AgentMessageChunk
+from acp.schema import AgentMessageChunk, UsageUpdate
 from aster_acp._streaming_reply import ReplyStream
 from aster_acp.dispatcher import InteractiveSessionDispatcher
 from aster_acp.event_bridge import ACPEventBridge
@@ -415,71 +416,81 @@ async def test_computed_python_reply_is_delivered_without_another_model_request(
 async def test_summary_fork_preserves_reply_identity_and_never_streams_private_content(
     tmp_path, monkeypatch, bridge_first, summary_outcome
 ):
+    import httpx
     import litellm
-    from litellm.types.utils import ModelResponseStream
+    from litellm.caching.llm_caching_handler import LLMClientCache
+
+    from aster.unifiedllm.unifiedllm import _ClientHttp
 
     requests = []
 
-    class ReplyProviderStream:
-        def __init__(self, text):
-            self.text = text
-
-        async def __aiter__(self):
-            arguments = json.dumps({"result": {"message": self.text, "explanation": "done"}})
-            yield ModelResponseStream(
-                id="reply",
-                model="openai/test",
-                choices=[
-                    {
-                        "index": 0,
-                        "delta": {
-                            "tool_calls": [
-                                {
-                                    "index": 0,
-                                    "id": "return1",
-                                    "type": "function",
-                                    "function": {"name": "return_result", "arguments": arguments},
-                                }
-                            ]
-                        },
-                        "finish_reason": None,
-                    }
-                ],
-            )
-            yield ModelResponseStream(
-                id="reply",
-                model="openai/test",
-                choices=[{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
-                usage={"prompt_tokens": 8000, "completion_tokens": 20, "total_tokens": 8020},
-            )
-
-    async def provider(**kwargs):
+    def provider(request: httpx.Request) -> httpx.Response:
+        kwargs = json.loads(request.content)
         requests.append(kwargs)
-        if len(requests) == 1:
-            return ReplyProviderStream("VISIBLE_REPLY")
-        assert len(requests) == 2
-        assert "Background memory compaction" in kwargs["messages"][-1]["content"]
-        if summary_outcome == "failure":
-            raise litellm.BadRequestError("synthetic summary failure", "test", "openai")
-        if summary_outcome == "invalid":
-            # A summary that disobeys its instructions must not become a reply.
-            return ReplyProviderStream("PRIVATE_SUMMARY")
-        return litellm.ModelResponse(
-            id="summary",
-            model="openai/test",
-            choices=[
+        foreground = len(requests) == 1
+        if not foreground:
+            assert len(requests) == 2
+            assert "Background memory compaction" in kwargs["messages"][-1]["content"]
+            if summary_outcome == "failure":
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "message": "synthetic summary failure",
+                            "type": "invalid_request_error",
+                        }
+                    },
+                )
+        text = "VISIBLE_REPLY" if foreground else "PRIVATE_SUMMARY"
+        tool_reply = foreground or summary_outcome == "invalid"
+        message: dict[str, Any] = {"role": "assistant"}
+        if tool_reply:
+            arguments = json.dumps({"result": {"message": text, "explanation": "done"}})
+            message["tool_calls"] = [
                 {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": "PRIVATE_SUMMARY"},
-                    "finish_reason": "stop",
+                    "id": "return1",
+                    "type": "function",
+                    "function": {"name": "return_result", "arguments": arguments},
                 }
-            ],
-        )
+            ]
+        else:
+            message["content"] = text
+        finish = "tool_calls" if tool_reply else "stop"
+        tokens = 8000 if foreground else 1000
+        usage = {"prompt_tokens": tokens, "completion_tokens": 20, "total_tokens": tokens + 20}
+        base = {"id": "reply" if foreground else "summary", "created": 1, "model": "test"}
+        if not kwargs.get("stream"):
+            return httpx.Response(
+                200,
+                json={
+                    **base,
+                    "object": "chat.completion",
+                    "usage": usage,
+                    "choices": [{"index": 0, "message": message, "finish_reason": finish}],
+                },
+            )
+        delta = dict(message)
+        if tool_reply:
+            delta["tool_calls"] = [{"index": 0, **call} for call in message["tool_calls"]]
+        base["object"] = "chat.completion.chunk"
+        chunks = [
+            {**base, "choices": [{"index": 0, "delta": delta}]},
+            {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": finish}]},
+            {**base, "choices": [], "usage": usage},
+        ]
+        body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
 
-    monkeypatch.setattr(litellm, "CustomStreamWrapper", ReplyProviderStream)
-    monkeypatch.setattr(litellm, "acompletion", provider)
+    monkeypatch.setattr(litellm, "in_memory_llm_clients_cache", LLMClientCache())
+    transport = httpx.MockTransport(provider)
+    monkeypatch.setattr(
+        _ClientHttp, "_httpx_hardening", staticmethod(lambda: {"transport": transport})
+    )
     llm = CompletionClient(
-        model="openai/test", api_key="synthetic", retry_config=RetryConfig(max_retries=0)
+        model="openai/test",
+        api_base="https://endpoint.example/v1",
+        api_key="synthetic",
+        retry_config=RetryConfig(max_retries=0),
     )
     config = SummarizationConfig(max_tokens=1, preserve_recent=0)
     agent = CodingAgent(
@@ -507,6 +518,13 @@ async def test_summary_fork_preserves_reply_identity_and_never_streams_private_c
         assert len({m["messageId"] for m in metadata}) == 1
         assert len(persisted) == 1
         assert persisted[0].metadata["stream_message_id"] == metadata[0]["messageId"]
+        usage_updates = [u for u in client.updates if isinstance(u, UsageUpdate)]
+        assert usage_updates
+        assert all(u.used == 8000 for u in usage_updates)
+        assert usage_updates[-1].field_meta is not None
+        composition = usage_updates[-1].field_meta["aster"]["context"]
+        assert sum(category["tokens"] for category in composition["categories"]) == 8000
+        assert "PRIVATE_SUMMARY" not in json.dumps(composition)
     finally:
         await bridge.close()
         await dispatcher.close()

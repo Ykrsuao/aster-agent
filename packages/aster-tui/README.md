@@ -19,11 +19,16 @@ cargo build --locked --release --manifest-path packages/aster-tui/Cargo.toml
 uv run --extra tui aster
 ```
 
-Use an existing model alias, or create one with `uv run --extra tui aster connect`.
+Use `/model [ALIAS]` to switch among configured models. Add or edit models in
+`llm_config.yaml`, or run `aster connect` from your shell. See
+[model configuration](../../docs/model-configuration.md) for file locations and
+credentials.
 When the Python launcher is on PATH, `aster` starts directly in the current
 workspace. Model selection uses `--model`, then `ASTER_MODEL`, then
 `tui.default_model` from layered `settings.yaml`. If no default is saved,
-Aster can use a single configured chat model; several aliases require a choice.
+Aster can use a single configured chat model. With several aliases it opens the
+model picker. With none, the picker explains how to add a model in
+`llm_config.yaml` and restart Aster.
 For example, save this in your project's `.aster/settings.yaml`:
 
 ```yaml
@@ -49,6 +54,10 @@ Launcher discovery checks this override, a bundled `aster_cli/bin` binary, the
 checkout's release build, then PATH. It never downloads or compiles code during
 startup. Rebuild after changing Rust sources.
 
+The session title sits on the input box's upper-left border. A configurable HUD
+below the input shows the model, workspace folder, Git status and usage. Click
+the project row or use `/status` to view the full workspace path.
+
 Native execution is the default. To use the optional microsandbox runtime:
 
 ```powershell
@@ -59,26 +68,210 @@ uv run --extra tui --extra sandbox aster --model my-model --sandbox
 overrides the environment. See
 [sandbox execution](../aster-acp/README.md#sandbox-execution) for runtime setup.
 
+## HUD
+
+The HUD adapts [claude-hud](https://github.com/jarrodwatts/claude-hud)'s status
+display ideas to Aster's ACP events, runtime tasks and local workspace. The default
+shows project and usage rows, followed by tool, plan and background-job activity
+when available. It shares the available height with the conversation, growing
+composer, attachments and queued messages. Short windows prioritize usage and
+cost when only one HUD row fits.
+
+`/hud` opens a searchable settings menu; `/hud info` shows current values, their
+sources, configuration paths and collection errors. Click a HUD row to open the
+matching inspector (`/status`, `/context`, `/tools` or `/tasks`); metric rows open
+`/hud info`. Dragging selects and copies text instead of activating the row.
+
+| Command | Effect |
+| --- | --- |
+| `/hud compact` | Combine project and usage on wide terminals |
+| `/hud expanded` | Give each enabled element its own row |
+| `/hud full` | Enable all elements, Git details and day/week costs; allow up to 16 rows |
+| `/hud off` | Hide the HUD; `/hud expanded` shows it again |
+| `/hud show ELEMENT` / `/hud hide ELEMENT` | Add or remove an element |
+| `/hud set KEY VALUE` | Change a setting; values accept JSON or a plain string |
+| `/hud reset` | Restore built-in defaults |
+| `/hud undo` | Restore the previous settings; available after restarting too |
+| `/hud reload` | Apply manual edits to global and workspace settings |
+
+Settings load from `<ASTER_USER_DIR>/tui-hud.json` when `ASTER_USER_DIR` is set,
+otherwise `$XDG_CONFIG_HOME/aster/tui-hud.json` or `~/.config/aster/tui-hud.json`.
+The workspace's `.aster/tui-hud.json` overrides global values. Changes made through
+`/hud` save the effective configuration atomically to the workspace file, with
+the previous configuration in `.aster/tui-hud.previous.json`. Invalid settings
+produce an explanation and preserve the current configuration.
+
+For example:
+
+```text
+/hud set elements ["project","usage","tokens","cache","tools","tasks","agents"]
+/hud set token_scope request
+/hud set context_value both
+/hud set path_levels 2
+/hud set colors {"model":"#b1b9f9","context":"#93ba85"}
+```
+
+| Setting | Default and accepted values |
+| --- | --- |
+| `layout` | `expanded`; also `compact`, `hidden` |
+| `elements` | Ordered array: `project`, `usage`, `tools`, `tasks`, `agents`; additional names: `tokens`, `cache`, `cost`, `skills`, `memory`, `limits`, `session`, `custom` |
+| `path_levels` | `1` trailing workspace component; `0` shows the full path; maximum `8` |
+| `max_rows`, `max_width` | `8` rows (1–16), `160` columns (20–400); also bounded by the terminal |
+| `context_value` | `percent`; also `tokens`, `remaining`, `both` |
+| `context_bar` | `true`; hide the bar with `false` |
+| `token_scope` | `session`; `request` shows token/cache counts for the latest foreground response |
+| `warning_percent`, `critical_percent` | `70`, `85`; warning must be below critical, both within 0–100 |
+| `git`, `git_details` | `true`, `false`; details add file and line-change counts |
+| `refresh_seconds` | `5` (2–120) for background host collection; pending accounting is saved sooner |
+| `activity_limit` | `3` (1–8) visible tool/job/skill names per row |
+| `daily_cost`, `weekly_cost` | `false`, `false`; show recorded totals in the `cost` row |
+| `model_format`, `model_override` | `full` (`short` omits the prefix before the last colon), empty display override |
+| `provider` | Empty; use the backend's provider label, or supply a display override |
+| `custom_text` | Empty; literal text for the `custom` row |
+| `external_usage_path` | Empty; optional absolute or workspace-relative JSON snapshot path |
+| `external_usage_ttl_seconds` | `300` (1–86400); freshness threshold for quotas and maximum age of external snapshots and cache-expiry observations |
+| `language` | `en`; `zh` uses Chinese HUD row labels |
+| `colors` | Empty; overrides for `model`, `project`, `text`, `muted`, `context`, `warning`, `critical`, using strings `#rrggbb`, `0`–`255` or `reset`. An explicit `{}` clears inherited colors. |
+
+`NO_COLOR` overrides HUD color settings. Display overrides do not change the actual
+model or provider. The custom row displays literal text and does not execute commands.
+
+### Data sources
+
+Git reports the branch, dirty marker, ahead/behind counts, worktree and conflicts.
+Optional details show modified/added/deleted/untracked file counts and tracked
+line additions/deletions. Git and host reads run outside the rendering loop.
+The memory row measures host RAM on native Windows and Linux. Skills show active
+and available skills, registered MCP servers and applicable `AGENTS.md` files
+between the Git root and current workspace directory.
+
+Tokens and cache counts come from reported model usage. A field missing from any
+participating response makes that session total `n/a`; an explicit zero remains
+zero. Cache hit percentage is reported cache-read tokens divided by input tokens.
+The latest foreground response supplies context, request token counts, output rate
+and provider limits; helper/summary responses contribute to session accounting
+without replacing those foreground values. Output rate divides reported output
+tokens by the whole completed call duration, including latency and retries. It is
+not an instantaneous streaming measurement; calls shorter than half a second or
+without reported output usage leave it unavailable.
+
+Magpie connections can set `usage_source: magpie` under their existing model alias
+in `llm_config.yaml`. The ACP backend reads the same gateway using that model's
+explicit credential, correlates request records by response ID, and fills missing
+costs and corrected cache counts before the response is saved. Gateway USD costs
+are pricing estimates; account credit balances are shown separately under Limits.
+Requests and responses without a unique, consistent record retain their original
+usage. Lookups have a two-second deadline and a 2 MiB response limit; lookup failure
+does not fail the model reply. Other connections keep the default `response` source.
+
+Once a foreground response identifies the account, its quotas refresh every 30
+seconds while the chat is open. Their provider observation time controls freshness,
+independently of the last reply time. If the gateway still returns an older snapshot,
+the HUD labels its values `last known` with their age. It does not reset that age
+when polling; expired quota windows remain unavailable. Raw credentials and account
+identifiers are not included in HUD telemetry.
+
+Tool counts and timing use conversation events. Plan progress, waiting reasons
+and background jobs use Aster's runtime task snapshots; running job timers advance
+from the reported start time, while finished jobs retain measured durations.
+Opening `/tasks` exposes individual job controls. Session age uses the earliest
+restored model response, or the current ACP session's start when no history exists.
+Completed-call totals include saved model responses; failed-call counts cover
+only the current connection because failure lifecycle events are not persisted.
+
+Cache expiry and quota windows require explicit provider facts. Supported OpenAI
+and Anthropic rate-limit headers can supply request/token windows. Account-level
+5-hour/7-day quotas and spend limits can instead come from a local snapshot:
+
+```json
+{
+  "updated_at": "2026-11-15T08:00:00Z",
+  "five_hour": {"used_percentage": 25, "resets_at": "2026-11-15T12:00:00Z"},
+  "seven_day": {"used_percentage": 40, "resets_at": "2026-11-16T00:00:00Z"},
+  "spend_limit": {"used_percentage": 30},
+  "windows": [{"label": "requests", "percent": 10, "resets_at": "2026-11-15T08:01:00Z"}],
+  "cache_expires_at": "2026-11-15T08:05:00Z"
+}
+```
+
+Set `external_usage_path` and enable `limits`. Timestamps accept Unix seconds or
+RFC3339; the producer must refresh `updated_at`. Snapshots are limited to 64 KiB
+and eight quota windows. The external snapshot replaces provider quota windows
+when configured. Missing, invalid, expired or stale external observations display `n/a`,
+with collection errors in `/hud info`. The HUD does not infer subscription quotas
+from local tokens. The terminal reads local snapshots; optional ACP integrations
+obtain provider data using the configured model connection.
+
+Costs with some unpriced calls show the known subtotal prefixed with `≥`, both for
+the session and the recorded day/week. Entirely unknown costs remain `n/a`;
+explicitly free calls remain zero. Old missing prices are not silently backfilled.
+The standard ACP cost field remains a complete session total; the HUD's known
+USD subtotal travels separately in Aster metadata so other clients do not mistake
+partial accounting for a complete total.
+
 ## Context and cost
 
-The top-right header is present from startup. `context — · cost —` means that no
+The HUD's usage row is present from startup. `context — │ cost —` means that no
 model response has supplied statistics yet. After a response, it shows the latest
 reported input-token usage as a percentage of the model's known context window.
 If the window is unknown, it shows the reported token count instead. A missing
 usage report displays `context n/a`; it does not imply an empty context.
+
+`/context` opens a matrix of 100 rounded square cells for the latest completed
+foreground request. Colors identify used input categories, blue-gray marks output
+reserve, and dark gray marks free space. The legend lists system prompts, tool
+descriptions and schemas, repository instructions, skills, messages and runtime context,
+followed by output reserve and free space. Each cell represents 1% of the model's
+context window. A planning reserve is labelled when no explicit output cap is known.
+
+When the terminal reports Sixel support and cell pixel dimensions (including Windows
+Terminal 1.24+), the grid uses filled rounded squares with equal pixel width and height
+and tight gaps on both axes. It scales with the terminal font and fits the available
+panel width. Terminals without complete graphics reports, very small windows and
+monochrome mode use a compact character grid without spaces between cells.
+
+The total comes from provider usage. Category and block counts carry `~` because
+they are attributed by text size; they are not separate provider measurements.
+Image, audio and file inputs retain the provider total with no category estimate.
+Unknown input usage or capacity displays an explanation instead of an empty grid.
+Unsent drafts and output generated by the latest request are outside that request.
+
+Use arrows to select a category, then Enter or a mouse click to read the actual
+text sent to the model. `Latest model output` opens the assistant text and tool
+calls returned by that request. `/context all` or Tab adds individually selectable
+blocks and messages. In the text view, arrows, PgUp/PgDn and Home/End scroll;
+Esc or Left returns to the overview, and Esc from the overview closes the panel.
+Drag across the text to select it; releasing the mouse copies the selected part
+to the system clipboard. Shift+click extends the selection, and Ctrl+C copies it
+again. Copying preserves real newlines and tabs without inserting screen-wrap
+newlines. Selections remain attached to the same text when scrolling or resizing.
+
+The panel can open while a request is running and does not send another model
+request. The overview follows the latest completed foreground request; an open
+text view stays pinned to its selected request. Only the latest request is retained
+in the current process. Switching models clears it, and loading a conversation or
+restarting waits for a new response. Text is fetched when an item is opened;
+recurring usage updates contain only an item index. Input and output captures
+each keep up to one million characters, with any truncation shown in the text view.
 
 The ACP backend can read the exact model's published input limit from a configured
 OpenAI-compatible gateway's `/models` response. This optional lookup runs when
 opening a session or switching models, without sending a prompt. Explicit model
 settings take priority, with provider-aware LiteLLM metadata as the fallback.
 
-The amount is the estimated USD cost reported for model calls since this
-conversation was opened in the current process. Loading an older conversation
-does not reconstruct its earlier charges. A missing or invalid price displays
-`cost n/a`, including when only some calls have prices, so an incomplete sum is
-not presented as the full cost. An explicitly reported zero can display `$0.0000`.
+Session cost is the estimated USD total reported for model responses, including
+responses restored from the saved conversation. If only some calls have valid prices,
+the HUD shows the known subtotal prefixed with `≥`. When no calls have valid prices,
+it displays `cost n/a`. An explicitly reported zero can display `$0.0000`.
 Changing models clears the previous context measurement while keeping the current
 cost total; the new model supplies its own context measurement on its next response.
+
+Day/week totals include newly observed usage recorded by this TUI across workspaces,
+stored in the user directory's `hud-usage/`. They use the local calendar day and a
+Monday-based week. Restoring history updates session totals without charging the
+day/week ledger again. Separate connection streams have separate atomic files;
+sequence numbers prevent duplicate writes from inflating totals. These totals
+cover locally recorded activity, not all activity on the provider account.
 
 Narrow terminals use shorter labels and keep the indicators visible. The
 `examples/preview.rs` executable uses synthetic conversation and usage fixtures;
@@ -92,7 +285,7 @@ measurements from a live model session.
 | Enter | Send a message; queue it while preparing or while a prompt is running |
 | Alt+S | Send the current text as a correction to the running task |
 | Alt+Enter / Shift+Enter | New line (Shift+Enter depends on terminal support) |
-| Click / drag inside input | Position the cursor / select text; Shift+click extends the selection |
+| Click / drag inside input | Position the cursor / select text; releasing the mouse copies it, and Shift+click extends the selection |
 | Ctrl+C / Ctrl+X with selected input and no popup open | Copy / cut the selection to the system clipboard |
 | Ctrl+V / Ctrl+Shift+V / Shift+Insert / Right click | Paste clipboard text or attach a copied image without sending |
 | `@` at a word boundary / Alt+A | Find and attach a workspace file |
@@ -117,9 +310,11 @@ measurements from a live model session.
 | Click a message / tool / more-lines hint | Expand or collapse that content |
 | Alt+B | Toggle the conversation/activity sidebar |
 | PgUp / PgDn, mouse wheel | Scroll conversation or inspector |
-| Ctrl+End | Return to newest messages |
+| Ctrl+End | Clear the text selection and follow newest messages |
 | Ctrl+P / Ctrl+N | Previous/next submitted input |
-| Ctrl+C twice within 2 seconds | Save and exit from a popup or with no composer selection; the first press shows confirmation |
+| Drag across conversation, tool output, panels or other visible text | Select text; releasing the mouse copies the selection to the system clipboard |
+| Ctrl+C with selected text | Copy that selection again without exiting or changing the draft |
+| Ctrl+C twice within 2 seconds with no text selected | Save and exit; the first press shows confirmation |
 | Esc | Close suggestions / an overlay; recall a message waiting for preparation; cancel a running task |
 | Esc twice within 600 ms, while idle | Clear a nonempty draft; with an empty composer, choose a message to rewind to |
 | Ctrl+Z / Ctrl+U in the composer | Undo an input edit, including clearing a draft with double Esc |
@@ -160,7 +355,7 @@ without a terminal response, the TUI reports that it is still waiting and stays
 open; it does not stop the backend automatically. Press Ctrl+C twice within two
 seconds to leave, or use Ctrl+Q, Ctrl+D with an empty composer, or `/exit`.
 
-With a popup open or no composer text selected, the first Ctrl+C shows an exit confirmation:
+With no text selected, the first Ctrl+C shows an exit confirmation:
 it does not cancel the task or clear your draft. Another key, a paste, or a mouse action dismisses confirmation;
 waiting more than two seconds also resets it. Explicit exit requests use bounded
 backend cleanup. Saved drafts and queued messages can be recovered after closing;
@@ -192,13 +387,26 @@ Windows reads native clipboard text and PNG/bitmap images. Linux image paste use
 `wl-paste` on Wayland or `xclip` on X11; text paste also supports `xsel`. Your
 terminal's text Paste command works without these utilities. If reading fails,
 the draft is kept and an error is shown.
-Click the composer to position the cursor; drag to select text, including wrapped
-Chinese and emoji. Shift+click extends the selection. With no popup open, Ctrl+C
-copies the selection; Ctrl+X cuts it only after copying succeeds. If the draft changes before copying
+Drag across conversation text, expanded tool output, inspector details, help,
+diagnostics, headers or other visible labels to select them. Releasing the mouse
+copies the selection to the system clipboard. Soft wrapping adds no extra newlines;
+original tabs, hard newlines, Chinese and emoji are retained. Shift+click extends
+the selection, and Ctrl+C copies it again without exiting or changing the draft.
+After a copy or cut succeeds, the line immediately above the message composer shows
+`copied N chars to clipboard` in light blue-violet text for two seconds, including
+while an inspector or other panel is open. The message aligns with the composer's
+right edge. The count uses Unicode characters
+from the copied text; another successful copy refreshes the count and timer.
+Single clicks still activate the original control on release; dragging a tool
+heading or picker item does not activate it. Selected conversation text stays
+steady while new output arrives; Ctrl+End clears the selection and follows the latest messages.
+
+Click the composer to position the cursor; dragging and releasing also copies
+selected draft text. With no popup open, Ctrl+X cuts selected input only after copying succeeds.
+If the draft changes before copying
 finishes, its text is kept. Failed clipboard access also keeps the selection.
 Copy, cut and paste requests run in order, including a paste requested while copying.
 A pending paste is cancelled if you change its input, move the cursor, or switch conversations.
-For transcript text, use your terminal's mouse-selection override (often Shift+drag).
 Long user messages initially occupy at most three visual rows. Expanded tools show
 the first two and last three rows of long output; click the omitted-lines hint to
 show all rows, or use Ctrl+T for the full tool inspector. Search opens the entire
@@ -208,11 +416,12 @@ available in full; Git preview limits are described below.
 Commands: `/new`, `/sessions`, `/resume ID`, `/drafts`, `/tree`, `/rewind`, `/search [text]`, `/queue`,
 `/steer TEXT`, `/attach [PATH]`, `/attachments`, `/retry`, `/reconnect`, `/model [ALIAS]`,
 `/mode [code|plan]`, `/permissions [ask|session]`, `/tasks`, `/stop JOB-ID`, `/tools`,
-`/changes`, `/undo`, `/status`, `/logs`, `/help`, `/cancel`, `/exit` and commands
+`/changes`, `/undo`, `/status`, `/context [all]`, `/hud`, `/logs`, `/help`, `/cancel`, `/exit` and commands
 advertised by the agent.
 The interface follows the layout observed in Grok Build 1.0.77: a grayscale
-canvas, full-width conversation, compact bordered composer, model on its bottom
-border and session title on its top border. The welcome menu centers available
+canvas, full-width conversation, compact bordered composer and session title on
+its top border. The HUD adds model, project and activity rows below the composer.
+The welcome menu centers available
 actions; typing immediately focuses the conversation. Alt+B opens the sidebar when the terminal has at
 least 104 columns and 20 rows. Smaller windows retain the conversation and composer.
 The composer wraps long input and grows up to eight visual rows, including Chinese
@@ -352,6 +561,10 @@ select a configured model alias, `code` or `plan` mode, or `ask` or `session`
 approval policy. Changes apply to the live session; they do not rewrite the model
 registry. Finish or stop foreground and background work before changing settings.
 
+`/model` lists configured models and preserves their connection settings. The
+picker also works before the first session when no default model is selected.
+Add or edit entries through [model configuration](../../docs/model-configuration.md).
+
 With `ask`, execution pauses for a compact review. Literal shell commands and
 file operations show their arguments first; Tab opens the complete Python cell.
 Dynamic or incomplete previews show full code immediately. PgUp/PgDn scroll the
@@ -467,7 +680,9 @@ uv run pytest packages/aster-cli/tests/test_tui_command.py
 Rust tests include controller transitions, CJK/paste/draft retention, TestBackend
 rendering at several terminal sizes, noisy/broken subprocesses, bounded cleanup,
 attachment snapshots, approvals, runtime control isolation, targeted background
-stops, recovery and file rollback. `tests/session_controls.rs` exercises the public
+stops, recovery and file rollback. `tests/hud.rs` covers layered configuration,
+undo, narrow layouts, input coexistence, accounting deduplication, concurrent
+streams, missing prices and external snapshot freshness. `tests/session_controls.rs` exercises the public
 controller and protocol boundary. Real Python ACP prompt/replay/cancel flows use
 FakeLLMClient (no model calls).
 They locate the repository `.venv`, or use `ASTER_TEST_PYTHON` when explicitly set.
@@ -476,4 +691,9 @@ exports actual rendered cells as JSON for visual checks; modes include `welcome`
 `work`, `tools`, `commands`, `slash`, `changes`, `sessions`, `search`, `queue`,
 `markdown`, `sidebar`, `compose`, `compact`, `python-error`, `steering`, `files`,
 `attachments`, `image`, `approval`, `approval-expanded`, `approval-fallback`,
-`tasks`, `progress`, `recovery` and `rollback`.
+`tasks`, `progress`, `recovery`, `rollback`, `context`, `context-all`, `context-pending`,
+`context-system`, `context-messages`, `context-output`, `hud`, `hud-full`,
+`hud-compact`, `hud-zh`, `hud-monochrome`, `hud-unknown` and `hud-settings`.
+HUD previews use synthetic ACP and host data with the production renderer.
+Model configuration previews use synthetic fields and credentials:
+`model-switch` and `model-switch-empty`.

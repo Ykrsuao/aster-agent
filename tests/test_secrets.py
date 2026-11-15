@@ -32,7 +32,11 @@ def test_write_secret_preserves_values_and_does_not_export(tmp_path, monkeypatch
         "env": {"OTHER": "old-value", _KEY: "new-value"},
         "metadata": "keep",
     }
-    assert path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600
+    else:
+        # Windows permissions are inherited ACLs; chmod controls read-only only.
+        assert path.stat().st_mode & 0o200
     assert _KEY not in os.environ
 
 

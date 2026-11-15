@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Capture actual Ratatui cells for visual review, without starting a backend.
 //! Conversation content and usage notifications are synthetic offline fixtures.
-use aster_tui::controller::Controller;
+use aster_tui::controller::{Action, Controller};
 use aster_tui::state::{Entry, Overlay, Phase, Session, State, Tool};
 use aster_tui::ui;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{backend::TestBackend, style::Color, Terminal};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
@@ -46,11 +47,55 @@ fn preview_image() -> aster_tui::attachments::Attachment {
     aster_tui::attachments::Attachment::from_image("terminal-layout.png", &bytes).unwrap()
 }
 
+fn preview_context_sections(category: &str) -> Vec<Value> {
+    let sections = match category {
+        "system_prompt" => vec![(
+            "system_prompt",
+            "<system_prompt>\nYou are Aster, a coding agent working in the current workspace.\n\nRead repository instructions before changing files.\nPreserve the user's drafts and unrelated local changes.\nUse the available tools to inspect files and run checks.\nReport what changed and how it was verified.\n\nExecution workflow:\n1. Inspect the relevant source and current state.\n2. Apply the requested change.\n3. Check keyboard, mouse and narrow-window behavior.\n4. Run the affected tests.\n5. Explain how to open the result.\n\nKeep Chinese text and original newlines intact.\n</system_prompt>",
+        )],
+        "system_tools" => vec![(
+            "API tool schemas",
+            "{\n  \"name\": \"execute_python\",\n  \"parameters\": {\n    \"code\": {\"type\": \"string\"}\n  }\n}",
+        )],
+        "memory_files" => vec![(
+            "repository_instructions",
+            "<repository_instructions>\nRun focused tests after changing behavior.\nPreserve the user's uncommitted work.\n</repository_instructions>",
+        )],
+        "skills" => vec![("skills", "<skills>\nAvailable workflow instructions.\n</skills>")],
+        "messages" => vec![(
+            "Conversation text",
+            "User: 我想查看系统提示词和模型输出。\n\nAssistant tool call:\nexecute_python(code=\"print(6 * 7)\")\n\nTool result:\n42\n\nUser: 保留中文、换行和长文本滚动。",
+        )],
+        "runtime_context" => vec![(
+            "execution_context",
+            "<execution_context>\nExecution backend: native\nWorking directory: workspace/aster\n</execution_context>",
+        )],
+        "other" => vec![("Additional context", "<context>\nRequest framing.\n</context>")],
+        "output" => vec![
+            ("Assistant text", "You can now open the system prompt, conversation text and model output from /context."),
+            ("Tool calls", "[\n  {\n    \"name\": \"return_result\",\n    \"arguments\": {\n      \"result\": {\n        \"message\": \"查看正文已接上。\",\n        \"explanation\": \"System prompt, messages and output are selectable.\"\n      }\n    }\n  }\n]"),
+        ],
+        _ => vec![],
+    };
+    sections
+        .into_iter()
+        .map(|(key, text)| {
+            json!({
+                "key": key, "text": text, "characters": text.chars().count(), "truncated": false
+            })
+        })
+        .collect()
+}
+
 fn main() {
     let args: Vec<_> = std::env::args().collect();
     let width: u16 = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(120);
     let height: u16 = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(36);
-    let mode = args.get(3).map(String::as_str).unwrap_or("work");
+    let requested_mode = args.get(3).map(String::as_str).unwrap_or("work");
+    let selecting_text = requested_mode.ends_with("-selected");
+    let mode = requested_mode
+        .strip_suffix("-selected")
+        .unwrap_or(requested_mode);
     let mut state = State::new(
         "workspace/aster".into(),
         "global:deepseek-v4.1-flash".into(),
@@ -96,6 +141,32 @@ fn main() {
         state.session_id = Some("session-current".into());
     }
     match mode {
+        "model-switch" | "model-switch-empty" => {
+            state.phase = Phase::Ready;
+            state.status = "Ready".into();
+            state.started = None;
+            state.model_selection.supported = true;
+            state.runtime = json!({"models":[]});
+            if mode == "model-switch" {
+                state.runtime["models"] = json!([
+                    {"id":state.model}, {"id":"official"}, {"id":"work-claude"}
+                ]);
+            }
+            state.open(Overlay::Models);
+        }
+        "context" | "context-all" | "context-pending" | "context-system" | "context-messages"
+        | "context-output" => {
+            state.phase = Phase::Ready;
+            state.status = "Ready".into();
+            state.started = None;
+            state.open(Overlay::Context);
+            state.context_expanded = mode == "context-all";
+            state.terminal_graphics = aster_tui::terminal_input::GraphicsCapabilities {
+                sixel: true,
+                cell_pixels: aster_tui::terminal_image::CellPixels::new(10, 23),
+                sixel_display_mode: Some(false),
+            };
+        }
         "tree" | "tree-search" | "tree-empty" => {
             state.phase = Phase::Ready;
             state.status = "Ready".into();
@@ -340,13 +411,100 @@ fn main() {
         }
         _ => {}
     }
-    let has_sample_usage = state.session_id.is_some();
+    if mode.starts_with("selection-") {
+        state.phase = Phase::Ready;
+        state.status = "Ready".into();
+        state.started = None;
+        state.show_sidebar = false;
+        state.editor = tui_textarea::TextArea::default();
+        state.entries = vec![
+            Entry::User("聊天正文也支持拖选，松开后就复制。".into()),
+            Entry::Assistant("Reply: Drag to copy **visible text**, including 中文 and 👩‍💻.".into()),
+        ];
+        match mode {
+            "selection-tool" | "selection-tools" => {
+                state.entries = vec![Entry::Tool(Tool {
+                    id: "selection-tool".into(),
+                    title: "Read source output".into(),
+                    status: "completed".into(),
+                    content: "Copied tool output:\nalpha\t中文 👩‍💻 e\u{301}\nsecond line kept"
+                        .into(),
+                    diff: "--- a/source.rs\n+++ b/source.rs\n@@ -1 +1 @@\n-before\n+after".into(),
+                    expanded: true,
+                    started: None,
+                    elapsed: Some(0.4),
+                })];
+                if mode == "selection-tools" {
+                    state.open(Overlay::Tools);
+                }
+            }
+            "selection-compose" => {
+                state
+                    .editor
+                    .insert_str("输入框：拖选就复制 中文 👩‍💻\n保留这行草稿");
+            }
+            "selection-help" => state.open(Overlay::Help),
+            "selection-diagnostics" => {
+                state
+                    .diagnostics
+                    .push_back("Diagnostic output: 中文 👩‍💻\nsecond line".into());
+                state.open(Overlay::Diagnostics);
+            }
+            _ => {}
+        }
+    }
+    let has_sample_usage = state.session_id.is_some() && mode != "context-pending";
     if has_sample_usage {
         let mut update = json!({
             "sessionUpdate": "usage_update", "used": 18000, "size": 100000,
             "cost": {"amount": 0.0024, "currency": "USD"}
         });
         match mode {
+            "context" | "context-all" | "context-system" | "context-messages"
+            | "context-output" => {
+                update["used"] = json!(32000);
+                update["size"] = json!(200000);
+                update["_meta"] = json!({"aster": {"context": {
+                    "version": 1, "model": "openai/deepseek-v4.1-flash",
+                    "requestId": "preview-request", "outputAvailable": true,
+                    "windowTokens": 200000, "reservedOutputTokens": 32000,
+                    "attribution": "characters",
+                    "categories": [
+                        {"id": "system_prompt", "tokens": 2000},
+                        {"id": "system_tools", "tokens": 9500},
+                        {"id": "memory_files", "tokens": 3000},
+                        {"id": "skills", "tokens": 4000},
+                        {"id": "messages", "tokens": 11000},
+                        {"id": "runtime_context", "tokens": 2000},
+                        {"id": "other", "tokens": 500}
+                    ],
+                    "items": [
+                        {"category": "system_prompt", "key": "system_prompt", "tokens": 2000},
+                        {"category": "system_tools", "key": "API tool schemas", "tokens": 9500},
+                        {"category": "memory_files", "key": "repository_instructions", "tokens": 3000},
+                        {"category": "skills", "key": "skills", "tokens": 4000},
+                        {"category": "messages", "key": "Conversation text", "tokens": 11000},
+                        {"category": "runtime_context", "key": "execution_context", "tokens": 2000},
+                        {"category": "other", "key": "Additional context", "tokens": 500}
+                    ]
+                }}});
+                update["_meta"]["aster"]["context"]["contentItems"] = json!([
+                    "system_prompt",
+                    "system_tools",
+                    "memory_files",
+                    "skills",
+                    "messages",
+                    "runtime_context",
+                    "other"
+                ]
+                .into_iter()
+                .flat_map(|category| {
+                    preview_context_sections(category).into_iter().map(move |section| json!({
+                        "category": category, "key": section["key"], "chars": section["characters"]
+                    }))
+                })
+                .collect::<Vec<_>>());
+            }
             "usage-unknown-window" => update["size"] = json!(0),
             "usage-no-price" => update["cost"] = Value::Null,
             "usage-unavailable" => {
@@ -358,34 +516,268 @@ fn main() {
             "usage-free" => update["cost"]["amount"] = json!(0),
             _ => {}
         }
+        if mode.starts_with("hud") {
+            let now = chrono::Local::now().timestamp();
+            let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+            update["cost"]["amount"] = json!(0.0862);
+            update["_meta"] = json!({"aster":{"hud":{
+                "streamId":"a".repeat(32), "sequence":12, "calls":12, "restoredCalls":3,
+                "failedCalls":1, "startedAt":now-1200,
+                "tokens":{"input":320000,"output":12400,"cacheRead":256000,"cacheWrite":18000,"reasoning":2100},
+                "days":{day:{"cost":0.0862,"complete":true,"calls":9}},
+                "latest":{"model":"deepseek-v4.1-flash","respondedAt":now-3,"duration":6.2,"speed":38.4,
+                    "tokens":{"input":18000,"output":238,"cacheRead":17000,"cacheWrite":0,"reasoning":90},
+                    "limits":[{"label":"tokens","percent":56,"resetsAt":now+1800}],
+                    "cacheExpiresAt":now+270},
+                "environment":{"skills":["aster.repo","aster.shell","review"],"availableSkills":12,
+                    "mcpServers":["docs"],"effort":"high"}
+            }}});
+            if mode == "hud-unknown" {
+                update["used"] = json!(0);
+                update["size"] = json!(0);
+                update["cost"] = Value::Null;
+                update["_meta"]["aster"]["usageAvailable"] = json!(false);
+                update["_meta"]["aster"]["hud"]["tokens"] = json!({});
+                update["_meta"]["aster"]["hud"]["latest"] = json!({});
+            }
+        }
         // Use the production notification parser, not direct display strings.
         let mut controller = Controller::new(state, None, false);
         controller.message(json!({
             "method": "session/update",
             "params": {"sessionId": "session-current", "update": update}
         }));
+        if let Some((category, selection)) = match mode {
+            "context-system" => Some(("system_prompt", 0)),
+            "context-messages" => Some(("messages", 4)),
+            "context-output" => Some(("output", 7)),
+            _ => None,
+        } {
+            controller.input("/context".into());
+            for _ in 0..selection {
+                controller.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            }
+            let actions = controller.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            let Action::Request {
+                method,
+                params,
+                pending,
+            } = actions.into_iter().next().unwrap()
+            else {
+                panic!("expected a context inspection request");
+            };
+            assert_eq!(method, "_aster/session/context");
+            assert_eq!(params["category"], category);
+            controller.registered(42, pending);
+            assert!(controller.message(json!({
+                "id": 42, "result": {
+                    "requestId": params["requestId"], "category": category, "key": null,
+                    "source": if category == "output" { "model_response" } else { "model_request" },
+                    "sections": preview_context_sections(category)
+                }
+            })).is_empty());
+        }
         state = controller.state;
     }
+    if mode.starts_with("hud") {
+        state.runtime_supported = true;
+        state.approval_policy = "ask".into();
+        state.runtime = json!({"reasoningLevel":"high"});
+        state.hud.host.git = Some(aster_tui::workspace_changes::GitSummary {
+            branch: "main".into(),
+            dirty: true,
+            ahead: 1,
+            modified: 3,
+            added: 1,
+            untracked: 1,
+            lines_added: 85,
+            lines_deleted: 12,
+            line_counts_available: true,
+            ..Default::default()
+        });
+        state.hud.host.memory = Some((6_442_450_944, 34_359_738_368));
+        state.hud.host.instruction_files = vec!["workspace/aster/AGENTS.md".into()];
+        if mode != "hud-unknown" {
+            state.hud.host.daily_cost = Some(1.24);
+            state.hud.host.weekly_cost = Some(8.79);
+        }
+        state.tasks = json!({
+            "steps":[{"title":"Read HUD sources","status":"completed"},
+                     {"title":"Wire native telemetry","status":"completed"},
+                     {"title":"Check narrow layouts","status":"in_progress"}],
+            "currentTask":"Check narrow layouts",
+            "jobs":[{"title":"Review TUI layout","status":"running","elapsedSeconds":65},
+                    {"title":"Check ACP usage","status":"done","elapsedSeconds":23}]
+        });
+        match mode {
+            "hud-full" | "hud-unknown" | "hud-monochrome" => state.hud.configure("full").unwrap(),
+            "hud-compact" => state.hud.configure("compact").unwrap(),
+            "hud-zh" => state.hud.configure("set language zh").unwrap(),
+            "hud-settings" => state.open(Overlay::Hud),
+            _ => {}
+        }
+        state.monochrome = mode == "hud-monochrome";
+    }
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-    terminal
+    let mut hits = ui::HitAreas::default();
+    let mut buffer = terminal
         .draw(|frame| {
-            ui::draw(frame, &mut state);
+            hits = ui::draw(frame, &mut state);
         })
-        .unwrap();
-    let buffer = terminal.backend().buffer();
+        .unwrap()
+        .buffer
+        .clone();
+    if let Some(request) = state.terminal_image.take_request() {
+        assert!(state.terminal_image.complete(request.render()));
+        buffer = terminal
+            .draw(|frame| hits = ui::draw(frame, &mut state))
+            .unwrap()
+            .buffer
+            .clone();
+    }
+    let mut copied_selection = None;
+    if selecting_text {
+        let context = mode.starts_with("context-");
+        let composer = mode == "selection-compose";
+        let area = if context {
+            hits.context_content
+                .expect("selected context text viewport")
+        } else if composer {
+            hits.composer_text
+        } else if state.overlay.is_some() {
+            hits.text_regions
+                .iter()
+                .find(|region| region.id == 2)
+                .expect("selected detail viewport")
+                .area
+        } else {
+            hits.transcript
+        };
+        let find = |needle: &str, after: bool| {
+            for y in area.y..area.bottom() {
+                let mut text = String::new();
+                let mut continuation = 0;
+                for x in area.x..area.right() {
+                    if continuation > 0 {
+                        continuation -= 1;
+                        continue;
+                    }
+                    let symbol = buffer[(x, y)].symbol();
+                    text.push_str(symbol);
+                    continuation = symbol.width().saturating_sub(1);
+                }
+                if let Some(byte) = text.find(needle) {
+                    return (
+                        area.x
+                            + text[..byte].width() as u16
+                            + if after { needle.width() as u16 } else { 0 },
+                        y,
+                    );
+                }
+            }
+            panic!("selection preview missing {needle:?}");
+        };
+        let (first, last) = match mode {
+            "context-system" => ("You are Aster,", "run checks."),
+            "context-messages" => ("User:", "42"),
+            "context-output" => ("\"message\":", "查看正文已接上。"),
+            "selection-chat" => ("Drag to copy", "中文 and 👩‍💻."),
+            "selection-tool" | "selection-tools" => ("Copied tool output:", "second line kept"),
+            "selection-compose" => ("拖选就复制", "保留这行草稿"),
+            "selection-help" => ("Send / queue", "while working"),
+            "selection-diagnostics" => ("Diagnostic output:", "second line"),
+            _ => panic!("selection preview requires a text fixture"),
+        };
+        let start = find(first, false);
+        let end = find(last, true);
+        let mut controller = Controller::new(state, None, false);
+        for (kind, at) in [
+            (MouseEventKind::Down(MouseButton::Left), start),
+            (MouseEventKind::Drag(MouseButton::Left), end),
+            (MouseEventKind::Up(MouseButton::Left), end),
+        ] {
+            let mouse = MouseEvent {
+                kind,
+                column: at.0,
+                row: at.1,
+                modifiers: KeyModifiers::NONE,
+            };
+            let actions = if context {
+                controller
+                    .context_mouse(Some(area), mouse)
+                    .expect("context pointer was handled")
+            } else if composer {
+                assert!(controller.composer_mouse(hits.composer_text, mouse));
+                if kind == MouseEventKind::Up(MouseButton::Left) {
+                    controller.copy_composer_selection()
+                } else {
+                    vec![]
+                }
+            } else {
+                let outcome = controller.reading_mouse(&hits.text_regions, mouse);
+                assert!(outcome.handled && outcome.click.is_none());
+                outcome
+                    .copy
+                    .map(|text| vec![Action::CopySelection { text, cut: false }])
+                    .unwrap_or_default()
+            };
+            if kind == MouseEventKind::Up(MouseButton::Left) {
+                let [Action::CopySelection { text, cut: false }] = actions.as_slice() else {
+                    panic!("expected selection auto-copy");
+                };
+                assert!(text.starts_with(first) && text.ends_with(last));
+                copied_selection = Some(text.clone());
+                // Model a successful writer completion without touching the clipboard.
+                controller.state.confirm_copy(text.chars().count());
+            } else {
+                assert!(actions.is_empty());
+            }
+            terminal
+                .draw(|frame| hits = ui::draw(frame, &mut controller.state))
+                .unwrap();
+        }
+        state = controller.state;
+        buffer = terminal
+            .draw(|frame| hits = ui::draw(frame, &mut state))
+            .unwrap()
+            .buffer
+            .clone();
+    }
+    let native_images: Vec<_> = hits
+        .context_grid
+        .into_iter()
+        .map(|area| {
+            json!({
+                "x": area.x, "y": area.y, "columns": area.width, "rows": area.height,
+                "sixel": buffer.cell((area.x, area.y)).unwrap().symbol(),
+            })
+        })
+        .collect();
     let mut cells = Vec::new();
     for row in buffer.content.chunks(width as usize) {
         let mut continuation = 0;
         let mut previous_fg = String::new();
         let mut previous_bg = String::new();
         for cell in row {
+            if cell.skip || cell.symbol().contains('\x1b') {
+                cells.push(json!({"text":"", "fg":color(cell.fg, "#e1e1e1"),
+                    "bg":color(cell.bg, "#141414"), "bold":false}));
+                continuation = 0;
+                continue;
+            }
             if continuation > 0 {
                 cells.push(json!({"text":"", "fg":previous_fg, "bg":previous_bg, "bold":false}));
                 continuation -= 1;
                 continue;
             }
-            previous_fg = color(cell.fg, "#e1e1e1");
-            previous_bg = color(cell.bg, "#141414");
+            let (foreground, background) =
+                if cell.modifier.contains(ratatui::style::Modifier::REVERSED) {
+                    (cell.bg, cell.fg)
+                } else {
+                    (cell.fg, cell.bg)
+                };
+            previous_fg = color(foreground, "#e1e1e1");
+            previous_bg = color(background, "#141414");
             continuation = cell.symbol().width().saturating_sub(1);
             cells.push(
                 json!({"text":cell.symbol(),"fg":previous_fg,"bg":previous_bg,
@@ -397,8 +789,16 @@ fn main() {
         "{}",
         json!({
             "width":width,"height":height,"cells":cells,
-            "source":"offline preview", "mode":mode,
+            "nativeImages":native_images,"cellPixels":{"width":10,"height":23},
+            "source":"offline preview", "mode":requested_mode,
+            "selectionCopy":copied_selection,
+            "composer":{"x":hits.composer.x,"y":hits.composer.y,
+                "width":hits.composer.width,"height":hits.composer.height},
+            "hud":hits.hud_rows.iter().map(|(area, command)| json!({"x":area.x,"y":area.y,"width":area.width,"command":command})).collect::<Vec<_>>(),
             "usageSource":if has_sample_usage { "synthetic ACP notification" } else { "none" }
+            ,"contentSource":if matches!(mode, "context-system" | "context-messages" | "context-output") {
+                "synthetic context RPC response"
+            } else { "none" }
         })
     );
 }

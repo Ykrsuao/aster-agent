@@ -34,6 +34,15 @@ def write_config(path: Path, content: str) -> Path:
     return path
 
 
+def test_first_run_can_open_the_in_app_model_picker(workspace):
+    assert resolve_tui_model(workspace, allow_unselected=True) == ""
+
+
+def test_multiple_aliases_can_be_chosen_inside_aster(workspace):
+    write_config(workspace / ".aster/llm_config.yaml", "models:\n  one: {}\n  two: {}\n")
+    assert resolve_tui_model(workspace, allow_unselected=True) == ""
+
+
 def test_project_default_overrides_user_and_does_not_need_model_registry(workspace, tmp_path):
     write_config(tmp_path / "user/settings.yaml", "tui:\n  default_model: user-model\n")
     write_config(workspace / ".aster/settings.yaml", "tui:\n  default_model: project-model\n")

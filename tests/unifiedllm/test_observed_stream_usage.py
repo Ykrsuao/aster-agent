@@ -121,6 +121,7 @@ async def test_observed_stream_keeps_provider_usage_and_explicit_configuration(
     assert response.content == "streamed answer"
     assert response.usage is not None
     assert response.usage.input_tokens_reported is usage_available
+    assert response.usage.output_tokens_reported is usage_available
     # This route has registered pricing. Exercise cost availability through
     # the actual SDK/LiteLLM wrapper, including observed-stream aggregation.
     assert response.usage.cost_known is usage_available

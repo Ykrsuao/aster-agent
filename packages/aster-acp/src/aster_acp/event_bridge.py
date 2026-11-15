@@ -4,7 +4,6 @@
 
 import asyncio
 import logging
-import math
 import re
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
@@ -37,7 +36,12 @@ from aster.agents.summarization import summary_fork_active
 from aster.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from aster.events import LLMCallEnd, LLMCallStart, LLMResponse, PythonOutput
 from aster.interactive import AgentMessage, Done, NeedInput, Waiting
+from aster.llm_types import LLMUsage
+from aster.runtime.hooks import hooks_scope
 from aster.unifiedllm.streaming import observe_stream
+from aster_acp._context import ContextObserver, RequestComposition, capture_output
+from aster_acp._gateway_usage import GatewayUsage, Observation, connection
+from aster_acp._hud import HudMetrics
 from aster_acp._prompt import PromptProgress, current_prompt
 from aster_acp._streaming_reply import ReplyStream
 from aster_acp._tasks import TaskTracker
@@ -132,11 +136,21 @@ class ACPEventBridge:
         # Partial stdout/stderr of a cancelled cell, shown on its card when
         # fail_open_tools closes it.
         self._cancelled_output: dict[str, str] = {}
-        self._cost_usd = 0.0
-        self._cost_complete = True
+        self._hud = HudMetrics(
+            event for event in agent.event_manager.all_events() if isinstance(event, LLMResponse)
+        )
+        self._gateway = GatewayUsage()
+        self._gateway_results: dict[int, Observation] = {}
+        self._gateway_active: Observation | None = None
+        self._context_requests: dict[tuple[str, int], RequestComposition] = {}
+        self._context_usage: tuple[LLMUsage | None, RequestComposition | None, str] | None = None
+        self._context_output: list[dict[str, Any]] = []
+        self._context_client = agent.llm
         self._prompt_progress: PromptProgress | None = None
         self._reply_stream: ReplyStream | None = None
         self._unsubscribers: list[Callable[[], None]] = [
+            agent.event_manager.intercept("llm_call", self._observe_gateway_usage),
+            agent.event_manager.intercept("llm_call", self._observe_context),
             agent.event_manager.intercept("llm_call", self._stream_reply),
             agent.event_manager.on("AgentMessage", self._on_agent_message),
             agent.event_manager.on("ToolCallEvent", self._on_tool_call),
@@ -150,6 +164,9 @@ class ACPEventBridge:
             agent.event_manager.on("TerminalCommandFinished", self._on_terminal_finished),
         ]
         self._pump_task = asyncio.create_task(self._pump(), name="aster-acp-events")
+        self._gateway_poll_task = asyncio.create_task(
+            self._poll_gateway_usage(), name="aster-acp-gateway-usage"
+        )
         self._tasks_poll_task = (
             asyncio.create_task(self._poll_tasks(), name="aster-acp-tasks")
             if structured_progress
@@ -159,6 +176,32 @@ class ACPEventBridge:
     def task_snapshot(self) -> dict[str, Any]:
         """Return actual plan state and background handles for the task inspector."""
         return self._tasks.snapshot(self._tasks_wait_reason)
+
+    def inspect_context(
+        self, request_id: str, category: str, key: str | None = None
+    ) -> dict[str, Any]:
+        """Read a captured request; never rebuild a prompt or call the model."""
+        request = self._context_usage[1] if self._context_usage else None
+        if (
+            self._closed
+            or self.agent.llm is not self._context_client
+            or request is None
+            or request.request_id != request_id
+        ):
+            raise ValueError(
+                "That request is no longer available. Reopen /context for the latest request."
+            )
+        if category == "output":
+            if key is not None:
+                raise ValueError("Model output does not have an input block key.")
+            return {
+                "requestId": request_id,
+                "category": "output",
+                "key": None,
+                "source": "model_response",
+                "sections": self._context_output,
+            }
+        return request.inspect(category, key)
 
     async def stop_task(self, job_id: str) -> dict[str, Any]:
         stopped = await self._tasks.stop(job_id)
@@ -196,6 +239,26 @@ class ACPEventBridge:
             await asyncio.sleep(0.5)
             if self._prompt_progress is not None or self.agent.queue_manager.jobs():
                 self.refresh_tasks()
+
+    async def _poll_gateway_usage(self) -> None:
+        while True:
+            await asyncio.sleep(30)
+            await self._refresh_gateway_usage()
+
+    async def _refresh_gateway_usage(self) -> None:
+        active = self._gateway_active
+        if active is None or connection(self.agent.llm) != active.account.connection:
+            return
+        facts = await self._gateway.refresh(active.account)
+        if (
+            facts is not None
+            and self._gateway_active is active
+            and connection(self.agent.llm) == active.account.connection
+            and any(self._hud.latest.get(key) != value for key, value in facts.items())
+        ):
+            self._hud.latest.update(facts)
+            self._hud.sequence += 1
+            self.refresh_usage()
 
     def _enqueue(self, update: Any) -> None:
         if not self._closed:
@@ -274,6 +337,7 @@ class ACPEventBridge:
         finally:
             self._reply_stream = None
             self._prompt_progress = None
+            self._context_requests.clear()
             current_prompt.reset(token)
 
     def _on_agent_message(self, event: EventBase) -> None:
@@ -350,6 +414,38 @@ class ACPEventBridge:
         except BaseException:
             stream.interrupt()
             raise
+
+    async def _observe_gateway_usage(self, ctx: Any, nxt: Any) -> Any:
+        source = connection(getattr(ctx, "client", None), getattr(ctx, "params", None))
+        result = await nxt(ctx)
+        if (
+            source is not None
+            and source
+            == connection(getattr(result, "client", None), getattr(result, "params", None))
+            and isinstance(result.response, LLMResponse)
+        ):
+            observation = await self._gateway.enrich(result.response, source)
+            if observation is not None:
+                self._gateway_results[id(result.response)] = observation
+                while len(self._gateway_results) > 128:
+                    self._gateway_results.pop(next(iter(self._gateway_results)))
+        return result
+
+    async def _observe_context(self, ctx: Any, nxt: Any) -> Any:
+        method = getattr(getattr(ctx.runtime, "_current_method", None), "__name__", "")
+        if ctx.agent is not self.agent or method != "handle" or summary_fork_active():
+            return await nxt(ctx)
+        observer = ContextObserver(self.agent)
+        with hooks_scope(observer):
+            result = await nxt(ctx)
+        if observer.request is not None and result.response is not None:
+            # The runtime records this exact response after middleware returns.
+            # A generation ID alone cannot distinguish its successive tool turns.
+            key = (observer.request.generation_id, id(result.response))
+            self._context_requests[key] = observer.request
+            while len(self._context_requests) > 8:
+                self._context_requests.pop(next(iter(self._context_requests)))
+        return result
 
     def _on_tool_call(self, event: EventBase) -> None:
         if isinstance(event, ToolCallEvent) and (progress := self._current_progress()) is not None:
@@ -506,11 +602,17 @@ class ACPEventBridge:
         self.refresh_tasks()
 
     def _on_llm_start(self, event: EventBase) -> None:
+        if isinstance(event, LLMCallStart):
+            self._hud.start(event)
         if isinstance(event, LLMCallStart) and (progress := self._current_progress()) is not None:
             progress.on_model_start(event)
             self.set_wait_reason("Waiting for model")
 
     def _on_llm_end(self, event: EventBase) -> None:
+        if isinstance(event, LLMCallEnd):
+            self._hud.end(event)
+            if not event.success:
+                self.refresh_usage()
         if isinstance(event, LLMCallEnd) and (progress := self._current_progress()) is not None:
             progress.on_model_end(event)
             self.set_wait_reason("Processing response" if event.success else "Model call stopped")
@@ -518,44 +620,65 @@ class ACPEventBridge:
     def _on_llm_response(self, event: EventBase) -> None:
         if not isinstance(event, LLMResponse):
             return
-        if (progress := self._current_progress()) is not None:
+        if not summary_fork_active() and (progress := self._current_progress()) is not None:
             progress.model_response()
         usage = event.usage
-        if usage is None:
-            self._cost_complete = False
-            self._enqueue(
-                UsageUpdate(
-                    session_update="usage_update",
-                    used=0,
-                    size=0,
-                    field_meta={"aster": {"usageAvailable": False}},
-                )
-            )
-            return
-        if (
-            not usage.cost_known
-            or isinstance(usage.cost_usd, bool)
-            or not isinstance(usage.cost_usd, (int, float))
-            or not math.isfinite(usage.cost_usd)
-            or usage.cost_usd < 0
-        ):
-            self._cost_complete = False
-        elif self._cost_complete:
-            self._cost_usd += usage.cost_usd
-            self._cost_complete = math.isfinite(self._cost_usd)
-        context_window = getattr(self.agent.llm, "context_window", None)
-        size = (
-            max(context_window, usage.input_tokens) if context_window and context_window > 0 else 0
+        if self.agent.llm is not self._context_client:
+            self._context_client = self.agent.llm
+            self._context_usage = None
+            self._context_output = []
+            self._hud.latest = {}
+            self._gateway_active = None
+        request = self._context_requests.pop((event.generation_id, id(event)), None)
+        foreground = request is not None or not event.generation_id
+        observation = self._gateway_results.pop(id(event), None)
+        self._hud.response(
+            event, foreground=foreground, facts=observation.facts if observation else None
         )
+        if foreground:
+            self._gateway_active = observation
+            self._context_usage = (usage, request, event.model_name)
+            self._context_output = capture_output(event) if request is not None else []
+        self.refresh_usage()
+
+    def refresh_usage(self) -> None:
+        """Publish observed counters even before a foreground request is available."""
+        if self.agent.llm is not self._context_client:
+            self._context_client = self.agent.llm
+            self._context_usage = None
+            self._context_output = []
+            self._hud.latest = {}
+            self._gateway_active = None
+            self._hud.sequence += 1
+        # Background summaries and helper methods count toward cost, but cannot
+        # replace the foreground request's usage or composition.
+        usage, request, model = self._context_usage or (None, None, "")
+        available = usage is not None and usage.input_tokens_reported
+        context_window = (
+            request.window_tokens if request else getattr(self.agent.llm, "context_window", None)
+        )
+        size = (
+            max(context_window, usage.input_tokens)
+            if context_window and context_window > 0 and usage is not None
+            else 0
+        )
+        metadata: dict[str, Any] = {"hud": self._hud.snapshot(self.agent)}
+        if self._context_usage is None:
+            metadata["usagePending"] = True
+        if not available:
+            metadata["usageAvailable"] = False
+        if request is not None:
+            metadata["context"] = request.metadata(usage, model)
+            metadata["context"]["outputAvailable"] = True
         self._enqueue(
             UsageUpdate(
                 session_update="usage_update",
-                used=usage.input_tokens if usage.input_tokens_reported else 0,
-                size=size if usage.input_tokens_reported else 0,
-                cost=Cost(amount=self._cost_usd, currency="USD") if self._cost_complete else None,
-                field_meta=(
-                    None if usage.input_tokens_reported else {"aster": {"usageAvailable": False}}
-                ),
+                used=usage.input_tokens if available and usage is not None else 0,
+                size=size if available else 0,
+                cost=Cost(amount=self._hud.cost, currency="USD")
+                if self._hud.cost is not None
+                else None,
+                field_meta={"aster": metadata} if metadata else None,
             )
         )
 
@@ -711,12 +834,18 @@ class ACPEventBridge:
     async def close(self) -> None:
         if self._closed:
             return
+        self._gateway_poll_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await self._gateway_poll_task
+        await self._gateway.close()
+        self._gateway_results.clear()
         if self._tasks_poll_task is not None:
             self._tasks_poll_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._tasks_poll_task
         for unsubscribe in self._unsubscribers:
             unsubscribe()
+        self._context_requests.clear()
         # A turn that ended before its PythonOutput — an exception escaping the
         # strategy, say — leaves cards in_progress and their source retained.
         # fail_open_tools is otherwise only reached from session/cancel, so this

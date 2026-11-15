@@ -4,7 +4,9 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::layout::Rect;
 use serde_json::{json, Value};
 use tui_textarea::{CursorMove, TextArea};
@@ -52,6 +54,10 @@ pub enum Pending {
         generation: u64,
         operation: RuntimeRequest,
     },
+    ModelSelection {
+        generation: u64,
+        operation: ModelSelectionRequest,
+    },
     List(ListPurpose),
     Checkpoints {
         source: String,
@@ -85,7 +91,7 @@ pub enum Pending {
         generation: u64,
     },
     NewClose,
-    OldClose,
+    OldClose(String),
     ExitClose,
 }
 
@@ -95,6 +101,13 @@ pub enum RuntimeRequest {
     Configure,
     Tasks,
     StopTask,
+    Context { view: u64 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelSelectionRequest {
+    List,
+    Select,
 }
 
 #[derive(Debug)]
@@ -164,6 +177,8 @@ struct Backup {
     title: String,
     usage: String,
     ratio: Option<f64>,
+    context: Option<crate::context::ContextSnapshot>,
+    hud: crate::hud::Telemetry,
     cost: String,
     commands: Vec<Command>,
     scroll: usize,
@@ -753,7 +768,18 @@ impl Controller {
         self.pending.insert(id, pending);
     }
 
+    fn reset_model_selection(&mut self) {
+        self.state.model_selection = crate::state::ModelSelection {
+            generation: self.state.model_selection.generation.wrapping_add(1),
+            ..Default::default()
+        };
+        if self.state.overlay == Some(Overlay::Models) {
+            self.state.overlay = None;
+        }
+    }
+
     pub fn failure(&mut self, message: impl Into<String>) -> Vec<Action> {
+        self.reset_model_selection();
         let message = clean(&message.into());
         self.fatal_error = Some(message.clone());
         self.state.notice(&message, true);
@@ -794,6 +820,7 @@ impl Controller {
                 .notice("Stop the running task before reconnecting.", false);
             return vec![];
         }
+        self.reset_model_selection();
         self.state.queue_paused = true;
         self.state.phase = Phase::Connecting;
         self.state.status = "Reconnecting… recovered messages remain paused".into();
@@ -803,6 +830,7 @@ impl Controller {
     }
 
     pub fn reconnected(&mut self) -> Vec<Action> {
+        self.reset_model_selection();
         self.pending.clear();
         self.starting = true;
         self.exiting = false;
@@ -1277,6 +1305,13 @@ impl Controller {
         {
             self.state.escape_confirmation = None;
         }
+        if self
+            .state
+            .copy_confirmation
+            .is_some_and(|confirmation| now >= confirmation.expires_at)
+        {
+            self.state.copy_confirmation = None;
+        }
         if self.deadline.is_some_and(|time| now >= time) {
             let message = if self.exiting {
                 "Closing timed out; stopping the backend.".to_owned()
@@ -1342,6 +1377,8 @@ impl Controller {
     }
 
     fn reset_conversation(&mut self) {
+        self.state.reading_selection.clear();
+        self.state.reading_cache.clear();
         self.state.escape_confirmation = None;
         self.state.rewind_points.clear();
         self.state.rewind_loading = false;
@@ -1368,8 +1405,12 @@ impl Controller {
         self.state.expanded_entries.clear();
         self.state.title.clear();
         self.state.usage.clear();
+        self.state.hud.reset_session();
         self.state.cost.clear();
         self.state.context_ratio = None;
+        self.state.context_snapshot = None;
+        self.state.context_expanded = false;
+        self.state.context_view = None;
         self.state.last_elapsed = None;
         self.state.started = None;
         self.state.scroll = 0;
@@ -1414,6 +1455,8 @@ impl Controller {
             title: self.state.title.clone(),
             usage: self.state.usage.clone(),
             ratio: self.state.context_ratio,
+            context: self.state.context_snapshot.clone(),
+            hud: self.state.hud.telemetry.clone(),
             cost: self.state.cost.clone(),
             commands: self.state.commands.clone(),
             scroll: self.state.scroll,
@@ -1465,6 +1508,8 @@ impl Controller {
             self.state.title = backup.title;
             self.state.usage = backup.usage;
             self.state.context_ratio = backup.ratio;
+            self.state.context_snapshot = backup.context;
+            self.state.hud.telemetry = backup.hud;
             self.state.cost = backup.cost;
             self.state.commands = backup.commands;
             self.state.scroll = backup.scroll;
@@ -1524,11 +1569,21 @@ impl Controller {
         let argument = argument.trim();
         match command {
             "/model" => {
+                if self.state.model.is_empty() && self.state.model_selection.supported {
+                    if !argument.is_empty() {
+                        return self.model_selection_request(
+                            ModelSelectionRequest::Select,
+                            json!({"model":argument}),
+                        );
+                    }
+                    self.state.open(Overlay::Models);
+                    return self.model_selection_request(ModelSelectionRequest::List, json!({}));
+                }
                 return if argument.is_empty() {
                     self.open_runtime(Overlay::Models)
                 } else {
                     self.configure(json!({"model":argument}))
-                }
+                };
             }
             "/mode" => {
                 return if argument.is_empty() {
@@ -1606,6 +1661,26 @@ impl Controller {
             }
             "/logs" => {
                 self.state.open(Overlay::Diagnostics);
+                return vec![];
+            }
+            "/context" => {
+                if !argument.is_empty() && argument != "all" {
+                    self.state.notice("Usage: /context [all]", false);
+                    return vec![];
+                }
+                self.state.context_expanded = argument == "all";
+                self.state.open(Overlay::Context);
+                return vec![];
+            }
+            "/hud" => {
+                match argument {
+                    "" => self.state.open(Overlay::Hud),
+                    "info" => self.state.open(Overlay::HudInfo),
+                    _ => match self.state.hud.configure(argument) {
+                        Ok(()) => self.state.status = "HUD settings saved".into(),
+                        Err(error) => self.state.notice(format!("HUD: {error:#}"), true),
+                    },
+                }
                 return vec![];
             }
             "/cancel" => return self.cancel(),
@@ -2224,6 +2299,69 @@ impl Controller {
         self.runtime_request("_aster/session/runtime", json!({}), RuntimeRequest::Inspect)
     }
 
+    fn model_selection_request(
+        &mut self,
+        operation: ModelSelectionRequest,
+        params: Value,
+    ) -> Vec<Action> {
+        self.state.model_selection.generation =
+            self.state.model_selection.generation.wrapping_add(1);
+        self.state.model_selection.loading = true;
+        self.state.model_selection.error.clear();
+        let method = match operation {
+            ModelSelectionRequest::List => "_aster/models/list",
+            ModelSelectionRequest::Select => "_aster/models/select",
+        };
+        vec![request(
+            method,
+            params,
+            Pending::ModelSelection {
+                generation: self.state.model_selection.generation,
+                operation,
+            },
+        )]
+    }
+
+    fn model_selection_response(
+        &mut self,
+        generation: u64,
+        operation: ModelSelectionRequest,
+        value: &Value,
+    ) -> Vec<Action> {
+        if generation != self.state.model_selection.generation {
+            return vec![];
+        }
+        self.state.model_selection.loading = false;
+        if let Some(error) = value.get("error") {
+            let reason = clean(
+                error["data"]["reason"]
+                    .as_str()
+                    .or_else(|| error["message"].as_str())
+                    .unwrap_or("Model selection failed."),
+            );
+            self.state.model_selection.error = reason.clone();
+            self.state.notice(reason, true);
+            return vec![];
+        }
+        let result = &value["result"];
+        match operation {
+            ModelSelectionRequest::List => {
+                self.state.runtime["models"] = result["models"].clone();
+            }
+            ModelSelectionRequest::Select => {
+                let Some(model) = result["model"].as_str().filter(|model| !model.is_empty()) else {
+                    self.state.notice("Backend returned no model.", true);
+                    return vec![];
+                };
+                self.state.model = clean(model);
+                self.state.overlay = None;
+                let purpose = self.startup.take().unwrap_or(ListPurpose::StartNew);
+                return self.list(purpose);
+            }
+        }
+        vec![]
+    }
+
     fn configure(&mut self, params: Value) -> Vec<Action> {
         if !self.state.runtime_supported || self.state.session_id.is_none() {
             self.state.notice("Session settings are not available until preparation finishes with a supported backend.", false);
@@ -2252,6 +2390,11 @@ impl Controller {
                 self.state.model = model;
                 self.state.usage.clear();
                 self.state.context_ratio = None;
+                self.state.context_snapshot = None;
+                self.state.context_view = None;
+                self.state.hud.telemetry.latest = crate::hud::Latest::default();
+                self.state.hud.telemetry.environment.effort.clear();
+                self.state.hud.telemetry.environment.provider.clear();
             }
         }
         if let Some(mode) = value["mode"].as_str() {
@@ -2283,6 +2426,10 @@ impl Controller {
             .as_deref()
             .is_some_and(|target| target != session)
         {
+            // Content belongs to the visible inspector and is never replayed.
+            if matches!(operation, RuntimeRequest::Context { .. }) {
+                return vec![];
+            }
             if let Some(backup) = self.backup.as_mut() {
                 // Replay increments the visible generation while the source
                 // remains open. Its requests issued just before load still
@@ -2317,6 +2464,20 @@ impl Controller {
     }
 
     fn apply_runtime_response(&mut self, operation: RuntimeRequest, value: &Value) -> Vec<Action> {
+        if let RuntimeRequest::Context { view } = operation {
+            if self.state.overlay != Some(Overlay::Context) {
+                return vec![];
+            }
+            if let Some(current) = self
+                .state
+                .context_view
+                .as_mut()
+                .filter(|current| current.generation == view)
+            {
+                current.complete(value);
+            }
+            return vec![];
+        }
         if let Some(error) = value.get("error") {
             self.state.notice(
                 error["message"]
@@ -2346,6 +2507,9 @@ impl Controller {
                     },
                     false,
                 );
+            }
+            RuntimeRequest::Context { .. } => {
+                unreachable!("context content is handled independently")
             }
         }
         if operation == RuntimeRequest::Configure && self.operation == "configure" {
@@ -2387,6 +2551,98 @@ impl Controller {
         }
         self.state.open(Overlay::Tasks);
         self.runtime_request("_aster/session/tasks", json!({}), RuntimeRequest::Tasks)
+    }
+
+    pub fn open_context_selection(&mut self, index: usize) -> Vec<Action> {
+        if self.state.overlay != Some(Overlay::Context)
+            || self.state.context_view.is_some()
+            || self.state.session_id.is_none()
+        {
+            return vec![];
+        }
+        let Some(snapshot) = &self.state.context_snapshot else {
+            return vec![];
+        };
+        let (Some(request_id), Some(target)) = (
+            snapshot.request_id.clone(),
+            snapshot
+                .targets(self.state.context_expanded)
+                .get(index)
+                .cloned(),
+        ) else {
+            return vec![];
+        };
+        let params = target.params(&request_id);
+        self.state.selected = index;
+        self.state.context_view_generation = self.state.context_view_generation.wrapping_add(1);
+        let view = self.state.context_view_generation;
+        self.state.context_view = Some(crate::context_detail::View::new(
+            request_id,
+            target,
+            view,
+            self.state.detail_scroll,
+        ));
+        self.state.context_reveal_selection = false;
+        self.state.terminal_image.hide();
+        self.runtime_request(
+            "_aster/session/context",
+            params,
+            RuntimeRequest::Context { view },
+        )
+    }
+
+    fn context_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        if let Some(view) = self.state.context_view.as_mut() {
+            match key.code {
+                KeyCode::Esc | KeyCode::Left => {
+                    self.state.detail_scroll = view.return_scroll;
+                    self.state.context_view = None;
+                }
+                KeyCode::PageUp => view.scroll = view.scroll.saturating_sub(10),
+                KeyCode::PageDown => view.scroll = view.scroll.saturating_add(10),
+                KeyCode::Up => view.scroll = view.scroll.saturating_sub(1),
+                KeyCode::Down => view.scroll = view.scroll.saturating_add(1),
+                KeyCode::Home => view.scroll = 0,
+                KeyCode::End => view.scroll = usize::MAX,
+                _ => {}
+            }
+            return vec![];
+        }
+        let count = self.state.choices().len();
+        match key.code {
+            KeyCode::Tab => {
+                self.state.context_expanded = !self.state.context_expanded;
+                self.state.selected = self
+                    .state
+                    .selected
+                    .min(self.state.choices().len().saturating_sub(1));
+                self.state.detail_scroll = 0;
+            }
+            KeyCode::Enter | KeyCode::Right if key.kind != KeyEventKind::Repeat => {
+                return self.open_context_selection(self.state.selected);
+            }
+            KeyCode::Up | KeyCode::Down if count > 0 => {
+                self.state.selected = if key.code == KeyCode::Up {
+                    self.state.selected.saturating_sub(1)
+                } else {
+                    self.state.selected.saturating_add(1).min(count - 1)
+                };
+                self.state.context_reveal_selection = true;
+            }
+            KeyCode::Up => self.state.detail_scroll = self.state.detail_scroll.saturating_sub(1),
+            KeyCode::Down => self.state.detail_scroll = self.state.detail_scroll.saturating_add(1),
+            KeyCode::PageUp => {
+                self.state.detail_scroll = self.state.detail_scroll.saturating_sub(10)
+            }
+            KeyCode::PageDown => {
+                self.state.detail_scroll = self.state.detail_scroll.saturating_add(10)
+            }
+            KeyCode::Home => self.state.detail_scroll = 0,
+            KeyCode::End => self.state.detail_scroll = u16::MAX,
+            KeyCode::Esc => self.state.overlay = None,
+            _ => {}
+        }
+        vec![]
     }
 
     fn stop_task(&mut self, id: &str) -> Vec<Action> {
@@ -2979,6 +3235,13 @@ impl Controller {
         if matches!(pending, Pending::Runtime { .. }) {
             return self.runtime_response(pending, &value);
         }
+        if let Pending::ModelSelection {
+            generation,
+            operation,
+        } = pending
+        {
+            return self.model_selection_response(generation, operation, &value);
+        }
         if matches!(pending, Pending::TreeSearch { .. }) {
             return self.tree_search_response(pending, &value);
         }
@@ -3093,8 +3356,17 @@ impl Controller {
                 self.state.attachments_supported = result["_meta"]["aster"]["attachments"] == true;
                 self.state.image_input_supported = caps["promptCapabilities"]["image"] == true;
                 self.state.runtime_supported = result["_meta"]["aster"]["runtimeControls"] == true;
+                self.state.model_selection.supported =
+                    result["_meta"]["aster"]["modelSelection"] == true;
                 self.state.tasks_supported = result["_meta"]["aster"]["structuredProgress"] == true;
                 self.state.phase = Phase::Ready;
+                if self.state.model.is_empty() && self.state.model_selection.supported {
+                    self.operation = "";
+                    self.deadline = None;
+                    self.state.status = "Choose a configured model to start".into();
+                    self.state.open(Overlay::Models);
+                    return self.model_selection_request(ModelSelectionRequest::List, json!({}));
+                }
                 if let Some(purpose) = self.startup.take() {
                     self.list(purpose)
                 } else {
@@ -3496,7 +3768,7 @@ impl Controller {
                     vec![request(
                         "session/close",
                         json!({"sessionId":previous}),
-                        Pending::OldClose,
+                        Pending::OldClose(previous),
                     )]
                 } else {
                     self.prepared()
@@ -3512,10 +3784,13 @@ impl Controller {
                     self.prepare_session()
                 }
             }
-            Pending::OldClose => self.prepared(),
+            Pending::OldClose(_) => self.prepared(),
             Pending::ExitClose => vec![Action::Exit],
             Pending::Steer { .. } => unreachable!("steering responses are handled independently"),
             Pending::Runtime { .. } => unreachable!("runtime responses are handled independently"),
+            Pending::ModelSelection { .. } => {
+                unreachable!("model selection responses are handled independently")
+            }
             Pending::TreeCleanup { .. } => unreachable!("tree cleanup is handled independently"),
             Pending::TreeSearch { .. } => unreachable!("tree searches are handled independently"),
         }
@@ -3613,6 +3888,9 @@ impl Controller {
         if self.opening.as_deref().is_some_and(|target| target != id)
             && self.state.session_id.as_deref() == Some(id)
         {
+            self.state
+                .hud
+                .account(&params["update"]["_meta"]["aster"]["hud"]);
             // Original-session jobs may change while the target is replayed.
             // Retain their latest state for the commit guard and rollback.
             if let Some(backup) = self.backup.as_mut() {
@@ -3628,6 +3906,16 @@ impl Controller {
         }
         let expected = self.opening.as_ref().or(self.state.session_id.as_ref());
         if expected.is_some_and(|expected| expected != id) {
+            // The source runtime can still report billable work until its close completes.
+            if self
+                .pending
+                .values()
+                .any(|pending| matches!(pending, Pending::OldClose(source) if source == id))
+            {
+                self.state
+                    .hud
+                    .account(&params["update"]["_meta"]["aster"]["hud"]);
+            }
             return;
         }
         let update = &params["update"];
@@ -3726,17 +4014,21 @@ impl Controller {
                 }
             }
             "usage_update" => {
-                let available = update["_meta"]["aster"]["usageAvailable"] != false;
-                let used = update["used"].as_u64().filter(|_| available);
-                let size = update["size"].as_u64().filter(|size| *size > 0);
+                self.state.hud.ingest(&update["_meta"]["aster"]["hud"]);
+                let snapshot = crate::context::ContextSnapshot::from_usage_update(update);
+                let used = snapshot.used;
+                let size = snapshot.window;
+                let pending = update["_meta"]["aster"]["usagePending"] == true;
                 self.state.context_ratio = used
                     .zip(size)
                     .map(|(used, size)| (used as f64 / size as f64).clamp(0.0, 1.0));
                 self.state.usage = match (used, size) {
+                    _ if pending => String::new(),
                     (Some(used), Some(size)) => format!("{used} / {size}"),
                     (Some(used), None) => format!("{used} tokens"),
                     (None, _) => "context n/a".into(),
                 };
+                self.state.context_snapshot = (!pending).then_some(snapshot);
                 let amount = update["cost"]["amount"]
                     .as_f64()
                     .filter(|amount| amount.is_finite() && *amount >= 0.0);
@@ -3744,11 +4036,19 @@ impl Controller {
                     .as_str()
                     .map(clean)
                     .filter(|currency| !currency.trim().is_empty());
-                self.state.cost = match (amount, currency) {
-                    (Some(amount), Some(currency)) if currency == "USD" => {
+                let subtotal = if update["_meta"]["aster"]["hud"]["costComplete"] == false {
+                    update["_meta"]["aster"]["hud"]["costSubtotal"]
+                        .as_f64()
+                        .filter(|amount| amount.is_finite() && *amount >= 0.0)
+                } else {
+                    None
+                };
+                self.state.cost = match (amount, currency, subtotal) {
+                    (Some(amount), Some(currency), _) if currency == "USD" => {
                         format!("${amount:.4}")
                     }
-                    (Some(amount), Some(currency)) => format!("{amount:.4} {currency}"),
+                    (Some(amount), Some(currency), _) => format!("{amount:.4} {currency}"),
+                    (_, _, Some(amount)) => format!("≥${amount:.4}"),
                     _ => "cost n/a".into(),
                 };
             }
@@ -3817,12 +4117,78 @@ impl Controller {
             self.state.composer.cancel_pointer();
             return false;
         }
-        crate::composer::handle_mouse(
+        let handled = crate::composer::handle_mouse(
             &mut self.state.editor,
             &mut self.state.composer,
             area,
             mouse,
-        )
+        );
+        if handled && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.state.reading_selection.clear();
+        }
+        handled
+    }
+
+    pub fn copy_composer_selection(&self) -> Vec<Action> {
+        if self.state.overlay.is_some() {
+            return vec![];
+        }
+        self.selected_text()
+            .map(|text| vec![Action::CopySelection { text, cut: false }])
+            .unwrap_or_default()
+    }
+
+    pub fn reading_mouse(
+        &mut self,
+        regions: &[crate::text_selection::Region],
+        mouse: MouseEvent,
+    ) -> crate::text_selection::Outcome {
+        let scope = self.state.text_scope();
+        let outcome = self.state.reading_selection.mouse(&scope, regions, mouse);
+        if let Some((target, top, max)) = outcome.scroll {
+            match target {
+                crate::text_selection::ScrollTarget::Transcript => {
+                    self.state.scroll = max.saturating_sub(top)
+                }
+                crate::text_selection::ScrollTarget::Detail => {
+                    self.state.detail_scroll = top.min(u16::MAX as usize) as u16
+                }
+            }
+        }
+        if outcome.handled {
+            self.state.exit_confirmation = None;
+            self.state.escape_confirmation = None;
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                if let Some(view) = self.state.context_view.as_mut() {
+                    view.clear_selection();
+                }
+            }
+        }
+        outcome
+    }
+
+    /// Selecting in the read-only context reader copies on release without editing the draft.
+    pub fn context_mouse(&mut self, area: Option<Rect>, mouse: MouseEvent) -> Option<Vec<Action>> {
+        let view = self.state.context_view.as_mut()?;
+        let Some(area) = area.filter(|_| self.state.overlay == Some(Overlay::Context)) else {
+            view.cancel_pointer();
+            return None;
+        };
+        if !view.mouse(area, mouse) {
+            return None;
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.state.reading_selection.clear();
+        }
+        self.state.exit_confirmation = None;
+        self.state.escape_confirmation = None;
+        Some(if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
+            view.selected_text()
+                .map(|text| vec![Action::CopySelection { text, cut: false }])
+                .unwrap_or_default()
+        } else {
+            vec![]
+        })
     }
 
     fn selected_text(&self) -> Option<String> {
@@ -3865,29 +4231,13 @@ impl Controller {
     }
 
     pub fn paste(&mut self, text: String) {
+        self.state.reading_selection.clear();
         self.state.composer.cancel_pointer();
         self.state.exit_confirmation = None;
         self.state.escape_confirmation = None;
         let text = clean(&text.replace("\r\n", "\n").replace('\r', "\n"));
         if let Some(overlay) = self.state.overlay {
-            if matches!(
-                overlay,
-                Overlay::Commands
-                    | Overlay::Sessions
-                    | Overlay::Drafts
-                    | Overlay::Tools
-                    | Overlay::Search
-                    | Overlay::Queue
-                    | Overlay::Rewind
-                    | Overlay::Tree
-                    | Overlay::Files
-                    | Overlay::Attachments
-                    | Overlay::Models
-                    | Overlay::Modes
-                    | Overlay::Permissions
-                    | Overlay::Tasks
-            ) || (overlay == Overlay::Changes && !self.state.conversation_changes)
-            {
+            if self.state.overlay_searchable() {
                 self.state.query.push_str(&text.replace('\n', " "));
                 self.state.selected = 0;
                 if overlay == Overlay::Tree {
@@ -3917,11 +4267,50 @@ impl Controller {
             return vec![];
         }
         self.state.composer.cancel_pointer();
+        if let Some(view) = self.state.context_view.as_mut() {
+            view.cancel_pointer();
+        }
+        self.state.reading_selection.cancel_pointer();
         if key.code != KeyCode::Esc || key.modifiers != KeyModifiers::NONE {
             self.state.escape_confirmation = None;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if ctrl && !alt && matches!(key.code, KeyCode::Char('c' | 'C' | 'x' | 'X')) {
+            if let Some(text) = self
+                .state
+                .reading_selection
+                .selected_text(&self.state.text_scope())
+            {
+                self.state.exit_confirmation = None;
+                return if key.kind == KeyEventKind::Repeat
+                    || matches!(key.code, KeyCode::Char('x' | 'X'))
+                {
+                    vec![]
+                } else {
+                    vec![Action::CopySelection { text, cut: false }]
+                };
+            }
+        }
+        if ctrl
+            && !alt
+            && self.state.overlay == Some(Overlay::Context)
+            && matches!(key.code, KeyCode::Char('c' | 'C'))
+        {
+            if let Some(text) = self
+                .state
+                .context_view
+                .as_ref()
+                .and_then(|view| view.selected_text())
+            {
+                self.state.exit_confirmation = None;
+                return if key.kind == KeyEventKind::Repeat {
+                    vec![]
+                } else {
+                    vec![Action::CopySelection { text, cut: false }]
+                };
+            }
+        }
         if ctrl
             && !alt
             && self.state.overlay.is_none()
@@ -4094,6 +4483,7 @@ impl Controller {
             KeyCode::PageUp => self.state.scroll = self.state.scroll.saturating_add(10),
             KeyCode::PageDown => self.state.scroll = self.state.scroll.saturating_sub(10),
             KeyCode::End if ctrl => {
+                self.state.reading_selection.clear();
                 self.state.scroll = 0;
                 self.state.search_highlight.clear();
                 self.state.focus_entry = None;
@@ -4182,6 +4572,13 @@ impl Controller {
 
     fn send_editor(&mut self, text: String) -> Vec<Action> {
         let command = text.split_whitespace().next().unwrap_or("");
+        if self.state.model.is_empty() && !command.starts_with('/') {
+            self.state.notice(
+                "Choose a configured model with /model before sending. Your draft is kept.",
+                false,
+            );
+            return vec![];
+        }
         if self.state.attachment_loading && !command.starts_with('/') {
             self.state.notice(
                 "Reading the selected attachment. Your draft is kept until it is ready.",
@@ -4222,6 +4619,8 @@ impl Controller {
                     | "/queue"
                     | "/search"
                     | "/logs"
+                    | "/context"
+                    | "/hud"
                     | "/cancel"
                     | "/status"
                     | "/attach"
@@ -4312,6 +4711,9 @@ impl Controller {
     }
 
     fn overlay_key(&mut self, overlay: Overlay, key: KeyEvent) -> Vec<Action> {
+        if overlay == Overlay::Context {
+            return self.context_key(key);
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if overlay == Overlay::Attachments
             && key.code == KeyCode::Char('z')
@@ -4412,6 +4814,14 @@ impl Controller {
             KeyCode::Enter => {
                 if let Some(choice) = self.state.choices().get(self.state.selected).cloned() {
                     match overlay {
+                        Overlay::Hud => {
+                            if choice.value == "info" {
+                                self.state.open(Overlay::HudInfo);
+                            } else if let Err(error) = self.state.hud.configure(&choice.value) {
+                                self.state.notice(format!("HUD: {error:#}"), true);
+                                self.state.hud.problem = Some(format!("{error:#}"));
+                            }
+                        }
                         Overlay::Rollback => return self.prepare_rollback(&choice.value),
                         Overlay::RollbackConfirm | Overlay::UndoConfirm => {
                             if choice.value == "apply" {
@@ -4442,6 +4852,12 @@ impl Controller {
                             }
                         }
                         Overlay::Files => return self.attach_file(choice.value),
+                        Overlay::Models if self.state.model.is_empty() => {
+                            return self.model_selection_request(
+                                ModelSelectionRequest::Select,
+                                json!({"model":choice.value}),
+                            );
+                        }
                         Overlay::Models => return self.configure(json!({"model":choice.value})),
                         Overlay::Modes => return self.configure(json!({"mode":choice.value})),
                         Overlay::Permissions => {
@@ -4516,19 +4932,7 @@ impl Controller {
             KeyCode::Char(c)
                 if !ctrl
                     && !key.modifiers.contains(KeyModifiers::ALT)
-                    && (overlay != Overlay::Changes || !self.state.conversation_changes)
-                    && matches!(
-                        overlay,
-                        Overlay::Commands
-                            | Overlay::Sessions
-                            | Overlay::Drafts
-                            | Overlay::Tools
-                            | Overlay::Queue
-                            | Overlay::Search
-                            | Overlay::Rewind
-                            | Overlay::Tree
-                            | Overlay::Changes
-                    ) =>
+                    && self.state.overlay_searchable() =>
             {
                 self.state.query.push(c);
                 self.state.selected = 0;
@@ -4655,6 +5059,51 @@ mod tests {
             json!({"protocolVersion":1,
             "agentCapabilities":{"loadSession":true,"sessionCapabilities":{"list":{},"close":{}}}}),
         )
+    }
+
+    #[test]
+    fn initial_model_picker_does_not_inherit_the_initialize_timeout() {
+        let mut c = Controller::new(State::new("C:/work".into(), "".into(), false), None, false);
+        c.paste("kept draft".into());
+        // A completed initialize request must not time out a later human choice.
+        c.deadline = Some(Instant::now() - Duration::from_millis(1));
+        let actions = reply(
+            &mut c,
+            Pending::Initialize,
+            json!({
+                "protocolVersion":1,
+                "agentCapabilities":{
+                    "loadSession":true,
+                    "sessionCapabilities":{"list":{},"close":{}}
+                },
+                "_meta":{"aster":{"modelSelection":true}}
+            }),
+        );
+        assert!(c.tick().is_empty());
+        assert_eq!(c.state.phase, Phase::Ready);
+        assert_eq!(c.state.overlay, Some(Overlay::Models));
+        let Action::Request { pending, .. } = actions.into_iter().next().unwrap() else {
+            panic!("expected configured model listing");
+        };
+        reply(&mut c, pending, json!({"models":[{"id":"official"}]}));
+        assert!(c.deadline.is_none());
+        assert!(c.tick().is_empty());
+        assert!(c.fatal_error.is_none());
+        assert_eq!(c.state.editor.lines(), &["kept draft"]);
+
+        let actions = c.input("/model official".into());
+        let Action::Request { pending, .. } = actions.into_iter().next().unwrap() else {
+            panic!("expected configured model selection");
+        };
+        let actions = reply(&mut c, pending, json!({"model":"official"}));
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::Request {
+                method: "session/list",
+                ..
+            }]
+        ));
+        assert!(c.deadline.is_some(), "session startup still has a timeout");
     }
 
     fn running_with_steering() -> Controller {
@@ -6045,7 +6494,7 @@ mod tests {
         );
         assert_eq!(c.state.editor.lines(), &["  second 中文", "next  ", ""]);
         assert_eq!(c.state.session_id.as_deref(), Some("fork"));
-        assert!(reply(&mut c, Pending::OldClose, json!({})).is_empty());
+        assert!(reply(&mut c, Pending::OldClose("old".into()), json!({})).is_empty());
         assert!(c.state.queued.is_empty());
         assert_eq!(
             c.state
@@ -6133,7 +6582,7 @@ mod tests {
             },
             json!({}),
         );
-        assert!(reply(&mut c, Pending::OldClose, json!({})).is_empty());
+        assert!(reply(&mut c, Pending::OldClose("old".into()), json!({})).is_empty());
         assert_eq!(c.state.editor.lines(), &["typed during restore"]);
         assert_eq!(c.state.editor.cursor(), cursor);
         assert_eq!(c.state.queued.front().unwrap(), "  second 中文\nnext  \n");
@@ -7321,7 +7770,7 @@ mod tests {
                 },
                 json!({}),
             );
-            reply(&mut c, Pending::OldClose, json!({}));
+            reply(&mut c, Pending::OldClose("old".into()), json!({}));
             if persistent {
                 assert_eq!(c.state.editor.lines(), &["previous input"]);
                 c.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));

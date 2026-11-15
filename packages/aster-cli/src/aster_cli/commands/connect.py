@@ -64,7 +64,7 @@ class ConnectCommand(click.Command):
 )
 @click.option(
     "--provider",
-    help="Connection preset: nvidia, hub (NVIDIA Inference Hub), openai, anthropic, google, openrouter, or custom.",
+    help="Installed LiteLLM provider (for example deepseek, azure, bedrock), an Aster preset, or custom. The interactive menu lists every provider.",
 )
 @click.option("--as", "alias", help="Local model alias to save (otherwise prompted).")
 @click.option("--endpoint", help="API base URL, or full decision request URL (otherwise prompted).")

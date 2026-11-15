@@ -321,7 +321,10 @@ class InstrumentationHooks(Protocol):
             method_name: Name of the method being generated
             messages: The rendered messages list (OpenAI format)
             generation_id: ID of the current generation session
-            **kwargs: Additional context
+            **kwargs: Additional context, including context_stats and the neutral
+                rendered_messages with block boundaries. Middleware may change
+                the final messages; boundaries apply only to unchanged content.
+                tools and output_model describe the final request's schemas.
         """
         ...
 

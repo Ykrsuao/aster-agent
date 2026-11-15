@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Terminal-native workspace rendering. Scroll positions are measured in wrapped rows.
 
+use std::hash::{DefaultHasher, Hash, Hasher};
+
 use ratatui::{
     backend::Backend,
     layout::{Alignment, Position, Rect},
@@ -15,6 +17,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::state::{clean, Entry, Overlay, Phase, State, Tool};
 use crate::terminal_image::PreviewState;
+use crate::text_selection::{self, Document, Region, RowSource, ScrollTarget};
 
 #[derive(Default)]
 pub struct HitAreas {
@@ -33,11 +36,21 @@ pub struct HitAreas {
     pub attachment_preview: Vec<(Rect, usize)>,
     /// Visible original-image actions and thumbnail cells in the attachment panel.
     pub attachment_original: Vec<Rect>,
+    /// Complete native context grid, excluding its notes and category legend.
+    pub context_grid: Option<Rect>,
+    /// Read-only context text viewport, excluding borders and the scroll indicator.
+    pub context_content: Option<Rect>,
+    /// Source-mapped text viewports, ordered from the screen fallback to the active reader.
+    pub text_regions: Vec<Region>,
+    pub overlay_area: Option<Rect>,
+    /// Native graphics must remain outside text hit testing and highlighting.
+    pub image_areas: Vec<Rect>,
     pub attachment_remove: Vec<(Rect, usize)>,
     pub attachment_overflow: Option<Rect>,
     pub attachment_undo: Option<Rect>,
     pub slash_rows: Vec<(Rect, usize)>,
     pub welcome_rows: Vec<(Rect, &'static str)>,
+    pub hud_rows: Vec<(Rect, &'static str)>,
 }
 
 #[derive(Clone, Copy)]
@@ -48,6 +61,7 @@ struct Palette {
     muted: Color,
     faint: Color,
     accent: Color,
+    suggestion: Color,
     green: Color,
     amber: Color,
     red: Color,
@@ -63,6 +77,7 @@ impl Palette {
                 muted: Color::Reset,
                 faint: Color::Reset,
                 accent: Color::Reset,
+                suggestion: Color::Reset,
                 green: Color::Reset,
                 amber: Color::Reset,
                 red: Color::Reset,
@@ -75,6 +90,7 @@ impl Palette {
             muted: Color::Rgb(128, 128, 128),
             faint: Color::Rgb(64, 64, 64),
             accent: Color::Rgb(200, 200, 200),
+            suggestion: Color::Rgb(177, 185, 249),
             green: Color::Rgb(147, 186, 133),
             amber: Color::Rgb(220, 186, 115),
             red: Color::Rgb(224, 130, 130),
@@ -92,11 +108,19 @@ impl Palette {
     fn bold(self) -> Style {
         self.text().add_modifier(Modifier::BOLD)
     }
+    fn selection(self) -> Style {
+        if matches!(self.bg, Color::Reset) {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default().fg(self.fg).bg(Color::Rgb(56, 82, 116))
+        }
+    }
 }
 
 #[derive(Clone)]
 struct Row {
     line: Line<'static>,
+    copy: Option<RowSource>,
     tool: Option<String>,
     entry: Option<usize>,
     gutter: Option<Span<'static>>,
@@ -196,56 +220,6 @@ fn pair(frame: &mut Frame, area: Rect, left: &str, right: &str, style: Style, mu
     );
 }
 
-fn usage_header(frame: &mut Frame, area: Rect, state: &State, style: Style) {
-    let available = area.width as usize;
-    let compact = available < 60;
-    let context = if let Some(ratio) = state.context_ratio {
-        if compact {
-            format!("ctx {:.0}%", ratio * 100.0)
-        } else {
-            format!("{:.0}% context", ratio * 100.0)
-        }
-    } else if state.usage.is_empty() {
-        if compact { "ctx —" } else { "context —" }.into()
-    } else if compact {
-        if let Some(tokens) = state.usage.strip_suffix(" tokens") {
-            format!("{tokens} tok")
-        } else {
-            state.usage.replacen("context ", "ctx ", 1)
-        }
-    } else {
-        state.usage.clone()
-    };
-    let cost = if state.cost.is_empty() {
-        "cost —"
-    } else {
-        &state.cost
-    };
-    // The header keeps both indicators visible on narrow terminals instead of
-    // using pair(), which deliberately drops its right side below 42 columns.
-    let separator = if available >= 12 { " · " } else { " " };
-    let cost_width = width(cost).min(available.saturating_sub(width(separator)) / 2);
-    let context_width = available.saturating_sub(width(separator) + cost_width);
-    let context = fit(&context, context_width);
-    let cost = fit(
-        cost,
-        available.saturating_sub(width(&context) + width(separator)),
-    );
-    let metrics = format!("{context}{separator}{cost}");
-    let workspace_width = available.saturating_sub(width(&metrics) + 2);
-    let workspace = if workspace_width >= 12 {
-        fit(&state.workspace, workspace_width)
-    } else {
-        String::new()
-    };
-    let gap = available.saturating_sub(width(&workspace) + width(&metrics));
-    line_at(
-        frame,
-        area,
-        Line::styled(format!("{workspace}{}{metrics}", " ".repeat(gap)), style),
-    );
-}
-
 fn markdown(text: &str, p: Palette) -> Vec<Line<'static>> {
     crate::markdown::render_transcript(
         text,
@@ -262,69 +236,26 @@ fn markdown(text: &str, p: Palette) -> Vec<Line<'static>> {
 }
 
 /// Wrap styled cells before scrolling so CJK and expanded tools share one row model.
-fn wrap(line: Line<'static>, max_width: usize) -> Vec<Line<'static>> {
-    if max_width == 0 {
-        return Vec::new();
-    }
-    let base = line.style;
-    let chars: Vec<(char, Style)> = line
-        .spans
-        .iter()
-        .flat_map(|span| {
-            span.content
-                .chars()
-                .map(move |c| (c, base.patch(span.style)))
-        })
-        .collect();
-    if chars.is_empty() {
-        return vec![Line::default().style(base)];
-    }
-    let mut rows = Vec::new();
-    let mut start = 0;
-    while start < chars.len() {
-        let mut end = start;
-        let mut used = 0;
-        let mut break_at = None;
-        while end < chars.len() {
-            let cells = chars[end].0.width().unwrap_or(0);
-            if used + cells > max_width {
-                break;
-            }
-            used += cells;
-            if chars[end].0.is_whitespace() {
-                break_at = Some(end + 1);
-            }
-            end += 1;
-        }
-        if end == start {
-            end += 1;
-        } else if end < chars.len() {
-            if let Some(boundary) = break_at.filter(|b| *b > start + 1) {
-                end = boundary;
-            }
-        }
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        for (c, style) in &chars[start..end] {
-            if let Some(last) = spans.last_mut().filter(|s| s.style == *style) {
-                last.content.to_mut().push(*c);
-            } else {
-                spans.push(Span::styled(c.to_string(), *style));
-            }
-        }
-        rows.push(Line::from(spans).style(base));
-        start = end;
-    }
-    rows
+pub(crate) fn wrap(line: Line<'static>, max_width: usize) -> Vec<Line<'static>> {
+    text_selection::wrap(line, max_width)
+        .into_iter()
+        .map(|fragment| fragment.line)
+        .collect()
 }
 
 fn append(rows: &mut Vec<Row>, line: Line<'static>, columns: usize, tool: Option<&str>) {
-    rows.extend(wrap(line, columns).into_iter().map(|line| Row {
-        line,
-        tool: tool.map(str::to_owned),
-        entry: None,
-        gutter: None,
-        toggle: None,
-    }));
+    rows.extend(
+        text_selection::wrap(line, columns)
+            .into_iter()
+            .map(|fragment| Row {
+                line: fragment.line,
+                copy: Some(fragment.source),
+                tool: tool.map(str::to_owned),
+                entry: None,
+                gutter: None,
+                toggle: None,
+            }),
+    );
 }
 
 fn append_with_gutter(
@@ -336,9 +267,13 @@ fn append_with_gutter(
     tool: Option<&str>,
 ) {
     let available = columns.saturating_sub(width(&gutter.content) + 1).max(1);
-    for (index, line) in wrap(line, available).into_iter().enumerate() {
+    for (index, fragment) in text_selection::wrap(line, available)
+        .into_iter()
+        .enumerate()
+    {
         rows.push(Row {
-            line,
+            line: fragment.line,
+            copy: Some(fragment.source),
             tool: tool.map(str::to_owned),
             entry: None,
             gutter: Some(if index == 0 {
@@ -348,6 +283,75 @@ fn append_with_gutter(
             }),
             toggle: None,
         });
+    }
+}
+
+fn row_source(row: &Row) -> RowSource {
+    row.copy.clone().unwrap_or_else(|| {
+        RowSource::whole(
+            row.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect(),
+        )
+    })
+}
+
+fn text_region(
+    state: &mut State,
+    id: u16,
+    area: Rect,
+    rows: &[Row],
+    top: usize,
+    max_top: usize,
+    scroll: Option<ScrollTarget>,
+) -> Region {
+    let mut signature = DefaultHasher::new();
+    area.width.hash(&mut signature);
+    let mut previous: Option<&RowSource> = None;
+    for row in rows {
+        row.gutter
+            .as_ref()
+            .map_or(0, |span| width(&span.content))
+            .hash(&mut signature);
+        if let Some(source) = row.copy.as_ref() {
+            source.text[source.range.clone()].hash(&mut signature);
+            source.columns.hash(&mut signature);
+            previous
+                .is_some_and(|previous| {
+                    std::sync::Arc::ptr_eq(&previous.text, &source.text)
+                        && previous.range.end == source.range.start
+                        && source.range.start > 0
+                })
+                .hash(&mut signature);
+        } else {
+            for span in &row.line.spans {
+                span.content.hash(&mut signature);
+            }
+            false.hash(&mut signature);
+        }
+        previous = row.copy.as_ref();
+    }
+    let document = state.reading_cache.get(id, signature.finish(), || {
+        Document::new(
+            rows.iter().map(|row| {
+                (
+                    row_source(row),
+                    row.gutter.as_ref().map_or(0, |span| width(&span.content)),
+                )
+            }),
+            usize::from(area.width),
+        )
+    });
+    Region {
+        id,
+        area,
+        top,
+        max_top,
+        scroll,
+        document,
+        excluded: Vec::new(),
     }
 }
 
@@ -412,7 +416,7 @@ fn diff_lines(text: &str, p: Palette) -> Vec<Line<'static>> {
                 } else {
                     p.fg
                 };
-                Line::styled(line.replace('\t', "    "), p.text().fg(color))
+                Line::styled(line.to_owned(), p.text().fg(color))
             })
             .collect()
     }
@@ -475,7 +479,7 @@ fn diff_lines(text: &str, p: Palette) -> Vec<Line<'static>> {
             rows.push(
                 Line::from(vec![
                     Span::styled(format!("{number:>4} │ "), p.muted().bg(background)),
-                    Span::styled(line.replace('\t', "    "), style),
+                    Span::styled(line.to_owned(), style),
                 ])
                 .style(style),
             );
@@ -614,6 +618,7 @@ fn transcript_rows(state: &mut State, columns: usize, p: Palette) -> Vec<Row> {
                 (Entry::Tool(previous), Entry::Tool(_)) if !previous.expanded);
         if !rows.is_empty() && !consecutive_tools {
             rows.push(Row {
+                copy: None,
                 line: Line::default(),
                 tool: None,
                 entry: None,
@@ -664,6 +669,7 @@ fn transcript_rows(state: &mut State, columns: usize, p: Palette) -> Vec<Row> {
                         format!("… {} more lines · click to expand", total - 2)
                     };
                     rows.push(Row {
+                        copy: None,
                         line: Line::styled(
                             fit(&label, columns.saturating_sub(3)),
                             p.muted().bg(background),
@@ -759,7 +765,7 @@ fn transcript_rows(state: &mut State, columns: usize, p: Palette) -> Vec<Row> {
                     for line in tool.content.lines() {
                         append_with_gutter(
                             &mut rows,
-                            Line::styled(line.replace('\t', "    "), p.muted()),
+                            Line::styled(line.to_owned(), p.muted()),
                             columns,
                             Span::styled("  │ ", p.muted()),
                             Span::styled("  │ ", p.muted()),
@@ -771,6 +777,7 @@ fn transcript_rows(state: &mut State, columns: usize, p: Palette) -> Vec<Row> {
                         let tail = rows.split_off(rows.len() - 3);
                         rows.truncate(output_start + 2);
                         rows.push(Row {
+                            copy: None,
                             line: Line::styled(
                                 fit(
                                     &format!("… {} more lines · click to expand", output_rows - 5),
@@ -797,6 +804,7 @@ fn transcript_rows(state: &mut State, columns: usize, p: Palette) -> Vec<Row> {
                     }
                     if output_rows > 8 && state.expanded_entries.contains(&index) {
                         rows.push(Row {
+                            copy: None,
                             line: Line::styled("Show less · click or Ctrl+O", p.muted()),
                             tool: None,
                             entry: None,
@@ -1551,7 +1559,7 @@ fn approval_overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut
         for line in approval.code.lines() {
             append(
                 &mut details,
-                Line::styled(line.replace('\t', "    "), panel),
+                Line::styled(line.to_owned(), panel),
                 columns,
                 None,
             );
@@ -1561,7 +1569,7 @@ fn approval_overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut
             for line in detail.lines() {
                 append(
                     &mut details,
-                    Line::styled(line.replace('\t', "    "), panel),
+                    Line::styled(line.to_owned(), panel),
                     columns,
                     None,
                 );
@@ -1657,6 +1665,7 @@ fn approval_overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut
         panel_width,
         panel_height,
     );
+    hits.overlay_area = Some(area);
     for cell in &mut frame.buffer_mut().content {
         let dimmed = match cell.fg {
             Color::Rgb(r, g, b) => Color::Rgb(r / 2, g / 2, b / 2),
@@ -1722,6 +1731,8 @@ fn approval_overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut
         &mut Vec::new(),
         &mut Vec::new(),
     );
+    hits.text_regions
+        .push(text_region(state, 3, footer_area, &footer, 0, 0, None));
     let options_bottom = footer_area.y.saturating_sub(footer_gap).max(content.y);
     let options_height = options.len().min(
         options_bottom.saturating_sub(content.y + header_height + header_gap + options_gap + 1)
@@ -1762,6 +1773,15 @@ fn approval_overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut
         &mut Vec::new(),
         &mut Vec::new(),
     );
+    hits.text_regions.push(text_region(
+        state,
+        4,
+        options_area,
+        &options,
+        options_start,
+        0,
+        None,
+    ));
     render_rows(
         frame,
         Rect::new(content.x, content.y, content.width, header_height),
@@ -1770,6 +1790,15 @@ fn approval_overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut
         &mut Vec::new(),
         &mut Vec::new(),
     );
+    hits.text_regions.push(text_region(
+        state,
+        5,
+        Rect::new(content.x, content.y, content.width, header_height),
+        &header,
+        0,
+        0,
+        None,
+    ));
     let details_y = (content.y + header_height + header_gap).min(options_area.y);
     let details_height = options_area.y.saturating_sub(details_y + options_gap);
     let viewport = render_detail(
@@ -1778,8 +1807,56 @@ fn approval_overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut
         Rect::new(content.x, details_y, content.width, details_height),
         details,
         p,
+        hits,
     );
     state.approval_page_rows = viewport.height.max(1);
+}
+
+fn context_viewport(
+    state: &mut State,
+    p: Palette,
+    columns: u16,
+    rows: u16,
+) -> crate::context::Viewport {
+    let pixels = (!state.monochrome && state.context_view.is_none())
+        .then(|| state.terminal_graphics.sixel_cell_pixels())
+        .flatten();
+    let mut viewport = crate::context::Viewport::new(
+        columns,
+        rows.saturating_sub(6),
+        state.context_snapshot.as_ref(),
+        pixels,
+    );
+    if let (Some(layout), Some(pixels), Some(snapshot)) =
+        (viewport.native, pixels, state.context_snapshot.as_ref())
+    {
+        let background = match p.panel {
+            Color::Rgb(r, g, b) => [r, g, b],
+            _ => [32; 3],
+        };
+        let preview = match state.context_grid.get(
+            snapshot,
+            layout,
+            p.text().bg(p.panel),
+            p.muted().bg(p.panel),
+            background,
+        ) {
+            Ok(source) => state.terminal_image.get_or_request(
+                source,
+                layout.columns,
+                layout.rows,
+                pixels,
+                background,
+            ),
+            Err(error) => Err(error),
+        };
+        if matches!(preview, Ok(PreviewState::Pending | PreviewState::Ready(_))) {
+            return viewport;
+        }
+    }
+    state.terminal_image.hide();
+    viewport.native = None;
+    viewport
 }
 
 fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas) {
@@ -1791,23 +1868,7 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
         return;
     }
     let screen = frame.area();
-    let searchable = matches!(
-        kind,
-        Overlay::Commands
-            | Overlay::Sessions
-            | Overlay::Drafts
-            | Overlay::Tools
-            | Overlay::Search
-            | Overlay::Queue
-            | Overlay::Rewind
-            | Overlay::Tree
-            | Overlay::Files
-            | Overlay::Attachments
-            | Overlay::Models
-            | Overlay::Modes
-            | Overlay::Permissions
-            | Overlay::Tasks
-    ) || (kind == Overlay::Changes && !state.conversation_changes);
+    let searchable = state.overlay_searchable();
     let compact = matches!(
         kind,
         Overlay::Commands
@@ -1821,6 +1882,7 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
             | Overlay::Models
             | Overlay::Modes
             | Overlay::Permissions
+            | Overlay::Hud
     );
     let choices = state.choices();
     state.selected = state.selected.min(choices.len().saturating_sub(1));
@@ -1837,10 +1899,13 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
     } else {
         0
     });
-    let panel_width = screen
-        .width
-        .saturating_sub(horizontal_margin * 2)
-        .min(if compact { 84 } else { 112 });
+    let panel_width = screen.width.saturating_sub(horizontal_margin * 2).min(
+        if compact || kind == Overlay::Context {
+            84
+        } else {
+            112
+        },
+    );
     let metadata_rows = if kind == Overlay::Rewind {
         2
     } else {
@@ -1849,7 +1914,43 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
             Overlay::Search | Overlay::Queue | Overlay::Tree
         ))
     };
-    let desired_height = if compact {
+    let context_viewport = if kind == Overlay::Context {
+        Some(context_viewport(
+            state,
+            p,
+            panel_width.saturating_sub(4),
+            max_height,
+        ))
+    } else {
+        None
+    };
+    let desired_height = if kind == Overlay::Context && state.context_view.is_some() {
+        max_height
+    } else if kind == Overlay::Context {
+        let mut rows = Vec::new();
+        for line in crate::context::lines(
+            state.context_snapshot.as_ref(),
+            &state.model,
+            crate::context::Browser {
+                expanded: state.context_expanded,
+                selected: state.selected,
+            },
+            context_viewport.expect("context viewport was prepared"),
+            state.monochrome,
+            p.text().bg(p.panel),
+            p.muted().bg(p.panel),
+        )
+        .lines
+        {
+            append(
+                &mut rows,
+                line,
+                panel_width.saturating_sub(4) as usize,
+                None,
+            );
+        }
+        rows.len().saturating_add(2).min(u16::MAX as usize) as u16
+    } else if compact {
         5 + metadata_rows
             + u16::from(draft_warning)
             + if kind == Overlay::Tree {
@@ -1867,6 +1968,7 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
         panel_width,
         panel_height,
     );
+    hits.overlay_area = Some(area);
     // Keep the conversation visible behind a focused, consistently colored panel.
     for cell in &mut frame.buffer_mut().content {
         let dimmed = match cell.fg {
@@ -1893,13 +1995,16 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
         Overlay::Changes => " Changes ",
         Overlay::Help => " Keyboard shortcuts ",
         Overlay::Diagnostics => " Diagnostics ",
+        Overlay::Hud => " HUD settings ",
+        Overlay::HudInfo => " HUD metrics and data sources ",
+        Overlay::Context => " Context usage ",
         Overlay::Search => " Search conversation ",
         Overlay::Queue => " Message queue ",
         Overlay::Rewind => " Rewind conversation ",
         Overlay::Tree => " Conversation tree ",
         Overlay::Files => " Attach workspace files ",
         Overlay::Attachments => " Attached context ",
-        Overlay::Models => " Session model ",
+        Overlay::Models => " Switch model · /model ",
         Overlay::Modes => " Session mode ",
         Overlay::Permissions => " Execution permissions ",
         Overlay::Approval => " Review execution ",
@@ -1908,13 +2013,51 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
         Overlay::RollbackConfirm => " Review file rollback ",
         Overlay::UndoConfirm => " Undo file rollback ",
     };
+    let title = if kind == Overlay::Context {
+        state.context_view.as_ref().map_or_else(
+            || title.to_owned(),
+            |view| {
+                format!(
+                    " {} ",
+                    fit(&view.target.label(), panel_width.saturating_sub(4) as usize)
+                )
+            },
+        )
+    } else {
+        title.to_owned()
+    };
     let block = Block::default()
         .style(panel)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(muted.fg(p.faint))
         .title(Span::styled(title, panel.add_modifier(Modifier::BOLD)))
-        .title_bottom(Line::styled(" Esc close ", muted).alignment(Alignment::Right));
+        .title_bottom(
+            Line::styled(
+                if kind == Overlay::Context && state.context_view.is_some() && panel_width >= 66 {
+                    " Drag select · release to copy · PgUp/PgDn scroll · Esc back "
+                } else if kind == Overlay::Context
+                    && state.context_view.is_some()
+                    && panel_width >= 28
+                {
+                    " Select to copy · Esc back "
+                } else if kind == Overlay::Context && state.context_view.is_some() {
+                    " Esc back "
+                } else if kind == Overlay::Context && !choices.is_empty() && panel_width >= 56 {
+                    " ↑↓ choose · Enter view · Tab details · Esc close "
+                } else if kind == Overlay::Context && !choices.is_empty() && panel_width >= 26 {
+                    " Enter view · Esc close "
+                } else if kind == Overlay::Context && panel_width >= 56 {
+                    " Tab details · PgUp/PgDn scroll · Esc close "
+                } else if kind == Overlay::Context && panel_width >= 26 {
+                    " Tab details · Esc close "
+                } else {
+                    " Esc close "
+                },
+                muted,
+            )
+            .alignment(Alignment::Right),
+        );
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let mut content = inset(inner, 1, 0);
@@ -1971,6 +2114,7 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
             Overlay::Files => "Find a file by path…",
             Overlay::Attachments => "Filter attached files and images…",
             Overlay::Models => "Choose a configured model…",
+            Overlay::Hud => "Find a HUD setting…",
             Overlay::Tasks => "Find a plan step or background job…",
             _ => "What would you like to do?",
         };
@@ -2007,6 +2151,88 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
         content.height = content.height.saturating_sub(2);
     }
     if content.height == 0 {
+        return;
+    }
+    if kind == Overlay::Context {
+        if state.context_view.is_some() {
+            render_context_content(frame, state, content, p, hits);
+            return;
+        }
+        let context_viewport = context_viewport.expect("context viewport was prepared");
+        let mut rows = Vec::new();
+        let context_rows = crate::context::lines(
+            state.context_snapshot.as_ref(),
+            &state.model,
+            crate::context::Browser {
+                expanded: state.context_expanded,
+                selected: state.selected,
+            },
+            context_viewport,
+            state.monochrome,
+            panel,
+            muted,
+        );
+        let mut target_rows = Vec::new();
+        for (index, line) in context_rows.lines.into_iter().enumerate() {
+            let start = rows.len();
+            append(&mut rows, line, content.width as usize, None);
+            if let Some((_, target)) = context_rows.targets.iter().find(|(row, _)| *row == index) {
+                target_rows.extend((start..rows.len()).map(|row| (row, *target)));
+            }
+        }
+        if state.context_reveal_selection {
+            let height = usize::from(content.height)
+                .saturating_sub(usize::from(rows.len() > usize::from(content.height)));
+            if let Some((row, _)) = target_rows
+                .iter()
+                .find(|(_, target)| *target == state.selected)
+            {
+                let start = usize::from(state.detail_scroll);
+                if *row < start {
+                    state.detail_scroll = (*row).min(u16::MAX as usize) as u16;
+                } else if *row >= start + height {
+                    state.detail_scroll = row
+                        .saturating_sub(height.saturating_sub(1))
+                        .min(u16::MAX as usize) as u16;
+                }
+            }
+            state.context_reveal_selection = false;
+        }
+        let viewport = render_detail(frame, state, content, rows, p, hits);
+        let start = usize::from(state.detail_scroll);
+        for (row, target) in target_rows {
+            if row >= start && row - start < usize::from(viewport.height) {
+                hits.choice_rows.push((
+                    Rect::new(
+                        viewport.x,
+                        viewport.y + (row - start) as u16,
+                        viewport.width,
+                        1,
+                    ),
+                    target,
+                ));
+            }
+        }
+        if let (Some(grid), Some(first_row)) =
+            (context_viewport.native, context_viewport.first_grid_row())
+        {
+            let start = usize::from(state.detail_scroll);
+            if first_row >= start
+                && first_row - start + usize::from(grid.rows) <= usize::from(viewport.height)
+                && grid.columns <= viewport.width
+            {
+                if let Some(image) = state.terminal_image.ready() {
+                    let area = Rect::new(
+                        viewport.x,
+                        viewport.y + (first_row - start) as u16,
+                        grid.columns,
+                        grid.rows,
+                    );
+                    image.render(area, frame.buffer_mut());
+                    hits.context_grid = Some(area);
+                }
+            }
+        }
         return;
     }
     let footer = Rect::new(content.x, content.bottom() - 1, content.width, 1);
@@ -2048,11 +2274,11 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
         }
         Overlay::Attachments if selected_image => "Enter open original · Del remove · ↑↓ choose",
         Overlay::Attachments => "↑↓ choose · Del remove attachment",
-        Overlay::Models | Overlay::Modes | Overlay::Permissions => {
-            "↑↓ choose · Enter apply to this session"
-        }
+        Overlay::Models => "↑↓ choose · Enter switch · Esc close",
+        Overlay::Modes | Overlay::Permissions => "↑↓ choose · Enter apply to this session",
         Overlay::Approval => "↑↓ choose · Enter confirm · Esc reject · PgDn code",
         Overlay::Tasks => "↑↓ select · Ctrl+X stop job · Ctrl+R refresh",
+        Overlay::Hud => "↑↓ choose · Enter apply · Esc close",
         Overlay::Rollback => "↑↓ scope · Enter preview · Esc cancel",
         Overlay::RollbackConfirm | Overlay::UndoConfirm => {
             "↑↓ choose · Enter confirm · PgDn preview · Esc cancel"
@@ -2254,7 +2480,7 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
                 for line in diff_lines(&preview, p) {
                     append(&mut rows, line, content.width as usize, None);
                 }
-                render_detail(frame, state, content, rows, p);
+                render_detail(frame, state, content, rows, p, hits);
             }
         }
         Overlay::Commands
@@ -2271,6 +2497,7 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
         | Overlay::Modes
         | Overlay::Permissions
         | Overlay::Tasks
+        | Overlay::Hud
         | Overlay::Changes
             if searchable =>
         {
@@ -2409,10 +2636,19 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
                     "No messages in this conversation tree yet. Send a message to begin."
                 } else if kind == Overlay::Rewind && state.query.is_empty() {
                     "No saved rewind points. Older messages without a checkpoint cannot be restored; new messages will appear here."
-                } else if matches!(
-                    kind,
-                    Overlay::Models | Overlay::Modes | Overlay::Permissions
-                ) {
+                } else if kind == Overlay::Models {
+                    if state.model_selection.loading
+                        || (!state.model.is_empty() && state.runtime["models"].is_null())
+                    {
+                        "Loading configured models…"
+                    } else if state.model.is_empty() && !state.model_selection.error.is_empty() {
+                        &state.model_selection.error
+                    } else if !state.query.is_empty() {
+                        "No configured models match this search."
+                    } else {
+                        "No models configured. Add a model to llm_config.yaml, then restart Aster."
+                    }
+                } else if matches!(kind, Overlay::Modes | Overlay::Permissions) {
                     "Waiting for the session's available settings…"
                 } else if kind == Overlay::Tasks {
                     "No plan steps or background jobs have been reported yet."
@@ -2671,7 +2907,7 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
                                 for line in clean(text).lines() {
                                     append(
                                         &mut rows,
-                                        Line::styled(line.replace('\t', "    "), panel),
+                                        Line::styled(line.to_owned(), panel),
                                         detail.width as usize,
                                         None,
                                     );
@@ -2914,7 +3150,7 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
                     for line in tool.content.lines() {
                         append(
                             &mut rows,
-                            Line::styled(line.replace('\t', "    "), panel),
+                            Line::styled(line.to_owned(), panel),
                             detail.width as usize,
                             None,
                         );
@@ -2923,7 +3159,7 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
                         append(&mut rows, line, detail.width as usize, None);
                     }
                 }
-                let viewport = render_detail(frame, state, detail, rows, p);
+                let viewport = render_detail(frame, state, detail, rows, p, hits);
                 let start = state.detail_scroll as usize;
                 if let Some((first_row, columns, image_rows)) = native_image {
                     // Never draw a partial Sixel across the filter, list, footer,
@@ -2943,6 +3179,7 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
                         if let Some(image) = state.terminal_image.ready() {
                             image.render(area, frame.buffer_mut());
                             hits.attachment_original.push(area);
+                            hits.image_areas.push(area);
                         }
                     }
                 }
@@ -2993,7 +3230,19 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
                     None,
                 );
             }
-            render_detail(frame, state, content, rows, p);
+            render_detail(frame, state, content, rows, p, hits);
+        }
+        Overlay::HudInfo => {
+            let mut rows = Vec::new();
+            for line in state.hud.diagnostics().lines() {
+                append(
+                    &mut rows,
+                    Line::styled(clean(line), muted),
+                    content.width as usize,
+                    None,
+                );
+            }
+            render_detail(frame, state, content, rows, p, hits);
         }
         Overlay::Diagnostics => {
             let mut rows = Vec::new();
@@ -3015,7 +3264,7 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
                     None,
                 );
             }
-            render_detail(frame, state, content, rows, p);
+            render_detail(frame, state, content, rows, p, hits);
         }
         Overlay::Help => {
             let help = [
@@ -3042,12 +3291,22 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
                 ("/retry", "Restore interrupted input for review"),
                 ("/drafts", "Choose saved input to restore"),
                 ("/model /mode", "Choose the session model and work mode"),
+                (
+                    "/hud [info]",
+                    "Configure status rows or inspect live metrics",
+                ),
+                (
+                    "/context [all]",
+                    "Inspect context cells and token categories",
+                ),
                 ("/permissions", "Set approval for generated execution"),
                 ("Alt+T /tasks", "Inspect plan steps and background jobs"),
                 ("Alt+Enter", "Insert a new line"),
                 ("Ctrl+V / right click", "Paste clipboard text or an image"),
-                ("Click / drag", "Place the cursor / select draft text"),
-                ("Ctrl+C / Ctrl+X", "Copy / cut selection with no panel open"),
+                ("Click in input", "Place the cursor"),
+                ("Drag visible text", "Select text; release to copy"),
+                ("Ctrl+C", "Copy selected text anywhere"),
+                ("Ctrl+X", "Cut selected input with no panel open"),
                 ("Ctrl+Z", "Undo text or the last attachment removal"),
                 ("↑ / ↓ at edge", "Recall input / return to draft"),
                 ("Esc", "Stop a task / close an open panel"),
@@ -3056,10 +3315,7 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
                 ("Esc twice (empty)", "Choose a message to edit and rewind"),
                 ("/rewind", "Restore conversation; keep files unchanged"),
                 ("/tree", "Browse branches and continue from a message"),
-                (
-                    "Ctrl+C twice",
-                    "Exit within 2s (panel or no draft selection)",
-                ),
+                ("Ctrl+C twice", "Exit within 2s with no text selected"),
                 ("Ctrl+D", "Exit with an empty draft"),
                 ("", ""),
                 ("WORKSPACE", ""),
@@ -3107,7 +3363,7 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
                     None,
                 );
             }
-            render_detail(frame, state, content, rows, p);
+            render_detail(frame, state, content, rows, p, hits);
         }
         _ => {}
     }
@@ -3119,6 +3375,7 @@ fn render_detail(
     area: Rect,
     rows: Vec<Row>,
     p: Palette,
+    hits: &mut HitAreas,
 ) -> Rect {
     if area.width == 0 || area.height == 0 {
         return Rect::new(area.x, area.y, 0, 0);
@@ -3140,6 +3397,15 @@ fn render_detail(
         &mut Vec::new(),
         &mut Vec::new(),
     );
+    hits.text_regions.push(text_region(
+        state,
+        2,
+        viewport,
+        &rows,
+        usize::from(state.detail_scroll),
+        max,
+        Some(ScrollTarget::Detail),
+    ));
     if has_scroll && area.height > 1 {
         let label = format!(
             "{}–{} of {} lines",
@@ -3154,6 +3420,49 @@ fn render_detail(
         );
     }
     viewport
+}
+
+fn render_context_content(
+    frame: &mut Frame,
+    state: &mut State,
+    area: Rect,
+    p: Palette,
+    hits: &mut HitAreas,
+) {
+    let Some(view) = state.context_view.as_mut() else {
+        return;
+    };
+    let panel = p.text().bg(p.panel);
+    let muted = p.muted().bg(p.panel);
+    let total = view.rows(usize::from(area.width), panel, muted).len();
+    let has_scroll = total > usize::from(area.height);
+    let height = area
+        .height
+        .saturating_sub(u16::from(has_scroll && area.height > 1));
+    hits.context_content = Some(Rect::new(area.x, area.y, area.width, height));
+    view.scroll = view.scroll.min(total.saturating_sub(usize::from(height)));
+    let start = view.scroll;
+    let selected = p.selection();
+    for index in 0..usize::from(height).min(total.saturating_sub(start)) {
+        line_at(
+            frame,
+            Rect::new(area.x, area.y + index as u16, area.width, 1),
+            view.painted_row(start + index, selected)
+                .expect("visible content row"),
+        );
+    }
+    if has_scroll && area.height > 1 {
+        let label = format!(
+            "{}–{} of {total} lines",
+            start + 1,
+            (start + usize::from(height)).min(total)
+        );
+        line_at(
+            frame,
+            Rect::new(area.x, area.bottom() - 1, area.width, 1),
+            Line::styled(fit(&label, usize::from(area.width)), muted),
+        );
+    }
 }
 
 fn shortcuts(frame: &mut Frame, area: Rect, items: &[(&str, &str)], p: Palette) {
@@ -3443,6 +3752,11 @@ fn slash_menu(frame: &mut Frame, state: &State, body: Rect, p: Palette, hits: &m
     hits.tool_rows.retain(|(rect, _)| !rect.intersects(area));
     hits.detail_rows.retain(|(rect, _)| !rect.intersects(area));
     hits.welcome_rows.retain(|(rect, _)| !rect.intersects(area));
+    for region in &mut hits.text_regions {
+        if region.id == text_selection::TRANSCRIPT {
+            region.excluded.push(area);
+        }
+    }
     for (offset, (line, index)) in lines.iter().skip(start).take(visible).enumerate() {
         let rect = Rect::new(area.x, area.y + offset as u16 + 1, area.width, 1);
         frame.render_widget(Block::default().style(line.style), rect);
@@ -3490,11 +3804,18 @@ pub fn render<B: Backend>(
 pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
     let p = Palette::new(state.monochrome);
     let screen = frame.area();
+    let context_image = state.overlay == Some(Overlay::Context)
+        && state.context_view.is_none()
+        && state
+            .context_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.used.is_some() && snapshot.window.is_some());
     if state.monochrome
         || state.terminal_graphics.sixel_cell_pixels().is_none()
-        || !state.selected_attachment().is_some_and(|attachment| {
-            attachment.is_image() && attachment.mime_type() == "image/png"
-        })
+        || !(context_image
+            || state.selected_attachment().is_some_and(|attachment| {
+                attachment.is_image() && attachment.mime_type() == "image/png"
+            }))
         || screen.width < 4
         || screen.height < 3
     {
@@ -3519,24 +3840,7 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
         available.width.saturating_sub(rail_space),
         available.height,
     );
-    let top = u16::from(spacious);
-    let header_height = if spacious { 3 } else { 1 };
-    usage_header(
-        frame,
-        Rect::new(inner.x, top, inner.width, 1),
-        state,
-        p.muted(),
-    );
-    let editor_width = inner.width.saturating_sub(2);
-    let editor_width = editor_width.saturating_sub(if editor_width >= 12 { 4 } else { 0 });
-    let composer_height =
-        (crate::composer::row_count(&state.editor, editor_width as usize).min(8) as u16 + 2)
-            .min(screen.height.saturating_sub(header_height + 4))
-            .max(1);
-    let footer_height = if spacious { 3 } else { 1 };
-    let composer_y = screen
-        .height
-        .saturating_sub(composer_height + footer_height);
+    let header_height = u16::from(spacious);
     let queue_height = u16::from(!state.queued.is_empty() && screen.height >= 12);
     let attachment_height = u16::from(
         (screen.height >= 8 && (!state.attachments.is_empty() || state.can_undo_attachment()))
@@ -3544,7 +3848,7 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
     );
     let steps = state.tasks["steps"].as_array();
     let jobs = state.tasks["jobs"].as_array();
-    let plan_height = u16::from(
+    let mut plan_height = u16::from(
         screen.height >= 16
             && (steps.is_some_and(|items| !items.is_empty())
                 || jobs.is_some_and(|items| !items.is_empty())),
@@ -3557,6 +3861,46 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
                 || state.exit_confirmation.is_some()),
     );
     let gap = u16::from(screen.height >= 12);
+    let fixed_footer = if spacious { 3 } else { 1 };
+    let above = queue_height + attachment_height + plan_height + activity_height + gap;
+    let body_reserve = if screen.height >= 24 {
+        6
+    } else if screen.height >= 12 {
+        2
+    } else {
+        u16::from(screen.height >= 6)
+    };
+    let hud_min = u16::from(
+        screen.height >= 6
+            && state.hud.config.layout != crate::hud::Layout::Hidden
+            && !state.hud.config.elements.is_empty(),
+    );
+    let editor_width = inner.width.saturating_sub(2);
+    let editor_width = editor_width.saturating_sub(if editor_width >= 12 { 4 } else { 0 });
+    let composer_height =
+        (crate::composer::row_count(&state.editor, editor_width as usize).min(8) as u16 + 2)
+            .min(
+                screen
+                    .height
+                    .saturating_sub(header_height + fixed_footer + above + body_reserve + hud_min),
+            )
+            .max(1);
+    let hud_budget = screen
+        .height
+        .saturating_sub(header_height + fixed_footer + above + body_reserve + composer_height)
+        as usize;
+    let hud_rows = crate::hud::rows(state, inner.width as usize, hud_budget);
+    if (steps.is_none_or(|items| items.is_empty())
+        || hud_rows.iter().any(|row| row.element == "tasks"))
+        && (jobs.is_none_or(|items| items.is_empty())
+            || hud_rows.iter().any(|row| row.element == "agents"))
+    {
+        plan_height = 0;
+    }
+    let footer_height = fixed_footer + hud_rows.len() as u16;
+    let composer_y = screen
+        .height
+        .saturating_sub(composer_height + footer_height);
     let body = Rect::new(
         inner.x,
         header_height,
@@ -3588,7 +3932,10 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
         let mut rows = transcript_rows(state, transcript.width as usize, p);
         // Keep the viewed rows steady while new output arrives below them.
         // Width changes intentionally reflow relative to the newest output.
-        if state.scroll > 0 {
+        let selecting = state
+            .reading_selection
+            .pinning_transcript(&state.text_scope());
+        if state.scroll > 0 || selecting {
             if let Some((previous, width)) = state.rendered_rows {
                 if width == transcript.width {
                     state.scroll = state
@@ -3640,7 +3987,16 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
                 ));
             }
         }
-        if state.scroll > 0 && transcript.height > 0 {
+        // A newly appearing scroll indicator must not replace text under a captured drag.
+        let show_indicator = transcript.height > 0
+            && state
+                .reading_selection
+                .transcript_viewport(&state.text_scope())
+                .filter(|area| area.width == transcript.width)
+                .map_or(state.scroll > 0, |area| {
+                    area.height == transcript.height.saturating_sub(1)
+                });
+        if show_indicator {
             let text = format!(
                 " ↑ {} rows above latest · Ctrl+End to follow ",
                 state.scroll
@@ -3658,6 +4014,20 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
             hits.detail_rows
                 .retain(|(rect, _)| rect.y != transcript.bottom() - 1);
         }
+        hits.text_regions.push(text_region(
+            state,
+            text_selection::TRANSCRIPT,
+            Rect::new(
+                transcript.x,
+                transcript.y,
+                transcript.width,
+                transcript.height.saturating_sub(u16::from(show_indicator)),
+            ),
+            &rows,
+            start,
+            max,
+            Some(ScrollTarget::Transcript),
+        ));
     }
     sidebar(frame, rail, state, p, &mut hits);
     if plan_height > 0 {
@@ -3745,31 +4115,11 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
     } else {
         Color::Rgb(140, 140, 148)
     };
-    let model_label = if state.runtime_supported {
-        format!(
-            "{} · {} · {}",
-            state.model,
-            state.mode,
-            match state.approval_policy.as_str() {
-                "ask" => "approval: ask",
-                "session" => "approval: session",
-                _ => "approval: loading",
-            }
-        )
-    } else {
-        state.model.clone()
-    };
-    let model = format!(
-        " {}{} ",
-        fit(&model_label, composer.width.saturating_sub(16) as usize),
-        if state.sandbox { " · sandbox" } else { "" }
-    );
     let mut block = Block::default()
         .style(p.text())
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(p.text().fg(border))
-        .title_bottom(Line::styled(model, p.muted()).alignment(Alignment::Right));
+        .border_style(p.text().fg(border));
     if !state.title.is_empty() {
         block = block.title_top(Line::styled(
             format!(
@@ -3780,8 +4130,23 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
         ));
     }
     frame.render_widget(block, composer);
+    for (index, row) in hud_rows.into_iter().enumerate() {
+        let area = Rect::new(inner.x, composer.bottom() + index as u16, inner.width, 1);
+        hits.hud_rows.push((area, row.command));
+        let mut source = Vec::new();
+        append(&mut source, row.line.clone(), area.width as usize, None);
+        let region = 100
+            + crate::hud::config::ELEMENTS
+                .iter()
+                .position(|name| *name == row.element)
+                .unwrap_or(99) as u16;
+        hits.text_regions
+            .push(text_region(state, region, area, &source, 0, 0, None));
+        line_at(frame, area, row.line);
+    }
     state.editor.set_block(Block::default());
     state.editor.set_style(p.text());
+    state.editor.set_selection_style(p.selection());
     state.editor.set_cursor_line_style(p.text());
     state.editor.set_cursor_style(if state.overlay.is_some() {
         p.text()
@@ -3903,7 +4268,22 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
         inner.width,
         1,
     );
-    if !choices.is_empty() {
+    if state
+        .reading_selection
+        .selected_text(&state.text_scope())
+        .is_some()
+    {
+        shortcuts(
+            frame,
+            footer,
+            &[
+                ("Ctrl+C", "copy again"),
+                ("Drag", "select & copy"),
+                ("F1", "help"),
+            ],
+            p,
+        );
+    } else if !choices.is_empty() {
         shortcuts(
             frame,
             footer,
@@ -3912,6 +4292,17 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
                 ("Tab", "complete"),
                 ("Enter", "run"),
                 ("Esc", "close"),
+            ],
+            p,
+        );
+    } else if state.overlay == Some(Overlay::Context) && state.context_view.is_some() {
+        shortcuts(
+            frame,
+            footer,
+            &[
+                ("Drag", "select & copy"),
+                ("Ctrl+C", "copy again"),
+                ("Esc", "back"),
             ],
             p,
         );
@@ -3928,6 +4319,7 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
                         "close panel"
                     },
                 ),
+                ("Drag", "select & copy"),
                 ("Ctrl+C twice", "exit"),
             ],
             p,
@@ -3979,7 +4371,7 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
                 ("Alt+Backspace", "last attachment"),
             ]);
         } else {
-            items.extend([("Alt+Enter", "newline"), ("Drag", "select")]);
+            items.extend([("Alt+Enter", "newline"), ("Drag", "select & copy")]);
         }
         items.extend([("/", "commands"), ("F1", "help"), ("Ctrl+C twice", "exit")]);
         shortcuts(frame, footer, &items, p);
@@ -4005,6 +4397,7 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
     if confirming_exit && (activity_height == 0 || state.overlay.is_some()) {
         // Confirmation remains visible over panels and in terminals too short
         // for the activity row, without replacing the underlying task status.
+        frame.render_widget(Clear, footer);
         frame.render_widget(Block::default().style(p.text()), footer);
         line_at(
             frame,
@@ -4018,12 +4411,84 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
         } else {
             "Press Esc again to clear draft · Ctrl+Z undoes"
         };
+        frame.render_widget(Clear, footer);
         frame.render_widget(Block::default().style(p.text()), footer);
         line_at(
             frame,
             footer,
             Line::styled(fit(hint, footer.width as usize), p.muted()),
         );
+    }
+    if state.overlay.is_some() {
+        hits.hud_rows.clear();
+        hits.text_regions
+            .retain(|region| region.id != text_selection::TRANSCRIPT && region.id < 100);
+    }
+    let fallback_area = hits.overlay_area.unwrap_or(screen);
+    let mut signature = DefaultHasher::new();
+    fallback_area.width.hash(&mut signature);
+    fallback_area.height.hash(&mut signature);
+    for y in fallback_area.y..fallback_area.bottom() {
+        for x in fallback_area.x..fallback_area.right() {
+            let cell = &frame.buffer_mut()[(x, y)];
+            cell.symbol().hash(&mut signature);
+            cell.skip.hash(&mut signature);
+        }
+    }
+    let document = state
+        .reading_cache
+        .get(text_selection::SCREEN, signature.finish(), || {
+            Document::from_buffer(frame.buffer_mut(), fallback_area)
+        });
+    let mut excluded = hits.image_areas.clone();
+    excluded.extend(hits.context_grid);
+    excluded.extend(hits.context_content);
+    for region in &mut hits.text_regions {
+        region.excluded.extend(excluded.iter().copied());
+    }
+    if state.overlay.is_none() {
+        excluded.push(hits.composer_text);
+    }
+    hits.text_regions.insert(
+        0,
+        Region {
+            id: text_selection::SCREEN,
+            area: fallback_area,
+            top: 0,
+            max_top: 0,
+            scroll: None,
+            document,
+            excluded,
+        },
+    );
+    let scope = state.text_scope();
+    state.reading_selection.sync(&scope, &hits.text_regions);
+    let selected = p.selection();
+    state
+        .reading_selection
+        .paint(&hits.text_regions, frame.buffer_mut(), selected);
+    // Feedback floats over the frame without reflowing the selected source rows.
+    if !confirming_exit && (state.escape_confirmation.is_none() || state.overlay.is_some()) {
+        if let Some(confirmation) = state.copy_confirmation {
+            let hint = fit(
+                &format!("copied {} chars to clipboard", confirmation.characters),
+                composer.width as usize,
+            );
+            let hint_width = (width(&hint) as u16).saturating_add(1).min(composer.width);
+            let area = Rect::new(
+                composer.right().saturating_sub(hint_width),
+                composer.y.saturating_sub(1),
+                hint_width,
+                1,
+            );
+            frame.render_widget(Clear, area);
+            frame.render_widget(Block::default().style(p.text()), area);
+            line_at(
+                frame,
+                area,
+                Line::styled(hint, p.text().fg(p.suggestion)).right_aligned(),
+            );
+        }
     }
     hits
 }
@@ -4476,6 +4941,24 @@ mod tests {
             let image = state.terminal_image.ready().unwrap();
             let area = Rect::new(origin.0, origin.1, image.columns, image.rows);
             assert!(hits.attachment_original.contains(&area));
+            let scope = state.text_scope();
+            let selection = state.reading_selection.mouse(
+                &scope,
+                &hits.text_regions,
+                crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::Down(
+                        crossterm::event::MouseButton::Left,
+                    ),
+                    column: area.x,
+                    row: area.y,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+            );
+            assert!(
+                !selection.handled,
+                "native image keeps its original-image action"
+            );
+            assert!(selection.copy.is_none());
             assert!(area.right() <= columns && area.bottom() < rows);
             assert!(!hits.query.unwrap().intersects(area));
             assert!(hits
@@ -5078,12 +5561,75 @@ mod tests {
     }
 
     #[test]
+    fn copy_confirmation_is_above_the_composer_and_restores_the_covered_row() {
+        for (columns, rows, expected) in [
+            (10, 3, "copied …"),
+            (24, 6, "copied 5 chars to cli…"),
+            (40, 16, "copied 5 chars to clipboard"),
+            (80, 28, "copied 5 chars to clipboard"),
+        ] {
+            for overlay in [
+                None,
+                Some(Overlay::Help),
+                Some(Overlay::Tools),
+                Some(Overlay::Context),
+                Some(Overlay::Diagnostics),
+                Some(Overlay::Attachments),
+                Some(Overlay::Approval),
+            ] {
+                for (monochrome, phase) in [
+                    (false, Phase::Ready),
+                    (true, Phase::Ready),
+                    (false, Phase::Busy),
+                    (true, Phase::Busy),
+                ] {
+                    let mut state = State::new("workspace".into(), "model".into(), false);
+                    state.phase = phase;
+                    state.monochrome = monochrome;
+                    state.status = "Ready".into();
+                    state.editor.insert_str("keep draft");
+                    state.entries.push(Entry::Tool(tool()));
+                    state.overlay = overlay;
+                    let cursor = state.editor.cursor();
+                    let (before, _) = snapshot(&mut state, columns, rows);
+                    assert!(!before.contains("copied"));
+
+                    state.confirm_copy(5);
+                    let (text, hits) = snapshot(&mut state, columns, rows);
+                    let hint_y = hits.composer.y.saturating_sub(1);
+                    let footer_y = rows - if rows >= 18 { 2 } else { 1 };
+                    assert!(
+                        text.lines()
+                            .nth(hint_y as usize)
+                            .unwrap()
+                            .trim_end()
+                            .ends_with(expected),
+                        "{columns}x{rows}, {overlay:?}, monochrome: {monochrome}\n{text}"
+                    );
+                    assert_eq!(
+                        text.lines().nth(footer_y as usize),
+                        before.lines().nth(footer_y as usize),
+                    );
+                    assert_eq!(state.status, "Ready");
+                    assert_eq!(state.editor.lines(), &["keep draft"]);
+                    assert_eq!(state.editor.cursor(), cursor);
+                    assert_eq!(state.entries.len(), 1);
+
+                    state.copy_confirmation = None;
+                    assert_eq!(snapshot(&mut state, columns, rows).0, before);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn double_escape_hint_tracks_composer_without_changing_the_underlying_status() {
         for draft in ["", "draft"] {
             let mut state = State::new("workspace".into(), "model".into(), false);
             state.phase = Phase::Ready;
             state.status = "Ready".into();
             state.editor.insert_str(draft);
+            state.confirm_copy(5);
             state.escape_confirmation = Some(Instant::now());
             let (text, _) = snapshot(&mut state, 100, 30);
             let hint = if draft.is_empty() {
@@ -5092,9 +5638,12 @@ mod tests {
                 "Press Esc again to clear draft"
             };
             assert!(text.contains(hint), "{text}");
+            assert!(!text.contains("copied"), "{text}");
             assert_eq!(state.status, "Ready");
             state.escape_confirmation = None;
-            assert!(!snapshot(&mut state, 100, 30).0.contains(hint));
+            let (text, _) = snapshot(&mut state, 100, 30);
+            assert!(!text.contains(hint));
+            assert!(text.contains("copied 5 chars to clipboard"));
         }
     }
 
@@ -5115,6 +5664,7 @@ mod tests {
                     state.editor.insert_str("keep draft");
                     let cursor = state.editor.cursor();
                     state.overlay = overlay;
+                    state.confirm_copy(5);
                     state.exit_confirmation = Some(Instant::now());
                     let (text, _) = snapshot(&mut state, columns, rows);
                     let expected = if columns == 24 {
@@ -5126,6 +5676,7 @@ mod tests {
                         text.contains(expected),
                         "{columns}x{rows}, {overlay:?}, {phase:?}\n{text}"
                     );
+                    assert!(!text.contains("copied"), "{text}");
                     assert!(!text.to_lowercase().contains("ctrl+c to stop"));
                     assert_eq!(state.status, "Underlying task status");
                     assert_eq!(state.editor.lines(), &["keep draft"]);
@@ -5133,6 +5684,7 @@ mod tests {
                     state.exit_confirmation = None;
                     let (text, _) = snapshot(&mut state, columns, rows);
                     assert!(!text.contains(expected));
+                    assert!(text.contains("copied"));
                 }
             }
         }
@@ -5149,7 +5701,7 @@ mod tests {
         state.open(Overlay::Help);
         let (text, _) = snapshot(&mut state, 120, 50);
         assert!(text.contains("Ctrl+C twice"));
-        assert!(text.contains("Exit within 2s (panel or no draft selection)"));
+        assert!(text.contains("Exit within 2s with no text selected"));
         assert!(text.contains("Stop a task / close an open panel"));
         assert!(text.contains("Recall a waiting message"));
         assert!(!text.contains("clear draft"));
@@ -5236,7 +5788,12 @@ mod tests {
             state.editor.insert_str("检查中文路径\nkeep this draft");
             let cursor = state.editor.cursor();
             let (text, hits) = snapshot(&mut state, columns, rows);
-            assert!(text.contains("E:/工作区/project"));
+            assert!(text
+                .lines()
+                .nth(hits.composer.bottom() as usize)
+                .unwrap()
+                .contains("project"));
+            assert!(!text.contains("E:/工作区/"));
             assert!(text.contains("local-model"));
             assert!(text.contains("检查中文路径"));
             assert!(text.contains("keep this draft"));
@@ -5366,6 +5923,7 @@ mod tests {
     fn monochrome_renderer_uses_terminal_default_colors() {
         let mut state = State::new("workspace".into(), "model".into(), false);
         state.monochrome = true;
+        state.confirm_copy(5);
         state.entries.push(Entry::Tool(tool()));
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal
@@ -5682,6 +6240,7 @@ mod tests {
         let p = Palette::new(false);
         let mut rows = vec![
             Row {
+                copy: None,
                 line: Line::styled("before 中", p.text()),
                 tool: None,
                 entry: Some(0),
@@ -5689,6 +6248,7 @@ mod tests {
                 toggle: None,
             },
             Row {
+                copy: None,
                 line: Line::styled("文 after 中文", p.text()),
                 tool: None,
                 entry: Some(0),
@@ -5719,6 +6279,7 @@ mod tests {
         let rows = || {
             vec![
                 Row {
+                    copy: None,
                     line: Line::styled("abc", p.text()),
                     tool: None,
                     entry: Some(0),
@@ -5726,6 +6287,7 @@ mod tests {
                     toggle: None,
                 },
                 Row {
+                    copy: None,
                     line: Line::styled("def", p.text()),
                     tool: None,
                     entry: Some(0),

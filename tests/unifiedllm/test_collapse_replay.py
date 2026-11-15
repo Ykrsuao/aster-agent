@@ -142,8 +142,10 @@ async def test_collapse_keeps_only_complete_active_native_turns(
     assert len(captured) == 1
     api_params = captured[0]
     assert "turns" not in api_params
-    # The local HTTP transport object is not part of the provider JSON body.
-    encoded = json.dumps({key: value for key, value in api_params.items() if key != "client"})
+    # SDK clients and local logging callbacks are not provider JSON.
+    encoded = json.dumps(
+        {key: value for key, value in api_params.items() if key not in {"client", "logger_fn"}}
+    )
     assert "native-secret-1" not in encoded
     assert "native-secret-2" in encoded
     assert "result-call_1" not in encoded

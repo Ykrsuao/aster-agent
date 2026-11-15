@@ -39,7 +39,7 @@ struct Args {
     #[arg(long, default_value = "python")]
     python: PathBuf,
     #[arg(long, env = "ASTER_MODEL")]
-    model: String,
+    model: Option<String>,
     #[arg(long, value_parser = ["completion", "responses"])]
     client_type: Option<String>,
     #[arg(long)]
@@ -97,7 +97,11 @@ async fn main() -> Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!("TUI requires an interactive terminal for both input and output.");
     }
-    if args.model.trim().is_empty() {
+    if args
+        .model
+        .as_ref()
+        .is_some_and(|model| model.trim().is_empty())
+    {
         bail!("Model cannot be blank.");
     }
     if args.resume.as_ref().is_some_and(|s| s.trim().is_empty()) {
@@ -113,7 +117,7 @@ async fn main() -> Result<()> {
     let config = BackendConfig {
         python: args.python,
         workspace: workspace.clone(),
-        model: args.model.clone(),
+        model: args.model.clone().unwrap_or_default(),
         client_type: args.client_type,
         sandbox: args.sandbox,
     };
@@ -126,7 +130,8 @@ async fn main() -> Result<()> {
             .unwrap_or(&workspace_text)
             .to_owned()
     };
-    let state = State::new(workspace_text, args.model, args.sandbox);
+    let mut state = State::new(workspace_text, args.model.unwrap_or_default(), args.sandbox);
+    state.hud.attach(&workspace);
     let mut controller = Controller::new(state, args.resume, args.continue_last);
     controller.attach_history(aster_tui::input_history::InputHistory::for_workspace(
         &workspace,
@@ -148,6 +153,14 @@ async fn main() -> Result<()> {
         hook(info);
     }));
     let result = run(&mut controller, &mut transport, &config).await;
+    let result = result.and(
+        controller
+            .state
+            .hud
+            .flush()
+            .await
+            .context("Could not save HUD usage"),
+    );
     let result = if controller.persist_draft() {
         result
     } else {
@@ -234,7 +247,7 @@ impl CopyTarget {
 struct PendingCopy {
     target: CopyTarget,
     cut: bool,
-    task: tokio::task::JoinHandle<Result<()>>,
+    task: tokio::task::JoinHandle<Result<usize>>,
 }
 
 impl Drop for PendingCopy {
@@ -285,6 +298,7 @@ struct PendingRollback {
 
 #[derive(Default)]
 struct IoTasks {
+    hud: Option<tokio::task::JoinHandle<aster_tui::hud::collect::Collected>>,
     paste: Option<PendingPaste>,
     copy: Option<PendingCopy>,
     clipboard_requests: VecDeque<ClipboardIntent>,
@@ -301,6 +315,9 @@ struct IoTasks {
 
 impl Drop for IoTasks {
     fn drop(&mut self) {
+        if let Some(pending) = &self.hud {
+            pending.abort();
+        }
         if let Some(pending) = &self.files {
             pending.task.abort();
         }
@@ -384,6 +401,24 @@ fn mouse_attachment(controller: &mut Controller, hits: &ui::HitAreas, mouse: Mou
     false
 }
 
+fn mouse_context(
+    controller: &mut Controller,
+    hits: &ui::HitAreas,
+    mouse: MouseEvent,
+) -> Vec<Action> {
+    if controller.state.overlay != Some(Overlay::Context)
+        || controller.state.context_view.is_some()
+        || mouse.kind != MouseEventKind::Down(MouseButton::Left)
+    {
+        return vec![];
+    }
+    hits.choice_rows
+        .iter()
+        .find(|(rect, _)| rect.contains(Position::new(mouse.column, mouse.row)))
+        .map(|(_, index)| *index)
+        .map_or_else(Vec::new, |index| controller.open_context_selection(index))
+}
+
 fn mouse_original_image(
     controller: &Controller,
     hits: &ui::HitAreas,
@@ -398,6 +433,210 @@ fn mouse_original_image(
         controller.open_original_image()
     } else {
         vec![]
+    }
+}
+
+struct MouseOutcome {
+    changed: bool,
+    actions: Vec<Action>,
+}
+
+/// Route selection and normal controls through the same path used by the event loop.
+fn handle_mouse(
+    controller: &mut Controller,
+    hits: &ui::HitAreas,
+    mouse: MouseEvent,
+) -> MouseOutcome {
+    let mut dirty = false;
+    let mut queue = Vec::new();
+    if mouse.kind != MouseEventKind::Moved {
+        let exit = controller.state.exit_confirmation.take().is_some();
+        let escape = controller.state.escape_confirmation.take().is_some();
+        dirty |= exit || escape;
+    }
+    // Use the existing asynchronous clipboard queue for every copy and paste.
+    queue.extend(mouse_paste(controller, hits, mouse));
+    if controller.composer_mouse(hits.composer_text, mouse) {
+        if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
+            queue.extend(controller.copy_composer_selection());
+        }
+        return MouseOutcome {
+            changed: true,
+            actions: queue,
+        };
+    }
+    let reading = controller.reading_mouse(&hits.text_regions, mouse);
+    dirty |= reading.changed;
+    if let Some(text) = reading.copy {
+        queue.push(Action::CopySelection { text, cut: false });
+    }
+    // Text gestures take priority; an ordinary click is replayed exactly once on release.
+    let mouse = if reading.handled {
+        let Some(click) = reading.click else {
+            return MouseOutcome {
+                changed: dirty,
+                actions: queue,
+            };
+        };
+        click
+    } else {
+        if let Some(actions) = controller.context_mouse(hits.context_content, mouse) {
+            queue.extend(actions);
+            return MouseOutcome {
+                changed: true,
+                actions: queue,
+            };
+        }
+        mouse
+    };
+    let position = Position::new(mouse.column, mouse.row);
+    match mouse.kind {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            dirty = true;
+            let up = mouse.kind == MouseEventKind::ScrollUp;
+            if let (Some(Overlay::Context), Some(view)) = (
+                controller.state.overlay,
+                controller.state.context_view.as_mut(),
+            ) {
+                view.scroll = if up {
+                    view.scroll.saturating_sub(3)
+                } else {
+                    view.scroll.saturating_add(3)
+                };
+            } else if let Some(overlay) = controller.state.overlay {
+                let list = matches!(
+                    overlay,
+                    Overlay::Commands
+                        | Overlay::Sessions
+                        | Overlay::Drafts
+                        | Overlay::Search
+                        | Overlay::Queue
+                        | Overlay::Rewind
+                        | Overlay::Files
+                        | Overlay::Models
+                        | Overlay::Modes
+                        | Overlay::Permissions
+                        | Overlay::Hud
+                ) || (matches!(
+                    overlay,
+                    Overlay::Context
+                        | Overlay::Tools
+                        | Overlay::Changes
+                        | Overlay::Attachments
+                        | Overlay::Tasks
+                        | Overlay::Approval
+                        | Overlay::Rollback
+                        | Overlay::RollbackConfirm
+                        | Overlay::UndoConfirm
+                ) && hits
+                    .choice_rows
+                    .iter()
+                    .any(|(rect, _)| rect.contains(position)));
+                if list {
+                    let max = controller.state.choices().len().saturating_sub(1);
+                    controller.state.selected = if up {
+                        controller.state.selected.saturating_sub(1)
+                    } else {
+                        controller.state.selected.saturating_add(1).min(max)
+                    };
+                    controller.state.detail_scroll = 0;
+                    controller.state.context_reveal_selection = overlay == Overlay::Context;
+                } else {
+                    controller.state.detail_scroll = if up {
+                        controller.state.detail_scroll.saturating_sub(3)
+                    } else {
+                        controller.state.detail_scroll.saturating_add(3)
+                    };
+                }
+            } else if hits
+                .slash_rows
+                .iter()
+                .any(|(rect, _)| rect.contains(position))
+            {
+                let max = controller.state.slash_choices().len().saturating_sub(1);
+                controller.state.slash_selected = if up {
+                    controller.state.slash_selected.saturating_sub(1)
+                } else {
+                    controller.state.slash_selected.saturating_add(1).min(max)
+                };
+            } else if hits.transcript.contains(position) {
+                controller.state.scroll = if up {
+                    controller.state.scroll.saturating_add(3)
+                } else {
+                    controller.state.scroll.saturating_sub(3)
+                };
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left) if controller.state.overlay.is_some() => {
+            let mut actions = mouse_context(controller, hits, mouse);
+            if actions.is_empty() {
+                actions = mouse_original_image(controller, hits, mouse);
+            }
+            if !actions.is_empty() {
+                queue.extend(actions);
+                dirty = true;
+            } else if let Some((_, index)) = hits
+                .choice_rows
+                .iter()
+                .find(|(rect, _)| rect.contains(position))
+            {
+                dirty = true;
+                controller.state.selected = *index;
+                controller.state.detail_scroll = 0;
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left) if mouse_attachment(controller, hits, mouse) => {
+            dirty = true;
+        }
+        MouseEventKind::Down(MouseButton::Left) if controller.state.overlay.is_none() => {
+            dirty = true;
+            if let Some((_, index)) = hits
+                .slash_rows
+                .iter()
+                .find(|(rect, _)| rect.contains(position))
+            {
+                queue.extend(controller.choose_slash(*index));
+            } else if let Some((_, command)) = hits
+                .hud_rows
+                .iter()
+                .find(|(rect, _)| rect.contains(position))
+            {
+                queue.extend(controller.input((*command).into()));
+            } else if let Some((_, command)) = hits
+                .welcome_rows
+                .iter()
+                .find(|(rect, _)| rect.contains(position))
+            {
+                if *command == "/" {
+                    controller.state.open(Overlay::Commands);
+                } else {
+                    queue.extend(controller.input((*command).into()));
+                }
+            } else if let Some((_, index)) = hits
+                .detail_rows
+                .iter()
+                .find(|(rect, _)| rect.contains(position))
+            {
+                controller.toggle_entry(*index);
+            } else if let Some((_, id)) = hits
+                .tool_rows
+                .iter()
+                .find(|(rect, _)| rect.contains(position))
+            {
+                controller.toggle_tool(id);
+            } else if let Some((_, id)) = hits
+                .session_rows
+                .iter()
+                .find(|(rect, _)| rect.contains(position))
+            {
+                queue.extend(controller.resume(id.clone()));
+            }
+        }
+        _ => {}
+    }
+    MouseOutcome {
+        changed: dirty,
+        actions: queue,
     }
 }
 
@@ -480,24 +719,29 @@ fn copy_result(
     controller: &mut Controller,
     target: &CopyTarget,
     cut: bool,
-    result: Result<()>,
+    result: Result<usize>,
 ) -> bool {
     match result {
-        Ok(()) if cut => {
-            if *target == CopyTarget::capture(controller) {
-                return controller.cut_selection();
-            } else {
-                controller.state.notice(
-                    "Copied to clipboard. The input changed, so the text was kept.",
-                    false,
-                );
+        Ok(characters) => {
+            controller.state.confirm_copy(characters);
+            if cut {
+                if *target == CopyTarget::capture(controller) {
+                    return controller.cut_selection();
+                } else {
+                    controller.state.notice(
+                        "Copied to clipboard. The input changed, so the text was kept.",
+                        false,
+                    );
+                }
             }
         }
-        Ok(()) => {}
-        Err(error) => controller.state.notice(
-            format!("Could not copy: {error}. Your text was kept."),
-            true,
-        ),
+        Err(error) => {
+            controller.state.copy_confirmation = None;
+            controller.state.notice(
+                format!("Could not copy: {error}. Your text was kept."),
+                true,
+            );
+        }
     }
     false
 }
@@ -538,7 +782,11 @@ fn start_next_clipboard(controller: &mut Controller, tasks: &mut IoTasks) {
             tasks.copy = Some(PendingCopy {
                 target,
                 cut,
-                task: tokio::spawn(async move { clipboard::write_text(&text).await }),
+                task: tokio::spawn(async move {
+                    clipboard::write_text(&text)
+                        .await
+                        .map(|()| text.chars().count())
+                }),
             });
         }
         Some(ClipboardIntent::Paste(target)) => {
@@ -581,7 +829,7 @@ fn complete_copy(
     tasks: &mut IoTasks,
     target: &CopyTarget,
     cut: bool,
-    result: Result<()>,
+    result: Result<usize>,
 ) {
     let copied = result.is_ok();
     let before = PasteTarget::capture(controller);
@@ -751,7 +999,8 @@ async fn dispatch(
                 cancel_pastes(controller, tasks, |_| true);
                 if tasks.restart.is_none() {
                     let previous = transport.take();
-                    let config = config.clone();
+                    let mut config = config.clone();
+                    config.model = controller.state.model.clone();
                     tasks.restart = Some(tokio::spawn(async move {
                         if let Some(mut previous) = previous {
                             previous.shutdown().await?;
@@ -899,7 +1148,24 @@ async fn run(
             last_draw = Instant::now();
         }
         start_terminal_image(&mut controller.state, &mut tasks);
+        if tasks.hud.is_none() {
+            if let Some(request) = controller
+                .state
+                .hud
+                .collect_request(&controller.state.workspace, false)
+            {
+                tasks.hud = Some(tokio::spawn(aster_tui::hud::collect::sample(request)));
+            }
+        }
         tokio::select! {
+            result = async { tasks.hud.as_mut().expect("pending HUD collection").await }, if tasks.hud.is_some() => {
+                tasks.hud.take();
+                match result {
+                    Ok(result) => controller.state.hud.collected(result),
+                    Err(error) => controller.state.hud.host.notices = vec![format!("HUD collector: {error}")],
+                }
+                dirty = true;
+            },
             result = async { (&mut tasks.terminal_image.as_mut().expect("pending terminal image").task).await }, if tasks.terminal_image.is_some() => {
                 let pending = tasks.terminal_image.take().expect("pending terminal image");
                 let completed = result.unwrap_or_else(|_| pending.key.failed("Image preview worker stopped.".into()));
@@ -965,10 +1231,14 @@ async fn run(
                 }
                 let exit_confirmation = controller.state.exit_confirmation;
                 let escape_confirmation = controller.state.escape_confirmation;
+                let copy_confirmation = controller.state.copy_confirmation;
                 queue.extend(controller.tick());
                 if exit_confirmation != controller.state.exit_confirmation
                     || escape_confirmation != controller.state.escape_confirmation
-                    || (controller.state.busy() && last_draw.elapsed() >= Duration::from_millis(100)) {
+                    || copy_confirmation != controller.state.copy_confirmation
+                    || (controller.state.busy() && last_draw.elapsed() >= Duration::from_millis(100))
+                    || (controller.state.hud.config.layout != aster_tui::hud::Layout::Hidden
+                        && last_draw.elapsed() >= Duration::from_secs(1)) {
                     dirty = true;
                 }
             },
@@ -984,78 +1254,9 @@ async fn run(
                         if controller.state.overlay == Some(Overlay::Files) { queue.extend(controller.search_files()); }
                     },
                     Some(Ok(TerminalEvent::Input(Event::Mouse(mouse)))) => {
-                        if mouse.kind != MouseEventKind::Moved {
-                            let exit = controller.state.exit_confirmation.take().is_some();
-                            let escape = controller.state.escape_confirmation.take().is_some();
-                            dirty |= exit || escape;
-                        }
-                        let position = Position::new(mouse.column,mouse.row);
-                        // A captured right-button press pastes once into the visible input.
-                        // Reuse the asynchronous clipboard path, preserving cursor/selection.
-                        queue.extend(mouse_paste(controller, &hits, mouse));
-                        let composer_handled = controller.composer_mouse(hits.composer_text, mouse);
-                        dirty |= composer_handled;
-                        match mouse.kind {
-                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                                dirty = true;
-                                let up = mouse.kind == MouseEventKind::ScrollUp;
-                                if let Some(overlay) = controller.state.overlay {
-                                    let list = matches!(overlay, Overlay::Commands | Overlay::Sessions | Overlay::Drafts | Overlay::Search | Overlay::Queue | Overlay::Rewind | Overlay::Files | Overlay::Models | Overlay::Modes | Overlay::Permissions)
-                                        || (matches!(overlay, Overlay::Tools | Overlay::Changes | Overlay::Attachments | Overlay::Tasks | Overlay::Approval | Overlay::Rollback | Overlay::RollbackConfirm | Overlay::UndoConfirm) && hits.choice_rows.iter().any(|(rect, _)| rect.contains(position)));
-                                    if list {
-                                        let max = controller.state.choices().len().saturating_sub(1);
-                                        controller.state.selected = if up { controller.state.selected.saturating_sub(1) }
-                                            else { controller.state.selected.saturating_add(1).min(max) };
-                                        controller.state.detail_scroll = 0;
-                                    } else {
-                                        controller.state.detail_scroll = if up { controller.state.detail_scroll.saturating_sub(3) }
-                                            else { controller.state.detail_scroll.saturating_add(3) };
-                                    }
-                                } else if hits.slash_rows.iter().any(|(rect, _)| rect.contains(position)) {
-                                    let max = controller.state.slash_choices().len().saturating_sub(1);
-                                    controller.state.slash_selected = if up {
-                                        controller.state.slash_selected.saturating_sub(1)
-                                    } else { controller.state.slash_selected.saturating_add(1).min(max) };
-                                } else if hits.transcript.contains(position) {
-                                    controller.state.scroll = if up { controller.state.scroll.saturating_add(3) }
-                                        else { controller.state.scroll.saturating_sub(3) };
-                                }
-                            }
-                            MouseEventKind::Down(MouseButton::Left) if controller.state.overlay.is_some() => {
-                                let actions = mouse_original_image(controller, &hits, mouse);
-                                if !actions.is_empty() {
-                                    queue.extend(actions);
-                                    dirty = true;
-                                } else if let Some((_, index)) = hits.choice_rows.iter().find(|(rect, _)| rect.contains(position)) {
-                                    dirty = true;
-                                    controller.state.selected = *index;
-                                    controller.state.detail_scroll = 0;
-                                }
-                            }
-                            MouseEventKind::Down(MouseButton::Left) if composer_handled => {}
-                            MouseEventKind::Down(MouseButton::Left) if mouse_attachment(controller, &hits, mouse) => {
-                                dirty = true;
-                            }
-                            MouseEventKind::Down(MouseButton::Left) if controller.state.overlay.is_none() => {
-                                dirty = true;
-                                if let Some((_,index)) = hits.slash_rows.iter().find(|(rect,_)|rect.contains(position)) {
-                                    queue.extend(controller.choose_slash(*index));
-                                } else if let Some((_,command)) = hits.welcome_rows.iter().find(|(rect,_)|rect.contains(position)) {
-                                    if *command == "/" {
-                                        controller.state.open(Overlay::Commands);
-                                    } else {
-                                        queue.extend(controller.input((*command).into()));
-                                    }
-                                } else if let Some((_,index)) = hits.detail_rows.iter().find(|(rect,_)|rect.contains(position)) {
-                                    controller.toggle_entry(*index);
-                                } else if let Some((_,id)) = hits.tool_rows.iter().find(|(rect,_)|rect.contains(position)) {
-                                    controller.toggle_tool(id);
-                                } else if let Some((_,id)) = hits.session_rows.iter().find(|(rect,_)|rect.contains(position)) {
-                                    queue.extend(controller.resume(id.clone()));
-                                }
-                            }
-                            _ => {}
-                        }
+                        let outcome = handle_mouse(controller, &hits, mouse);
+                        dirty |= outcome.changed;
+                        queue.extend(outcome.actions);
                     }
                     Some(Ok(TerminalEvent::Input(Event::Resize(..)))) => {
                         input.refresh_graphics()?;
@@ -1078,8 +1279,13 @@ async fn run(
 }
 
 #[cfg(test)]
+#[path = "mouse_selection_tests.rs"]
+mod mouse_selection_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn draft_controller(workspace: &std::path::Path) -> Controller {
         let mut controller = Controller::new(
@@ -1350,6 +1556,59 @@ mod tests {
             row,
             modifiers: crossterm::event::KeyModifiers::NONE,
         }
+    }
+
+    #[test]
+    fn clicking_context_rows_requests_the_selected_text_and_preserves_the_draft() {
+        let root = tempfile::tempdir().unwrap();
+        let mut controller = draft_controller(root.path());
+        controller.state.phase = aster_tui::state::Phase::Ready;
+        controller.state.session_id = Some("session-a".into());
+        controller.state.editor.insert_str("保留草稿");
+        controller.state.context_snapshot = Some(
+            aster_tui::context::ContextSnapshot::from_usage_update(&json!({
+                "used": 10, "size": 100,
+                "_meta": {"aster": {"context": {
+                    "version": 1, "requestId": "request-one", "attribution": "characters",
+                    "categories": [{"id": "system_prompt", "tokens": 10}],
+                    "contentItems": [{"category": "system_prompt", "key": "system_prompt", "chars": 40}],
+                    "outputAvailable": true
+                }}}
+            })),
+        );
+        controller.state.open(Overlay::Context);
+        let hits = rendered_hits(&mut controller);
+        let (area, _) = hits
+            .choice_rows
+            .iter()
+            .find(|(_, index)| *index == 0)
+            .unwrap();
+        assert!(mouse_context(
+            &mut controller,
+            &hits,
+            right_mouse(MouseEventKind::Down(MouseButton::Right), area.x, area.y)
+        )
+        .is_empty());
+        let actions = mouse_context(
+            &mut controller,
+            &hits,
+            right_mouse(MouseEventKind::Down(MouseButton::Left), area.x, area.y),
+        );
+        let [Action::Request { method, params, .. }] = actions.as_slice() else {
+            panic!("expected one content request: {actions:?}");
+        };
+        assert_eq!(*method, "_aster/session/context");
+        assert_eq!(
+            params,
+            &json!({
+                "sessionId": "session-a", "requestId": "request-one",
+                "category": "system_prompt", "key": null
+            })
+        );
+        assert!(controller.state.context_view.is_some());
+        assert_eq!(controller.state.editor.lines(), ["保留草稿"]);
+        assert_eq!(controller.state.phase, aster_tui::state::Phase::Ready);
+        assert!(rendered_hits(&mut controller).choice_rows.is_empty());
     }
 
     fn paste_test_image(controller: &mut Controller, name: &str) {
@@ -1770,9 +2029,13 @@ mod tests {
         );
         assert_eq!(controller.state.editor.lines(), &["中文", "selected text"]);
         assert!(controller.state.editor.is_selecting());
-        copy_result(&mut controller, &target, false, Ok(()));
+        assert!(controller.state.copy_confirmation.is_none());
+        copy_result(&mut controller, &target, false, Ok(16));
         assert!(target == CopyTarget::capture(&controller));
-        copy_result(&mut controller, &target, true, Ok(()));
+        assert!(controller.state.copy_confirmation.is_some());
+        controller.state.copy_confirmation = None;
+        copy_result(&mut controller, &target, true, Ok(16));
+        assert!(controller.state.copy_confirmation.is_some());
         assert_eq!(controller.state.editor.lines(), &[""]);
         assert_eq!(controller.state.attachments[0].name(), "keep.png");
         controller.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
@@ -1791,12 +2054,53 @@ mod tests {
         controller.paste("same draft".into());
         controller.state.editor.select_all();
         assert!(target.input == PasteTarget::capture(&controller));
-        copy_result(&mut controller, &target, true, Ok(()));
+        copy_result(&mut controller, &target, true, Ok(10));
         assert_eq!(controller.state.editor.lines(), &["same draft"]);
+        assert!(controller.state.copy_confirmation.is_some());
         let target = CopyTarget::capture(&controller);
         controller.state.open(Overlay::Search);
-        copy_result(&mut controller, &target, true, Ok(()));
+        copy_result(&mut controller, &target, true, Ok(10));
         assert_eq!(controller.state.editor.lines(), &["same draft"]);
+    }
+
+    #[test]
+    fn clipboard_success_confirmation_refreshes_and_expires_without_editing_text() {
+        let mut controller = paste_controller();
+        controller.paste("keep selected text".into());
+        controller.state.editor.select_all();
+        let target = CopyTarget::capture(&controller);
+        let status = controller.state.status.clone();
+        let entries = controller.state.entries.len();
+        let mut tasks = IoTasks::default();
+
+        assert!(controller.state.copy_confirmation.is_none());
+        complete_copy(&mut controller, &mut tasks, &target, false, Ok(18));
+        assert_eq!(controller.state.copy_confirmation.unwrap().characters, 18);
+        let previous = Instant::now() + Duration::from_millis(250);
+        controller
+            .state
+            .copy_confirmation
+            .as_mut()
+            .unwrap()
+            .expires_at = previous;
+        complete_copy(&mut controller, &mut tasks, &target, false, Ok(2));
+        assert_eq!(controller.state.copy_confirmation.unwrap().characters, 2);
+        assert!(controller.state.copy_confirmation.unwrap().expires_at > previous);
+
+        controller.tick();
+        assert!(controller.state.copy_confirmation.is_some());
+        controller
+            .state
+            .copy_confirmation
+            .as_mut()
+            .unwrap()
+            .expires_at = Instant::now() - Duration::from_millis(1);
+        controller.tick();
+        assert!(controller.state.copy_confirmation.is_none());
+        assert!(target == CopyTarget::capture(&controller));
+        assert_eq!(controller.state.editor.lines(), &["keep selected text"]);
+        assert_eq!(controller.state.status, status);
+        assert_eq!(controller.state.entries.len(), entries);
     }
 
     fn clipboard_test_config() -> BackendConfig {
@@ -1814,11 +2118,17 @@ mod tests {
         cut: bool,
     ) -> (PendingCopy, tokio::sync::oneshot::Sender<()>) {
         let (release, ready) = tokio::sync::oneshot::channel();
+        let characters = controller.state.editor.yank_text().chars().count();
         (
             PendingCopy {
                 target: CopyTarget::capture(controller),
                 cut,
-                task: tokio::spawn(async move { ready.await.context("fixture writer cancelled") }),
+                task: tokio::spawn(async move {
+                    ready
+                        .await
+                        .context("fixture writer cancelled")
+                        .map(|()| characters)
+                }),
             },
             release,
         )
@@ -1862,10 +2172,12 @@ mod tests {
         .unwrap();
         assert!(next_clipboard(&mut controller, &mut tasks).is_none());
         assert!(tasks.paste.is_none());
+        assert!(controller.state.copy_confirmation.is_none());
         release.send(()).unwrap();
         let mut pending = tasks.copy.take().unwrap();
         let result = (&mut pending.task).await.unwrap();
         complete_copy(&mut controller, &mut tasks, &pending.target, false, result);
+        assert!(controller.state.copy_confirmation.is_some());
         assert!(matches!(next_clipboard(&mut controller, &mut tasks),
             Some(ClipboardIntent::Copy { text, cut: false, .. }) if text == "second"));
         assert!(matches!(
@@ -1873,6 +2185,198 @@ mod tests {
             Some(ClipboardIntent::Paste(_))
         ));
         assert_eq!(controller.state.editor.lines(), &["first second"]);
+    }
+
+    #[tokio::test]
+    async fn global_auto_copies_keep_each_snapshot_while_the_clipboard_is_busy() {
+        let mut controller = paste_controller();
+        controller.paste("third fourth".into());
+        controller
+            .state
+            .entries
+            .push(aster_tui::state::Entry::Assistant("first second".into()));
+        let original = controller.state.editor.lines().to_vec();
+        let revision = controller.state.draft_revision;
+        let (pending, release) = delayed_copy(&controller, false);
+        let mut tasks = IoTasks::default();
+        tasks.copy = Some(pending);
+        for (selected, composer) in [
+            ("first", false),
+            ("second", false),
+            ("third", true),
+            ("fourth", true),
+        ] {
+            let hits = rendered_hits(&mut controller);
+            let area = if composer {
+                hits.composer_text
+            } else {
+                hits.transcript
+            };
+            let body = if composer {
+                "third fourth"
+            } else {
+                "first second"
+            };
+            let x = area.x + body.find(selected).unwrap() as u16;
+            for (kind, column) in [
+                (MouseEventKind::Down(MouseButton::Left), x),
+                (
+                    MouseEventKind::Drag(MouseButton::Left),
+                    x + selected.len() as u16,
+                ),
+                (
+                    MouseEventKind::Up(MouseButton::Left),
+                    x + selected.len() as u16,
+                ),
+            ] {
+                let hits = rendered_hits(&mut controller);
+                let outcome =
+                    handle_mouse(&mut controller, &hits, right_mouse(kind, column, area.y));
+                dispatch(
+                    outcome.actions,
+                    &mut controller,
+                    &mut None,
+                    &mut tasks,
+                    &clipboard_test_config(),
+                )
+                .await
+                .unwrap();
+            }
+        }
+        assert_eq!(controller.state.editor.lines(), original);
+        assert_eq!(controller.state.draft_revision, revision);
+        assert!(next_clipboard(&mut controller, &mut tasks).is_none());
+        controller.state.open(Overlay::Commands);
+        release.send(()).unwrap();
+        let mut pending = tasks.copy.take().unwrap();
+        let result = (&mut pending.task).await.unwrap();
+        complete_copy(&mut controller, &mut tasks, &pending.target, false, result);
+        for expected in ["first", "second", "third", "fourth"] {
+            let Some(ClipboardIntent::Copy { target, text, cut }) =
+                next_clipboard(&mut controller, &mut tasks)
+            else {
+                panic!("queued global selection copy");
+            };
+            assert_eq!(text, expected);
+            assert!(!cut);
+            assert!(!copy_result(
+                &mut controller,
+                &target,
+                cut,
+                Ok(text.chars().count())
+            ));
+        }
+        assert!(tasks.clipboard_requests.is_empty());
+        assert_eq!(controller.state.editor.lines(), original);
+    }
+
+    #[tokio::test]
+    async fn context_auto_copies_keep_their_text_while_the_clipboard_is_busy() {
+        use aster_tui::context::Category;
+        use aster_tui::context_detail::{Target, View};
+
+        let mut controller = paste_controller();
+        controller.paste("keep the draft".into());
+        controller.state.editor.select_all();
+        controller.state.open(Overlay::Context);
+        let mut view = View::new(
+            "request-one".into(),
+            Target::Category(Category::SystemPrompt),
+            1,
+            0,
+        );
+        let body = "CLIPBOARD first second";
+        view.complete(&json!({"result": {
+            "requestId": "request-one", "category": "system_prompt", "key": null,
+            "source": "model_request", "sections": [{
+                "key": "system_prompt", "text": body,
+                "characters": body.chars().count(), "truncated": false
+            }]
+        }}));
+        controller.state.context_view = Some(view);
+        let draft = CopyTarget::capture(&controller);
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(110, 32)).unwrap();
+        let mut hits = ui::HitAreas::default();
+        let frame = terminal
+            .draw(|frame| hits = ui::draw(frame, &mut controller.state))
+            .unwrap();
+        let body_y = frame
+            .buffer
+            .content
+            .chunks(110)
+            .position(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .contains(body)
+            })
+            .unwrap() as u16;
+        let area = hits.context_content.unwrap();
+        let (pending, release) = delayed_copy(&controller, false);
+        let mut tasks = IoTasks::default();
+        tasks.copy = Some(pending);
+        for selected in ["first", "second"] {
+            let x = area.x + body.find(selected).unwrap() as u16;
+            for kind in [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Drag(MouseButton::Left),
+            ] {
+                let column = x + if matches!(kind, MouseEventKind::Drag(_)) {
+                    selected.len() as u16
+                } else {
+                    0
+                };
+                assert!(controller
+                    .context_mouse(Some(area), right_mouse(kind, column, body_y))
+                    .unwrap()
+                    .is_empty());
+            }
+            let actions = controller
+                .context_mouse(
+                    Some(area),
+                    right_mouse(
+                        MouseEventKind::Up(MouseButton::Left),
+                        x + selected.len() as u16,
+                        body_y,
+                    ),
+                )
+                .unwrap();
+            dispatch(
+                actions,
+                &mut controller,
+                &mut None,
+                &mut tasks,
+                &clipboard_test_config(),
+            )
+            .await
+            .unwrap();
+        }
+        assert!(draft == CopyTarget::capture(&controller));
+        assert!(next_clipboard(&mut controller, &mut tasks).is_none());
+        controller.state.open(Overlay::Commands);
+        cancel_changed_pastes(&mut controller, &mut tasks);
+        release.send(()).unwrap();
+        let mut pending = tasks.copy.take().unwrap();
+        let result = (&mut pending.task).await.unwrap();
+        complete_copy(&mut controller, &mut tasks, &pending.target, false, result);
+        for expected in ["first", "second"] {
+            let Some(ClipboardIntent::Copy { target, text, cut }) =
+                next_clipboard(&mut controller, &mut tasks)
+            else {
+                panic!("queued read-only context copy");
+            };
+            assert_eq!(text, expected);
+            assert!(!cut);
+            assert!(!copy_result(
+                &mut controller,
+                &target,
+                cut,
+                Ok(text.chars().count())
+            ));
+        }
+        assert!(tasks.clipboard_requests.is_empty());
+        assert_eq!(controller.state.editor.lines(), ["keep the draft"]);
+        assert_eq!(controller.state.draft_revision, draft.draft_revision);
     }
 
     #[tokio::test]
@@ -1938,6 +2442,7 @@ mod tests {
         let mut controller = paste_controller();
         controller.paste("keep selected text".into());
         controller.state.editor.select_all();
+        controller.state.confirm_copy(18);
         let target = CopyTarget::capture(&controller);
         let mut tasks = IoTasks::default();
         let paste = ClipboardIntent::Paste(PasteTarget::capture(&controller));
@@ -1950,6 +2455,12 @@ mod tests {
             Err(anyhow::anyhow!("fixture writer failed")),
         );
         assert!(next_clipboard(&mut controller, &mut tasks).is_none());
+        assert!(controller.state.copy_confirmation.is_none());
+        assert!(controller.state.entries.iter().any(|entry| matches!(
+            entry,
+            aster_tui::state::Entry::Notice { text, error: true }
+                if text.contains("fixture writer failed")
+        )));
         assert_eq!(controller.state.editor.lines(), &["keep selected text"]);
         assert!(controller.state.editor.is_selecting());
     }

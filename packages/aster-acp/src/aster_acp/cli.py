@@ -19,8 +19,11 @@ if TYPE_CHECKING:
 @click.option(
     "--model",
     envvar="ASTER_MODEL",
-    required=True,
+    default=None,
     help="LiteLLM model name or configured ASTER model alias. Or set ASTER_MODEL.",
+)
+@click.option(
+    "--select-model", is_flag=True, help="Choose a configured model before starting a session."
 )
 @click.option(
     "--client-type",
@@ -34,8 +37,10 @@ if TYPE_CHECKING:
     default=False,
     help="Execute CodeAct Python in a microsandbox microVM.",
 )
-def command(model: str, client_type: str | None, sandbox: bool) -> None:
+def command(model: str | None, client_type: str | None, sandbox: bool, select_model: bool) -> None:
     """Serve the ASTER coding agent over ACP on standard input/output."""
+    if model is None and not select_model:
+        raise click.UsageError("Missing option '--model'.")
     # Imports and configuration may print provider diagnostics before serve()
     # has created the protocol connection. Keep those off the JSON-RPC pipe too.
     with diagnostic_stdout():
@@ -54,13 +59,23 @@ def command(model: str, client_type: str | None, sandbox: bool) -> None:
             from aster_acp._provider_code import activate_provider_code_cache
 
             activate_provider_code_cache()
-    nvidia_api_key = os.getenv("NVIDIA_API_KEY") if model.startswith("nvidia_nim/") else None
+
+    nvidia_api_key = os.getenv("NVIDIA_API_KEY")
+
+    def model_factory(selected_model: str) -> "UnifiedLLM":
+        overrides = (
+            {"api_key": nvidia_api_key}
+            if nvidia_api_key and selected_model.startswith("nvidia_nim/")
+            else {}
+        )
+        return get_llm_client(selected_model, client_type=client_type, **overrides)
 
     def llm_factory() -> "UnifiedLLM":
-        overrides = {"api_key": nvidia_api_key} if nvidia_api_key else {}
-        return get_llm_client(model, client_type=client_type, **overrides)
+        if model is None:
+            raise ValueError("Choose a model in Aster before starting a conversation.")
+        return model_factory(model)
 
-    operation = serve(llm_factory, sandbox=True) if sandbox else serve(llm_factory)
+    operation = serve(llm_factory, model_factory=model_factory, sandbox=sandbox)
     mark("server_start")
     asyncio.run(operation)
 

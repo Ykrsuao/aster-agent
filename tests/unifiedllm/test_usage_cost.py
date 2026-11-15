@@ -154,3 +154,34 @@ def test_provider_input_presence_survives_normalization_and_serialization(provid
     assert usage is not None
     assert usage.input_tokens_reported is reported
     assert LLMUsage.model_validate_json(usage.model_dump_json()).input_tokens_reported is reported
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["output_tokens", "cached_input_tokens", "cache_write_input_tokens", "reasoning_tokens"],
+)
+def test_hud_counter_presence_and_explicit_zero_survive_round_trips(field):
+    absent = LLMUsage.from_provider({"input_tokens": 100})
+    zero = LLMUsage.from_provider({"input_tokens": 100, field: 0})
+    assert getattr(absent, f"{field}_reported") is False
+    assert getattr(zero, f"{field}_reported") is True
+    assert getattr(LLMUsage.from_provider(absent.model_dump()), f"{field}_reported") is False
+    assert (
+        getattr(LLMUsage.model_validate_json(zero.model_dump_json()), f"{field}_reported") is True
+    )
+
+
+def test_explicit_cache_zero_is_not_replaced_by_another_alias_or_nested_estimate():
+    usage = LLMUsage.from_provider(
+        {
+            "input_tokens": 10,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "reasoning_tokens": 0,
+            "prompt_tokens_details": {"cached_tokens": 8, "cache_write_tokens": 2},
+            "completion_tokens_details": {"reasoning_tokens": 4},
+        }
+    )
+    assert usage.cached_input_tokens == 0
+    assert usage.cache_write_input_tokens == 0
+    assert usage.reasoning_tokens == 0

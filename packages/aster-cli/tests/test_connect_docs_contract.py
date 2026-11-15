@@ -78,6 +78,7 @@ def shell_commands(path):
 
 @pytest.fixture
 def offline(monkeypatch, tmp_path):
+    monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "True")
     monkeypatch.chdir(tmp_path)
     (tmp_path / "home").mkdir()
     for variable, path in {
@@ -100,6 +101,7 @@ def offline(monkeypatch, tmp_path):
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "OPENROUTER_API_KEY",
+        "DEEPSEEK_API_KEY",
     ]:
         monkeypatch.setenv(variable, "dummy-docs-key")
     monkeypatch.setattr(llm_config, "bundled_config_paths", lambda: [])
@@ -261,7 +263,7 @@ def approved_human_answers(monkeypatch):
     return asked
 
 
-@pytest.mark.parametrize("path,expected", [(SKILL, 11), (GUIDE, 20)], ids=["skill", "guide"])
+@pytest.mark.parametrize("path,expected", [(SKILL, 11), (GUIDE, 21)], ids=["skill", "guide"])
 def test_every_documented_shell_command(path, expected, offline, monkeypatch, tmp_path):
     commands = shell_commands(path)
     assert len(commands) == expected, "Review new/removed shell examples explicitly"
@@ -294,9 +296,16 @@ def test_every_documented_shell_command(path, expected, offline, monkeypatch, tm
             assert result.exit_code == 0, result.output
             registry = tmp_path / f"wizard-{index}/llm_config.yaml"
             assert registry.exists(), result.output
-            assert len(offline) > before, "Wizard must run its actual documented checks"
             entries = yaml.safe_load(registry.read_text(encoding="utf-8"))["models"]
             assert entries
+            if "--provider" in args and args[args.index("--provider") + 1] == "deepseek":
+                assert "--no-probe" in args
+                assert len(offline) == before, "Native setup must save without model calls"
+                assert entries["official"]["model_name"] == "deepseek/deepseek-flash"
+                assert entries["official"]["api_key_env"] == "DEEPSEEK_API_KEY"
+                assert "dummy-docs-key" not in result.output
+            else:
+                assert len(offline) > before, "Wizard must run its actual documented checks"
         else:
             # Agent examples must not read stdin or prompt.
             with monkeypatch.context() as headless:

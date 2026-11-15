@@ -123,9 +123,9 @@ def launch_tui(
         str(workspace),
         "--python",
         sys.executable,
-        "--model",
-        model,
     ]
+    if model:
+        arguments.extend(("--model", model))
     if client_type is not None:
         arguments.extend(("--client-type", client_type))
     if sandbox:

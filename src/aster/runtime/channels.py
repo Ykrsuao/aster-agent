@@ -21,6 +21,7 @@ import inspect
 import logging
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Coroutine
+from time import perf_counter, time
 from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import Field
@@ -133,12 +134,28 @@ class JobHandle:
         self.label = label or name
         self.state: JobState = "running"
         self._task = task
+        self.started_at = time()
+        self._started_clock = perf_counter()
+        self._elapsed: float | None = None
+        task.add_done_callback(self._finished)
         if buffer is True:
             self._values: list[Any] | deque[Any] = []
         elif isinstance(buffer, int) and buffer > 0:
             self._values = deque(maxlen=buffer)
         else:
             self._values = None  # type: ignore[assignment]
+
+    def _finished(self, _task: asyncio.Task[Any]) -> None:
+        self._elapsed = max(0.0, perf_counter() - self._started_clock)
+
+    @property
+    def elapsed_seconds(self) -> float:
+        """Monotonic job duration, frozen after the producer finishes or is cancelled."""
+        return (
+            self._elapsed
+            if self._elapsed is not None
+            else max(0.0, perf_counter() - self._started_clock)
+        )
 
     @property
     def values(self) -> list[Any]:

@@ -448,10 +448,19 @@ def select_connection(state: WizardState) -> bool:
     )
     if state.editing is None:
         show_step(state, 1)
-    if state.provider and state.provider not in (*connect.PROVIDERS, "custom"):
-        raise click.UsageError(
-            f"Unknown provider. Choose {', '.join(connect.PROVIDERS)}, or custom."
-        )
+    from aster.unifiedllm.connect.providers import providers
+
+    provider_labels = {
+        **{name: preset.label for name, preset in connect.PROVIDERS.items()},
+        **{
+            "litellm:custom" if item["id"] == "custom" else item["id"]: item["name"]
+            + (" · other services" if item["chat"] is False else "")
+            for item in providers()
+        },
+        "custom": "Custom endpoint",
+    }
+    if state.provider and state.provider not in provider_labels:
+        raise click.UsageError(f"Unknown provider. Choose {', '.join(provider_labels)}.")
     if not state.provider and not state.endpoint and not state.yes:
         # Preselect the first provider whose key is already set, so Enter works;
         # without any key, preselect the first listed provider.
@@ -466,13 +475,16 @@ def select_connection(state: WizardState) -> bool:
         state.provider = prompts.prompt(
             "Choose a provider",
             default=keyed,
-            choices=(*connect.PROVIDERS, "custom"),
-            labels={
-                **{name: preset.label for name, preset in connect.PROVIDERS.items()},
-                "custom": "Custom endpoint",
-            },
+            choices=tuple(provider_labels),
+            labels=provider_labels,
             open_menu=True,
+            searchable=True,
         )
+    if state.provider and state.provider not in (*connect.PROVIDERS, "custom"):
+        from ._connect_native import run
+
+        run(state)
+        return False
     # How the model listing is requested and authenticated depends on the
     # provider (or --listing-style). The API style for model requests is only
     # chosen after the model is selected.

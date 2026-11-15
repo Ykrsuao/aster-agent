@@ -16,6 +16,7 @@ _DECLARATIONS = {"reasoning_levels", "reasoning_default"}
 _RESERVED = _DECLARATIONS | {
     "reasoning_level",
     "media_inputs",
+    "usage_source",
     "model",
     "api_base",
     "base_url",

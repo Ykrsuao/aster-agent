@@ -88,7 +88,7 @@ impl Transport {
     pub async fn spawn(config: &BackendConfig) -> Result<Self> {
         let mut command = Command::new(&config.python);
         command
-            .args(["-u", "-m", "aster_acp", "--model", &config.model])
+            .args(["-u", "-m", "aster_acp"])
             .arg(if config.sandbox {
                 "--sandbox"
             } else {
@@ -96,6 +96,11 @@ impl Transport {
             })
             .current_dir(&config.workspace)
             .env("PYTHONIOENCODING", "utf-8");
+        if config.model.is_empty() {
+            command.arg("--select-model");
+        } else {
+            command.args(["--model", &config.model]);
+        }
         if let Some(client_type) = &config.client_type {
             command.args(["--client-type", client_type]);
         }

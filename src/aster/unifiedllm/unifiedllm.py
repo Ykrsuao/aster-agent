@@ -1262,8 +1262,12 @@ class UnifiedLLM(ABC):
         reasoning_level: str | None = None,
         media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
         context_window: int | None = None,
+        usage_source: Literal["response", "magpie"] = "response",
         **config,
     ):
+        if usage_source not in ("response", "magpie"):
+            raise ValueError("usage_source must be 'response' or 'magpie'")
+        self.usage_source = usage_source
         self.structured_output_mode = validate_structured_output_mode(structured_output_mode)
         if self.structured_output_mode == "anthropic" and not isinstance(self, CompletionClient):
             raise ValueError(
@@ -1319,6 +1323,10 @@ class UnifiedLLM(ABC):
           leave the route, and therefore the media permissions, unchanged.
         """
         from aster.unifiedllm.route_identity import no_endpoint_override
+
+        extra = overrides.get("extra_body")
+        if "usage_source" in overrides or (isinstance(extra, Mapping) and "usage_source" in extra):
+            raise ValueError("Configure usage_source on the client, not in a model request")
 
         overrides = {
             key: value
@@ -1807,6 +1815,48 @@ class UnifiedLLM(ABC):
         pass
 
 
+_USAGE_COUNTERS = (
+    "input_tokens",
+    "output_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "reasoning_tokens",
+)
+
+
+class _ResponseUsageObservation:
+    """Retain only usage provenance from a request's pre-normalization response."""
+
+    def __init__(self, logger_fn: Any = None) -> None:
+        self.logger_fn = logger_fn
+        self.usage: LLMUsage | None = None
+
+    def __call__(self, details: Mapping[str, Any]) -> None:
+        if details.get("log_event_type") == "post_api_call":
+            raw = details.get("original_response")
+            try:
+                if isinstance(raw, str):
+                    raw = json.loads(raw)
+                if isinstance(raw, Mapping):
+                    self.usage = LLMUsage.from_provider(raw.get("usage"))
+            except (TypeError, ValueError, OverflowError):
+                # Telemetry must not interfere with the response or the caller's logger.
+                pass
+        if callable(self.logger_fn):
+            self.logger_fn(details)
+
+    def apply(self, response: Any) -> None:
+        hidden = getattr(response, "_hidden_params", None)
+        if (
+            self.usage is not None
+            and isinstance(hidden, dict)
+            and "aster_input_tokens_reported" not in hidden
+        ):
+            # Stream collectors already record provenance at their own SDK boundary.
+            for name in _USAGE_COUNTERS:
+                hidden[f"aster_{name}_reported"] = getattr(self.usage, f"{name}_reported")
+
+
 @contextmanager
 def _reported_stream_tokens(raw: Any) -> Iterator[dict[str, int]]:
     """Observe SDK usage before LiteLLM replaces missing fields and zeros."""
@@ -1839,6 +1889,20 @@ def _reported_stream_tokens(raw: Any) -> Iterator[dict[str, int]]:
                         continue
                     reported[target] = count
                     break
+        # Anthropic's iterator normalizes usage before chunk_creator runs. Its
+        # cumulative provider mapping retains fields omitted by later deltas.
+        native_usage = getattr(getattr(raw, "completion_stream", None), "_cumulative_usage", None)
+        source = native_usage if isinstance(native_usage, Mapping) else value
+        observed = LLMUsage.from_provider(source)
+        if observed is not None:
+            for name in _USAGE_COUNTERS[2:]:
+                count = getattr(observed, name)
+                if (
+                    getattr(observed, f"{name}_reported")
+                    and count >= 0
+                    and (count > 0 or not isinstance(source, litellm.Usage))
+                ):
+                    reported[name] = count
         return create_chunk(chunk=chunk)
 
     # This wrapper belongs to one request. Restore its adapter even when the
@@ -1875,12 +1939,19 @@ def _complete_stream_usage(
         # Without that provenance, zero must not replace the normalized total.
         reported = {key: value for key, value in reported.items() if key != "prompt_tokens"}
     hidden["aster_input_tokens_reported"] = "prompt_tokens" in reported
+    hidden["aster_output_tokens_reported"] = "completion_tokens" in reported
+    for name in _USAGE_COUNTERS[2:]:
+        hidden[f"aster_{name}_reported"] = name in reported
     complete = "prompt_tokens" in reported and "completion_tokens" in reported
     # Keep explicit zeros and provider-specific normalization (including cache
     # accounting). SDK-normalized missing fields also become zero in newer
     # builders, so request estimates separately, without any usage-bearing
     # chunks, and only fill counters the provider omitted.
-    corrected: dict[str, Any] = {key: value for key, value in reported.items() if value == 0}
+    corrected: dict[str, Any] = {
+        key: value
+        for key, value in reported.items()
+        if key in ("prompt_tokens", "completion_tokens") and value == 0
+    }
     missing = [
         key
         for key in ("prompt_tokens", "completion_tokens")
@@ -2169,7 +2240,7 @@ def _extract_usage(raw_response: Any) -> LLMUsage | None:
         # A stamped usage.cost is LiteLLM's bill, not an upstream quote. Keep
         # cost_usd and other provider fields intact while restoring its source.
         if hasattr(provider_usage, "model_dump"):
-            provider_usage = provider_usage.model_dump()
+            provider_usage = provider_usage.model_dump(exclude_unset=True)
         elif hasattr(provider_usage, "_asdict"):
             provider_usage = provider_usage._asdict()
         if isinstance(provider_usage, Mapping):
@@ -2182,8 +2253,13 @@ def _extract_usage(raw_response: Any) -> LLMUsage | None:
         return None
 
     if isinstance(hidden, Mapping):
-        if hidden.get("aster_input_tokens_reported") is False:
-            usage = usage.model_copy(update={"input_tokens_reported": False})
+        presence = {
+            f"{name}_reported": hidden[f"aster_{name}_reported"]
+            for name in _USAGE_COUNTERS
+            if isinstance(hidden.get(f"aster_{name}_reported"), bool)
+        }
+        if presence:
+            usage = usage.model_copy(update=presence)
         if hidden.get("aster_cost_unavailable") is True:
             return usage
     if usage.cost_known:
@@ -2879,12 +2955,15 @@ class CompletionClient(UnifiedLLM):
                 api_params["client"] = http_client
 
         def _make_call():
+            observed = _ResponseUsageObservation(api_params.get("logger_fn"))
+            attempt_params = {**api_params, "logger_fn": observed}
             with self._native_output_request_scope(
-                api_params, output_model, native_output, is_async=False
+                attempt_params, output_model, native_output, is_async=False
             ):
                 raw_response = _collect_sync(
-                    litellm.completion(**api_params), messages=prepared_messages
+                    litellm.completion(**attempt_params), messages=prepared_messages
                 )
+            observed.apply(raw_response)
             reasoning, _ = _extract_reasoning_and_usage(raw_response)
             text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
 
@@ -3017,12 +3096,16 @@ class CompletionClient(UnifiedLLM):
                             stream_options = dict(stream_options or {})
                             stream_options.setdefault("include_usage", True)
                             api_params["stream_options"] = stream_options
+                observed = _ResponseUsageObservation(api_params.get("logger_fn"))
+                attempt_params = {**api_params, "logger_fn": observed}
                 with self._native_output_request_scope(
-                    api_params, output_model, native_output, is_async=True
+                    attempt_params, output_model, native_output, is_async=True
                 ):
-                    return await _collect_async(
-                        await litellm.acompletion(**api_params), messages=prepared_messages
+                    response = await _collect_async(
+                        await litellm.acompletion(**attempt_params), messages=prepared_messages
                     )
+                observed.apply(response)
+                return response
 
             raw_response = await _run_async_provider_call(
                 provider_call,

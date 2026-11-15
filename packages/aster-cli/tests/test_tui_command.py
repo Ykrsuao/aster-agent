@@ -224,14 +224,12 @@ else:
     assert result.returncode == 0, result.stderr
 
 
-def test_tui_requires_a_default_or_single_configured_model(terminal_command, terminal_app):
+def test_tui_opens_model_selection_without_a_configured_alias(terminal_command, terminal_app):
     result = CliRunner().invoke(terminal_command, [])
 
-    assert result.exit_code == 2
-    assert "--model" in result.output
-    assert "tui.default_model" in result.output
-    assert "ASTER_MODEL" in result.output
-    assert terminal_app == []
+    assert result.exit_code == 0, result.output
+    assert len(terminal_app) == 1
+    assert terminal_app[0]["model"] == ""
 
 
 def test_tui_bare_command_forwards_saved_default(terminal_command, terminal_app, tmp_path):
@@ -256,20 +254,18 @@ def test_tui_bare_command_forwards_single_configured_alias(
     assert terminal_app[0]["model"] == "only-chat"
 
 
-def test_tui_ambiguous_models_explain_how_to_choose(terminal_command, terminal_app, tmp_path):
+def test_tui_opens_model_choice_when_several_aliases_are_configured(
+    terminal_command, terminal_app, tmp_path
+):
     (tmp_path / "project/llm_config.yaml").write_text(
         "models:\n  first-chat: {}\n  second-chat: {}\n", encoding="utf-8"
     )
 
     result = CliRunner().invoke(terminal_command, [])
 
-    assert result.exit_code == 2
-    assert "Multiple configured chat models" in result.output
-    assert "first-chat" in result.output
-    assert "second-chat" in result.output
-    assert "tui.default_model" in result.output
-    assert "--model" in result.output
-    assert terminal_app == []
+    assert result.exit_code == 0, result.output
+    assert len(terminal_app) == 1
+    assert terminal_app[0]["model"] == ""
 
 
 def test_tui_default_comes_from_selected_workspace_without_changing_cwd(

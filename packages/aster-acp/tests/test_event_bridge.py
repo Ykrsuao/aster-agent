@@ -452,7 +452,9 @@ async def test_bridge_does_not_present_local_token_estimates_as_reported_context
         assert len(updates) == 1
         update = updates[0]
         assert (update.used, update.size) == (0, 0)
-        assert update.field_meta == {"aster": {"usageAvailable": False}}
+        assert update.field_meta is not None
+        assert update.field_meta["aster"]["usageAvailable"] is False
+        assert update.field_meta["aster"]["hud"]["tokens"]["input"] is None
         assert update.cost is not None
         assert update.cost.amount == 0.25
     finally:

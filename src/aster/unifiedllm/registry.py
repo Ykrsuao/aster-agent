@@ -185,7 +185,7 @@ def resolve_api_key_from_config(
 def _load_models_from_yaml(path: Path) -> dict[str, dict[str, Any] | None]:
     """Load the 'models' section from a YAML config file."""
     try:
-        data = yaml.safe_load(path.read_text())
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except Exception:
         logger.exception("Failed to load config file: %s", path)
         return {}
@@ -522,6 +522,10 @@ def client_from_config(
         "model": model,
         "drop_params": config.get("drop_params", True),
     }
+    if "provider_params" in config or "provider_credentials" in config:
+        from aster.unifiedllm.provider_settings import resolve_provider_settings
+
+        params.update(resolve_provider_settings(config))
 
     # api_base and base_url are two spellings of the same endpoint. An override
     # of None counts as no override: clearing the configured endpoint would send
@@ -578,6 +582,7 @@ def client_from_config(
         "structured_output_mode",
         "output_config",
         "media_inputs",
+        "usage_source",
     ):
         if key == "base_url" and endpoint_override is not None:
             continue
@@ -663,6 +668,9 @@ def client_from_config(
     )
     if not same_route and config.pop("context_window", None) is not None:
         dropped.insert(0, "context_window")
+    if not same_route and config.pop("usage_source", None) is not None:
+        params.pop("usage_source", None)
+        dropped.append("usage_source")
     # Say once per alias what the override cleared. Name only the alias and the
     # settings: never the override values, which may hold URLs or credentials.
     if dropped and name not in _warned_route_override:

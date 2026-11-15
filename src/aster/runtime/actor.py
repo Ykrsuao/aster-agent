@@ -33,7 +33,7 @@ from aster.context_blocks.scoped import _scoped_blocks_var, _scoped_events_var
 
 if TYPE_CHECKING:
     from aster.config.truncation_config import TruncationConfig
-    from aster.context_blocks.models import ContextWindowStats
+    from aster.context_blocks.models import ContextWindowStats, RenderedMessage
     from aster.decisions import (
         DecisionRequest,
         DecisionResponse,
@@ -624,6 +624,7 @@ class ActorRuntime:
         # asyncio.gather on the same agent, the last write wins. For per-task
         # isolation, read stats from the on_messages_built hook's context_stats kwarg.
         self._last_context_stats: ContextWindowStats | None = None
+        self._last_rendered_messages: tuple[RenderedMessage, ...] = ()
         self._last_prompt_tokens_actual: int | None = None
         self._event_format_cache: dict[tuple[tuple[str, Any], ...], Any] = {}
         self._event_format_cache_max_entries = 32
@@ -1094,6 +1095,9 @@ class ActorRuntime:
             tools=tools,
             request_params=kwargs,
         )
+        # Capture this render before middleware can await nested generations.
+        # Observers match its block boundaries against the final request bytes.
+        rendered_messages = self._last_rendered_messages
         _gen_hm = get_harness_metrics()
 
         # Get LLM client from context var (set by _execute_with_generation)
@@ -1172,6 +1176,9 @@ class ActorRuntime:
                         messages=ctx.messages,
                         generation_id=current_generation_id or "",
                         context_stats=self._last_context_stats,
+                        rendered_messages=rendered_messages,
+                        tools=ctx.params.get("tools"),
+                        output_model=ctx.params.get("output_model"),
                     )
                     om = ctx.params.get("output_model", None)
                     call_params = {k: v for k, v in ctx.params.items() if k != "output_model"}
@@ -1227,6 +1234,7 @@ class ActorRuntime:
                             request_params=ctx.params,
                             llm_client=ctx.client,
                         )
+                        rendered_messages = self._last_rendered_messages
                         _dynamic_context = _snapshot_llm_request(
                             self.event_manager, ctx.messages, current_generation_id or ""
                         )
@@ -1250,6 +1258,9 @@ class ActorRuntime:
                     messages=messages,
                     generation_id=current_generation_id or "",
                     context_stats=self._last_context_stats,
+                    rendered_messages=rendered_messages,
+                    tools=tools,
+                    output_model=output_model,
                 )
                 # Default prompt_cache_key to per-(agent, strategy) so:
                 #   - Parallel agents (same prefix) get distinct shards by
@@ -1317,6 +1328,17 @@ class ActorRuntime:
                         )
                         _dynamic_context = _snapshot_llm_request(
                             self.event_manager, messages, current_generation_id or ""
+                        )
+                        call_before_hook(
+                            "on_messages_built",
+                            agent=self.agent,
+                            method_name=self._current_method.__name__,
+                            messages=messages,
+                            generation_id=current_generation_id or "",
+                            context_stats=self._last_context_stats,
+                            rendered_messages=self._last_rendered_messages,
+                            tools=tools,
+                            output_model=output_model,
                         )
                         # Reuse _kwargs (already has the per-(agent, strategy) key set)
                         # so recovery lands on the same shard as the original attempt.
@@ -3382,6 +3404,7 @@ class ActorRuntime:
         # the call. Until then, keep render_context's local estimate as a fallback
         # for diagnostics and context-window error recovery.
         messages = result.output
+        self._last_rendered_messages = tuple(result.messages)
         self._last_context_stats = result.stats.model_copy(
             update={"output_reserve_is_fallback": limits.reserve_is_fallback}
         )

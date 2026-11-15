@@ -59,7 +59,7 @@ def _read_config(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def resolve_tui_model(workspace: Path) -> str:
+def resolve_tui_model(workspace: Path, *, allow_unselected: bool = False) -> str:
     """Return a settings default or the sole explicitly configured chat alias.
 
     Called only when the CLI and model environment variables supply no model.
@@ -99,6 +99,9 @@ def resolve_tui_model(workspace: Path) -> str:
     candidates = sorted(name for name, eligible in aliases.items() if eligible)
     if len(candidates) == 1:
         return candidates[0]
+
+    if allow_unselected:
+        return ""
 
     instruction = "Pass --model, set ASTER_MODEL, or set tui.default_model in .aster/settings.yaml."
     if not candidates:

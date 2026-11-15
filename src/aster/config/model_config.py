@@ -44,6 +44,7 @@ class ModelConfig(BaseModel):
     client_type: str | None = None
     api_style: str | None = None
     context_window: int | None = None
+    usage_source: Literal["response", "magpie"] = "response"
     media_inputs: MediaInputs = ()
     decision_image_transport: Literal["json", "typesafe_multipart"] = "json"
     typesafe_danger_zone_images: StrictBool = False

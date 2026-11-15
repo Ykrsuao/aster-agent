@@ -146,15 +146,19 @@ class LLMUsage(BaseModel):
     output_tokens: int = Field(
         default=0, description="Total output tokens reported by the provider"
     )
+    output_tokens_reported: bool = False
     cached_input_tokens: int = Field(
         default=0, description="Input tokens read from the provider's prompt cache"
     )
+    cached_input_tokens_reported: bool = False
     cache_write_input_tokens: int = Field(
         default=0, description="Input tokens written to the provider's prompt cache"
     )
+    cache_write_input_tokens_reported: bool = False
     reasoning_tokens: int = Field(
         default=0, description="Output tokens attributed to reasoning by the provider"
     )
+    reasoning_tokens_reported: bool = False
     total_tokens: int = Field(
         default=0, description="Total input and output tokens reported by the provider"
     )
@@ -180,6 +184,15 @@ class LLMUsage(BaseModel):
         valid = math.isfinite(amount) and amount >= 0
         return {
             **data,
+            **{
+                f"{name}_reported": data.get(f"{name}_reported", name in data) is True
+                for name in (
+                    "output_tokens",
+                    "cached_input_tokens",
+                    "cache_write_input_tokens",
+                    "reasoning_tokens",
+                )
+            },
             "cost_usd": amount if valid else 0.0,
             # Preserve explicit unknown metadata when normalizing or restoring
             # a usage object whose compatibility value is still numeric zero.
@@ -196,10 +209,10 @@ class LLMUsage(BaseModel):
         if hasattr(value, "_asdict"):
             value = value._asdict()
         elif hasattr(value, "model_dump"):
-            value = value.model_dump()
+            value = value.model_dump(exclude_unset=True)
 
         def get(source: Any, key: str, default: Any = None) -> Any:
-            if isinstance(source, dict):
+            if isinstance(source, Mapping):
                 return source.get(key, default)
             return getattr(source, key, default)
 
@@ -215,29 +228,46 @@ class LLMUsage(BaseModel):
         reported_input = first(value, "input_tokens", "prompt_tokens")
         input_tokens = int(reported_input or 0)
         output_tokens = int(first(value, "output_tokens", "completion_tokens") or 0)
+        cache_read = first(
+            value,
+            "cached_input_tokens",
+            "cached_tokens",
+            "cache_read_input_tokens",
+            "prompt_cache_hit_tokens",
+        )
+        if cache_read is None:
+            cache_read = first(prompt_details, "cached_tokens", "cache_read_input_tokens")
+        cache_write = first(value, "cache_write_input_tokens", "cache_creation_input_tokens")
+        if cache_write is None:
+            cache_write = first(
+                prompt_details,
+                "cache_write_tokens",
+                "cache_write_input_tokens",
+                "cache_creation_input_tokens",
+            )
+        reasoning = first(value, "reasoning_tokens")
+        if reasoning is None:
+            reasoning = first(completion_details, "reasoning_tokens", "thinking_tokens")
         return cls(
             input_tokens=input_tokens,
             input_tokens_reported=get(value, "input_tokens_reported", reported_input is not None),
             output_tokens=output_tokens,
-            cached_input_tokens=int(
-                first(value, "cached_input_tokens", "cached_tokens", "cache_read_input_tokens")
-                or first(prompt_details, "cached_tokens", "cache_read_input_tokens")
-                or 0
+            output_tokens_reported=get(
+                value,
+                "output_tokens_reported",
+                first(value, "output_tokens", "completion_tokens") is not None,
             ),
-            cache_write_input_tokens=int(
-                first(value, "cache_write_input_tokens", "cache_creation_input_tokens")
-                or first(
-                    prompt_details,
-                    "cache_write_tokens",
-                    "cache_write_input_tokens",
-                    "cache_creation_input_tokens",
-                )
-                or 0
+            cached_input_tokens_reported=get(
+                value, "cached_input_tokens_reported", cache_read is not None
             ),
-            reasoning_tokens=int(
-                first(value, "reasoning_tokens")
-                or first(completion_details, "reasoning_tokens")
-                or 0
+            cache_write_input_tokens_reported=get(
+                value, "cache_write_input_tokens_reported", cache_write is not None
+            ),
+            cached_input_tokens=int(cache_read or 0),
+            cache_write_input_tokens=int(cache_write or 0),
+            reasoning_tokens=int(reasoning or 0),
+            reasoning_tokens_reported=get(
+                value, "reasoning_tokens_reported", reasoning is not None
             ),
             total_tokens=int(first(value, "total_tokens") or input_tokens + output_tokens),
             cost_usd=first(value, "cost_usd", "cost"),

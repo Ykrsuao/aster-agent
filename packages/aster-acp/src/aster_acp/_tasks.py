@@ -73,6 +73,8 @@ class TaskTracker:
                     "title": handle.label[:500],
                     "status": handle.state,
                     "canStop": handle.state == "running",
+                    "startedAt": handle.started_at,
+                    "elapsedSeconds": round(handle.elapsed_seconds, 1),
                     "output": pformat(values, max_string=800, max_length=8, max_depth=2)[:3000]
                     if values
                     else "",

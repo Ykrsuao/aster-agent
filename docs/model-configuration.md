@@ -1,5 +1,17 @@
 # Model configuration
 
+Configure models in `llm_config.yaml`, or run [aster connect](model-connect.md)
+from your shell. Inside Aster, use `/model` to choose a configured model or
+`/model ALIAS` to switch directly. The model picker does not edit configuration.
+
+Native providers keep their LiteLLM prefix, such as `deepseek/`, `bedrock/` or
+`vertex_ai/`. Additional connection settings are stored in `provider_params`.
+Credential fields other than the primary `api_key_env` use
+`provider_credentials: [{param: aws_secret_access_key, env: MY_AWS_SECRET}]`;
+their values belong in the environment or `secrets.yaml`. These references are
+resolved when the client is constructed. A model's `additional_drop_params`
+remains independent of its provider selection and applies only to that model.
+
 Start with [aster connect](model-connect.md) to configure the reply/output token
 limit, known context window, media formats, and other model settings, and test
 your route. This page explains the saved settings and how configuration files
@@ -34,6 +46,7 @@ models:
 | `api_key_env` | The environment variable that holds the key. Never put the key itself in this file. Use `''` for a local server with no key. |
 | `max_tokens` | The reply limit per request, including reasoning. Use what you need, not the model's maximum. Connect suggests a published recommendation or 32,768, adjusted to known limits. |
 | `context_window` | Optional. An explicit input-window limit, overriding endpoint and LiteLLM metadata. |
+| `usage_source` | `response` by default. Set `magpie` to let the ACP HUD read request costs, cache usage and account quotas from this Magpie gateway. This setting is local metadata and is not sent to the model. |
 | `media_inputs` | Optional. Which media the model can receive. See [below](#explicit-media-inputs-migration). |
 
 Pick `model_name` and `client_type` by the endpoint's API:
@@ -79,6 +92,15 @@ not mistaken for an authenticated model's limits. Library users can explicitly
 Prices remain separate: LiteLLM can calculate costs for a known pricing route,
 or the response can report a cost. A model listing that supplies a context limit
 without prices does not establish a charge or imply that calls are free.
+
+For Magpie connections, `usage_source: magpie` uses the same configured API base
+and explicit credential to read Magpie's accounting endpoints. It matches a
+completed response by ID and checks its model and token counts before applying
+the gateway's priced USD estimate or cache details. Explicit costs already
+reported by the model response take precedence. Account credit quotas remain
+separate from the USD estimate. No model calls are made by these lookups.
+Changing the route or credential while constructing a client drops an inherited
+`usage_source`; explicitly select it again for a new Magpie connection.
 
 ### Decision models
 

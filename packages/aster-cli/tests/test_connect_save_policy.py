@@ -369,7 +369,7 @@ def test_human_key_model_failures_never_claim_success(tmp_path, monkeypatch, cap
         raise OSError("synthetic secret failure")
 
     if failure == "secret":
-        monkeypatch.setattr(secrets, "_write_secret_env", broken_secret)
+        monkeypatch.setattr(secrets, "_write_secret_envs", broken_secret)
     else:
         monkeypatch.setattr(connect, "_write_entry", broken_model)
     if failure == "rollback":
@@ -523,14 +523,14 @@ def test_acknowledged_failed_optional_report_is_partial_not_failed_baseline(tmp_
 
 def test_concurrent_secret_change_immediately_after_create_is_not_owned(tmp_path, monkeypatch):
     path = tmp_path / "secrets.yaml"
-    real_write = secrets._write_secret_env
+    real_write = secrets._write_secret_envs
 
     def changed_after_create(*a, **kw):
         owned = real_write(*a, **kw)
         path.write_text("env:\n  SYNTHETIC_SAVE_KEY: concurrent-synthetic-value\n")
         return owned
 
-    monkeypatch.setattr(secrets, "_write_secret_env", changed_after_create)
+    monkeypatch.setattr(secrets, "_write_secret_envs", changed_after_create)
     with pytest.raises(ValueError, match="partial state"):
         with secrets.new_secret_env(path, "SYNTHETIC_SAVE_KEY", "synthetic-secret-canary"):
             raise OSError("synthetic model failure")

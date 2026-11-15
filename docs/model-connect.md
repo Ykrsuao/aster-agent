@@ -19,14 +19,36 @@ see [Model configuration](model-configuration.md).
 
 ## CLI
 
+Run configuration from your shell. Inside the terminal workspace, `/model`
+selects an existing model; model configuration is managed separately in
+`llm_config.yaml` or with the standalone command below.
+
+### Standalone setup
+
 Run the guided setup:
 
 ```sh
 uv run aster connect
 ```
 
-Choose a provider (NVIDIA, NVIDIA Inference Hub, OpenAI, Anthropic,
-Google, OpenRouter, or a custom endpoint), the connection/key, then choose the
+The searchable provider menu contains the installed LiteLLM provider registry
+and Aster's existing presets. Additional native providers use a local connection
+form; `--yes` on this path requires `--no-probe`. They retain their native
+LiteLLM routing prefix and cloud authentication fields. For example:
+
+```sh
+uv run aster connect deepseek-flash --provider deepseek --as official \
+  --api-key-env DEEPSEEK_API_KEY --no-probe --yes
+```
+
+DeepSeek's release name and API ID differ: `deepseek-flash` selects the current
+Flash model. Its [official model table](https://api-docs.deepseek.com/quick_start/pricing)
+lists **DeepSeek-V4.1-Flash-1017** behind that ID as of 2026-11-15. Use the API ID
+in configuration; the full release name is not a replacement for it.
+
+The existing NVIDIA, NVIDIA Inference Hub, OpenAI, Anthropic, Google,
+OpenRouter and custom-endpoint presets retain the extended discovery/testing
+wizard below. Choose the connection/key, then choose the
 **model** from its list (or enter an exact ID). Connect reads server/OpenRouter
 metadata with GET requests. **Only after the model is selected** does it ask for
 its **Request interface**: a known interface or **Find what works**.
