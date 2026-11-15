@@ -4090,8 +4090,13 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
             .front()
             .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
             .unwrap_or_default();
+        let waiting = if state.preparing() {
+            "waiting for initialization"
+        } else {
+            "queued"
+        };
         let label = format!(
-            "{} {} queued · {next}",
+            "{} {} {waiting} · {next}",
             if state.queue_paused { "Ⅱ" } else { "↳" },
             state.queued.len(),
         );
@@ -4214,9 +4219,19 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
         exit_hint.into()
     } else if state.preparing() {
         if state.queue_paused {
-            "Preparing… queue paused"
+            if inner.width >= 70 {
+                "Initializing session… sending paused"
+            } else {
+                "Initializing… paused"
+            }
+        } else if !state.queued.is_empty() {
+            if inner.width >= 70 {
+                "Initializing session… will send automatically"
+            } else {
+                "Initializing… auto-send"
+            }
         } else {
-            "Preparing…"
+            "Initializing session…"
         }
         .into()
     } else {
@@ -4227,8 +4242,13 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
             status.push_str(&format!(" · {}", elapsed(seconds)));
         }
         if !state.queued.is_empty() && queue_height == 0 {
+            let waiting = if state.preparing() {
+                "waiting"
+            } else {
+                "queued"
+            };
             status.push_str(&format!(
-                " · {} queued{} · Ctrl+E",
+                " · {} {waiting}{} · Ctrl+E",
                 state.queued.len(),
                 if state.queue_paused { " (paused)" } else { "" }
             ));
@@ -4359,7 +4379,20 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
         if state.can_undo_attachment() {
             items.push(("Ctrl+Z", "undo attachment"));
         }
-        items.push(("Enter", if state.busy() { "queue" } else { "send" }));
+        items.push((
+            "Enter",
+            if state.preparing() {
+                if state.queue_paused && !state.queued.is_empty() {
+                    "hold message"
+                } else {
+                    "send when ready"
+                }
+            } else if state.busy() {
+                "queue"
+            } else {
+                "send"
+            },
+        ));
         if state.steering_supported && state.phase == Phase::Busy && state.active_turn_id.is_some()
         {
             items.push(("Alt+S", "steer"));
@@ -4384,9 +4417,11 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
     {
         frame.render_widget(Block::default().style(p.text()), footer);
         let hint = if state.queue_paused {
-            "Queue paused · Ctrl+E"
+            "Initializing · paused"
+        } else if footer.width >= 25 {
+            "Initializing… Esc recalls"
         } else {
-            "Preparing… Esc recalls"
+            "Init… Esc recalls"
         };
         line_at(
             frame,
@@ -5765,7 +5800,7 @@ mod tests {
                 state.queued.push_back("waiting message".into());
                 state.editor.insert_str("another draft");
                 let (text, _) = snapshot(&mut state, columns, rows);
-                assert!(text.contains("Preparing"), "{columns}x{rows}\n{text}");
+                assert!(text.contains("Init"), "{columns}x{rows}\n{text}");
                 assert!(text.contains("Esc recalls"), "{columns}x{rows}\n{text}");
                 assert!(!text.contains("Esc to stop"));
                 state.queue_paused = true;

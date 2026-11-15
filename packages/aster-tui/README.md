@@ -43,7 +43,9 @@ aliases and project configuration continue to work.
 from the environment running `aster`, so the ACP subprocess has the same installed
 packages. New conversations prepare their model and session in the background
 as the interface opens. You can type immediately. If preparation is still running
-when you press Enter, the message waits in the visible queue and is sent when ready.
+when you press Enter, the interface shows `Initializing session…` and explains
+that your message will send automatically when ready. Waiting messages are labeled
+`waiting for initialization`; messages submitted during an active turn use `queued`.
 `--resume ID` reopens a chosen session. `--continue` reopens the most recent
 session, or starts a new conversation when there is no history.
 
