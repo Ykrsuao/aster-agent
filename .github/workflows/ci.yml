@@ -447,6 +447,12 @@ jobs:
         with:
           name: windows-security
           path: artifacts/windows-security.xml
+      - name: Install ripgrep
+        shell: pwsh
+        run: |
+          choco install ripgrep --no-progress -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rg --version
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:

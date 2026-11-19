@@ -109,6 +109,7 @@ async def test_authenticated_parent_rejection_keeps_type_and_diagnostic():
     assert result.stdout == "before rejection\n"
 
 
+@pytest.mark.sandbox
 @pytest.mark.parametrize(
     "windows, host, message",
     [

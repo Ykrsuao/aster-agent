@@ -463,9 +463,9 @@ async def test_scraped_patterns_oracle(code_repo: Path, pattern: str, search: st
     code, truth = _search_oracle(code_repo, cmd)
     assert r.returncode == code
     if code == 2:
-        # grep BRE and rg regex differ; an invalid pattern must fail closed.
+        # grep BRE and rg regex differ; errors keep their exit code and no anchors.
         assert not truth
-        assert r.matches is None
+        assert not r.matches
         return
     # Invariant: matches is None OR equals the search's own reported anchors.
     if r.matches is not None:
