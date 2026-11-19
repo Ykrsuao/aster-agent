@@ -74,9 +74,20 @@ def render_sandbox_block(config: SandboxConfig, *, cell_timeout: float | None, d
         "Keep live objects in the namespace and return a summary instead."
     )
     lines.append(
-        "- self.<attr> reads a fresh copy from the agent, so in-place mutation like "
-        "self.items.append(x) is NOT persisted — call a method (self.record(x)) or "
-        "reassign (self.items = self.items + [x]) instead. return_result(value) must "
+        "- Host state APIs (self.vars, self.v, and Skill attributes such as self.context "
+        "or self.todo) proxy reads and writes to the live agent. Other attribute data "
+        "is copied: persist changes by calling a host method (self.record(x)) or "
+        "reassigning the attribute (self.items = self.items + [x])."
+    )
+    lines.append(
+        "- Data returned by host methods or item reads is copied into the sandbox. "
+        "After editing nested data from self.vars[key], assign the complete value back "
+        "to self.vars[key]. A Todo returned by self.todo.add/get is a copy; save its "
+        "state with self.todo.set_var(todo.id, key, value). Changes to that copy's "
+        "todo.v do not persist."
+    )
+    lines.append(
+        "- return_result(value) must "
         "pass the value itself, not a variable name. The Out[n] history and any "
         "caller-seeded variables are not available here; recompute what you need."
     )

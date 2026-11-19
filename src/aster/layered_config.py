@@ -46,6 +46,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from aster import workspace_trust
 from aster.paths import get_project_dir, get_user_dir
 
 logger = logging.getLogger(__name__)
@@ -135,7 +136,8 @@ def layered_paths(
 
     project_path = project_dir / filename if project_dir is not None else get_project_dir(filename)
     project = _resolved_if_exists(project_path)
-    if project is not None:
+    # A repository's own configuration applies only once the user trusts it.
+    if project is not None and workspace_trust.allows_project_dir(project_path.parent):
         _push(project)
 
     if env_var is not None:
@@ -199,7 +201,8 @@ def load_layered_yaml(
         # UnicodeError too: a non-UTF-8 settings file otherwise aborts every
         # caller of this loader rather than degrading to the other layers.
         except (OSError, UnicodeError, yaml.YAMLError) as e:
-            logger.warning("Failed to load config file %s: %s", path, e)
+            # YAML errors quote source lines, which may contain credentials.
+            logger.warning("Failed to load config file %s: %s", path, type(e).__name__)
             continue
         if data is None:
             continue

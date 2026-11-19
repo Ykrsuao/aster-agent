@@ -7,7 +7,10 @@ from __future__ import annotations
 import csv
 import importlib.machinery
 import importlib.metadata as metadata
+import importlib.util
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -93,6 +96,42 @@ def test_shared_namespace_keeps_every_distribution(tmp_path):
     result = _assert_stdlib_projection({"shared_tools"})
 
     assert sorted(result["shared_tools"]) == ["first-provider", "second-provider"]
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("importlib_metadata") is None,
+    reason="importlib_metadata backport is not installed",
+)
+def test_backport_finder_does_not_stat_unrelated_records(tmp_path):
+    _distribution(tmp_path, "tool-provider", ["toolkit/__init__.py", "unrelated/data.txt"])
+    code = textwrap.dedent("""
+        import importlib_metadata
+        import importlib.metadata as metadata
+        from pathlib import Path
+        import sys
+        from aster.runtime.sandbox.dependencies import packages_distributions
+
+        site = Path(sys.argv[1])
+        original_distributions = metadata.distributions
+        metadata.distributions = lambda: original_distributions(path=[str(site)])
+        original_exists = Path.exists
+
+        def checked_exists(path, *args, **kwargs):
+            assert not path.is_relative_to(site / "unrelated"), path
+            return original_exists(path, *args, **kwargs)
+
+        Path.exists = checked_exists
+        assert packages_distributions({"toolkit"}) == {"toolkit": ["tool-provider"]}
+    """)
+    # Importing the backport replaces a process-wide finder; isolate that effect.
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_missing_file_does_not_hide_a_later_existing_file(tmp_path):

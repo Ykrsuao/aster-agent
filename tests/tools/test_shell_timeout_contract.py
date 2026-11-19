@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Public shell timeout configuration, discovery, and recovery contracts."""
 
+import sys
+
 import pytest
 
 from aster.agentdoc import doc
@@ -34,7 +36,14 @@ async def test_inherited_timeout_preserves_partial_output_and_shell_recovers(
 ):
     shell = ShellTools(cwd=str(tmp_path), default_timeout=0.1)
     try:
-        command = "printf 'partial\\n'; sleep 2"
+        ready = "[Console]::Write('ready')" if sys.platform == "win32" else "printf ready"
+        # Warm up startup and first-script compilation before the 100 ms output guarantee.
+        assert (await shell.run(ready, timeout=5)).stdout == "ready"
+        command = (
+            "[Console]::WriteLine('partial'); Start-Sleep -Seconds 2"
+            if sys.platform == "win32"
+            else "printf 'partial\\n'; sleep 2"
+        )
         if streaming:
             events = [event async for event in shell.run_stream(command, **options)]
             result = events[-1]
@@ -48,7 +57,7 @@ async def test_inherited_timeout_preserves_partial_output_and_shell_recovers(
         assert result.returncode == 124
         assert result.timed_out
         assert "partial" in output
-        assert (await shell.run("printf ready", timeout=5)).stdout == "ready"
+        assert (await shell.run(ready, timeout=5)).stdout == "ready"
     finally:
         await shell.close()
 
@@ -57,7 +66,11 @@ async def test_inherited_timeout_preserves_partial_output_and_shell_recovers(
 async def test_explicit_timeout_overrides_instance_default(tmp_path, streaming):
     shell = ShellTools(cwd=str(tmp_path), default_timeout=0.05)
     try:
-        command = "sleep 0.2; printf complete"
+        command = (
+            "Start-Sleep -Milliseconds 200; [Console]::Write('complete')"
+            if sys.platform == "win32"
+            else "sleep 0.2; printf complete"
+        )
         if streaming:
             events = [event async for event in shell.run_stream(command, timeout=5)]
             result = events[-1]

@@ -12,7 +12,6 @@ import linecache
 import logging
 import math
 import re as _re
-import tokenize
 import types
 import warnings
 from collections.abc import Callable
@@ -53,6 +52,7 @@ from aster.events import (
     SystemPrompt,
 )
 from aster.llm_types import LLMUsage
+from aster.runtime._python_cell import prepare_cell
 from aster.runtime.context_vars import (
     _current_event_format_var,
     _in_exec_middleware,
@@ -464,6 +464,9 @@ from aster.runtime.stream_wrappers import (  # noqa: E402
 _generation_id_stack_var: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
     "generation_id_stack", default=()
 )
+_generation_lock_owners: contextvars.ContextVar[tuple[tuple[Any, Any], ...]] = (
+    contextvars.ContextVar("generation_lock_owners", default=())
+)
 
 
 def _get_generation_id_stack() -> tuple[str, ...]:
@@ -532,52 +535,6 @@ def _extract_captured_locals(exec_globals: dict[str, Any]) -> dict[str, Any]:
     return captured
 
 
-class _TopLevelReturnFinder(ast.NodeVisitor):
-    """Find return statements at the top level, not inside nested functions/classes.
-
-    This avoids false positives where a return inside a nested function definition
-    would incorrectly prevent implicit return transformation at the top level.
-    """
-
-    def __init__(self) -> None:
-        self.found = False
-
-    def visit_Return(self, node: ast.Return) -> None:
-        self.found = True
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        # Do not recurse into nested function definitions
-        pass
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        # Do not recurse into nested async function definitions
-        pass
-
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        # Do not recurse into class definitions
-        pass
-
-
-def _has_top_level_return(tree: ast.Module) -> bool:
-    """Check if the AST has any explicit return statements at the top level.
-
-    Does not recurse into nested function/class definitions, only checks
-    top-level statements and their non-function/class children.
-
-    Args:
-        tree: Parsed AST module
-
-    Returns:
-        True if there's an explicit return at the top level
-    """
-    finder = _TopLevelReturnFinder()
-    for node in tree.body:
-        finder.visit(node)
-        if finder.found:
-            return True
-    return False
-
-
 class ActorRuntime:
     """
     Actor runtime for serialized execution.
@@ -608,6 +565,7 @@ class ActorRuntime:
         # Lock for generation serialization (only one LLM generation session at a time)
         self._generation_lock = asyncio.Lock()
         self._generation_lock_loop: asyncio.AbstractEventLoop | None = None
+        self._generation_lock_owner: object | None = None
 
         # NOTE: Current generation context uses context variables (not instance attributes)
         # to support parallel nested calls via asyncio.gather.
@@ -1399,6 +1357,7 @@ class ActorRuntime:
         execution_count: int = 1,
         restrictions: "RestrictionsConfig | None" = None,
         sandbox_executor: Any = None,
+        namespace: dict[str, Any] | None = None,
     ) -> "ExecutionResult":
         """Execute Python code with namespace + strategy builtins (RuntimeServices protocol).
 
@@ -1416,6 +1375,7 @@ class ActorRuntime:
                 guarded worker process instead of in-process. The surrounding
                 middleware pipeline, before/after_code_execution hooks and events
                 still run here on the parent, so the sandbox composes with them.
+            namespace: Persistent globals dictionary for helpers defined across cells.
 
         Returns:
             ExecutionResult with stdout, error, defined_methods, and optionally returned_value.
@@ -1437,6 +1397,7 @@ class ActorRuntime:
                 "execution_count": execution_count,
                 "restrictions": restrictions,
                 "sandbox_executor": sandbox_executor,
+                "namespace": namespace,
             }
             ep_ctx = ExecutePythonContext(
                 code=code,
@@ -1581,7 +1542,7 @@ class ActorRuntime:
             hm = get_harness_metrics()
 
             # 1. Strip markdown code fences (safety net — CodeAct already strips
-            #    at the tool-call boundary before helper extraction; this covers
+            #    at the tool-call boundary; this covers
             #    PurePython and any direct execute_code callers).
             code, fence_token = strip_code_fences(code)
             if fence_token:
@@ -1592,6 +1553,10 @@ class ActorRuntime:
             exec_globals = _strip_blocked_modules(
                 exec_globals, effective_restrictions.blocked_modules
             )
+            if namespace is not None:
+                namespace.clear()
+                namespace.update(exec_globals)
+                exec_globals = namespace
 
             # 3. Strip redundant imports (from typing import Literal, etc.)
             from aster.runtime.code_validator import strip_redundant_imports
@@ -1655,15 +1620,25 @@ class ActorRuntime:
             # still wrap the cell on the parent. The worker owns the namespace,
             # stdout capture and wrapper, so we skip the in-process exec below.
             if sandbox_executor is not None:
-                sandbox_result = cast(
-                    ExecutionResult,
-                    await sandbox_executor.run_cell(code, execution_count=execution_count),
-                )
+                # Host operation adapters opt into the final middleware timeout.
+                # Existing VM executors retain their own deadline accounting,
+                # which excludes time spent in brokered host calls.
+                timed_runner = getattr(sandbox_executor, "run_cell_with_timeout", None)
+                if callable(timed_runner):
+                    result = cast(
+                        ExecutionResult,
+                        await timed_runner(code, execution_count=execution_count, timeout=timeout),
+                    )
+                else:
+                    result = cast(
+                        ExecutionResult,
+                        await sandbox_executor.run_cell(code, execution_count=execution_count),
+                    )
                 from aster.agentdoc._format_observation import record_truncation
 
-                for reason in sandbox_result.truncation_reasons:
+                for reason in result.truncation_reasons:
                     record_truncation(reason)
-                return sandbox_result
+                return result
 
             # Set up stdout/stderr capture BEFORE ast.parse/compile so that
             # SyntaxWarnings (e.g. invalid escape sequences in LLM-generated code)
@@ -1712,114 +1687,33 @@ class ActorRuntime:
             # compiled runtime tracebacks.
             cell_filename = f"Cell In[{execution_count}]"
 
-            # Parse AST to find method definitions
-            source_code = code
-            try:
-                tree = ast.parse(code, filename=cell_filename)
-            except SyntaxError as e:
-                result = ExecutionResult(stdout="", error=e, defined_methods={})
-                return result
-
-            # Extract method sources (functions with self as first param)
-            method_sources: dict[str, str] = {}
-            for node in ast.walk(tree):
-                if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                    if node.args.args and node.args.args[0].arg == "self":
-                        method_code = ast.get_source_segment(code, node)
-                        if method_code:
-                            method_sources[node.name] = method_code
-
-            # Check for explicit return BEFORE any transformation
-            # Use a NodeVisitor that doesn't recurse into nested functions/classes
-            # to avoid false positives from returns in nested definitions
-            has_explicit_return = _has_top_level_return(tree)
-
-            # Transform last expression to implicit return (REPL/Jupyter style)
-            # This allows `doc(self)` or `result` at the end to return their values
-            # IMPORTANT: We modify the code TEXT directly instead of using ast.unparse()
-            # because ast.unparse() removes comments and changes line numbers, which
-            # breaks error line number reporting for users.
-            implicit_return_added = False
-            if wrap_in_function and tree.body and not has_explicit_return:
-                last_stmt = tree.body[-1]
-                if isinstance(last_stmt, ast.Expr):
-                    # Get the line number of the last expression
-                    last_line_no = last_stmt.lineno
-                    code_lines = code.split("\n")
-                    if 1 <= last_line_no <= len(code_lines):
-                        # Insert 'return ' at the statement's COLUMN (not the line
-                        # start): a ';'-compound final line must keep its earlier
-                        # statements live — line-prefixing made them dead code.
-                        # This preserves comments and line structure.
-                        original_line = code_lines[last_line_no - 1]
-                        col = last_stmt.col_offset
-                        code_lines[last_line_no - 1] = (
-                            f"{original_line[:col]}return {original_line[col:]}"
-                        )
-                        code = "\n".join(code_lines)
-                        implicit_return_added = True
-                        get_harness_metrics().implicit_return()
-
             returned_value = _NO_RETURN
             captured_locals: dict[str, Any] = {}
-            wrapper_line_offset = 0  # Lines of wrapper before user code (for error adjustment)
+            wrapper_line_offset = 0
 
             try:
-                if wrap_in_function:
-                    # REPL mode: wrap entire code in async function to capture return
-                    # Use try/finally to capture locals regardless of how function exits
-                    indented = self._indent_code(code, "        ")
-                    # Initialize the captured locals dict in exec_globals
-                    exec_globals["__repl_captured_locals__"] = {}
-
-                    # Build global declarations for session variables (REPL persistence)
-                    # This allows code like `x = x + 5` to work when x was defined in a prior call
-                    # Without this, Python sees `x = ...` and marks x as local, failing on the RHS
-                    # We need to declare as global any variable that was passed in builtins
-                    global_vars = [
-                        name
-                        for name, val in (builtins or {}).items()
-                        if (
-                            not name.startswith("_")
-                            and name not in ("self", "asyncio", "__builtins__")
-                            and not callable(val)
-                            and not isinstance(val, types.ModuleType)
-                        )
-                    ]
-                    global_decl = f"    global {', '.join(global_vars)}\n" if global_vars else ""
-
-                    # Build the set of global var names for the finally block
-                    global_var_set = set(global_vars)
-
-                    # Calculate wrapper header line count for error line adjustment
-                    # User code starts after: "async def __repl_wrapper__():\n" + global_decl + "    try:\n"
-                    wrapper_header = f"async def __repl_wrapper__():\n{global_decl}    try:\n"
-                    wrapper_line_offset = wrapper_header.count("\n")
-
-                    wrapper = f"""async def __repl_wrapper__():
-{global_decl}    try:
-{indented}
-    finally:
-        # Capture locals for REPL persistence (exclude internals and builtins)
-        # Also capture updated global variables that were declared global
-        __repl_captured_locals__.update({{
-            k: v for k, v in locals().items()
-            if not k.startswith('_') and k not in ('self', 'asyncio')
-        }})
-        # Capture updated values of global variables we declared
-        for _gvar in {repr(global_var_set)}:
-            if _gvar in globals():
-                __repl_captured_locals__[_gvar] = globals()[_gvar]
-"""
-                    # Register wrapper with linecache so traceback can show source lines
-                    linecache.cache[cell_filename] = (
-                        len(wrapper),
-                        None,
-                        wrapper.splitlines(keepends=True),
+                try:
+                    cell = prepare_cell(
+                        code,
                         cell_filename,
+                        variables=builtins or {},
+                        wrap_in_function=wrap_in_function,
                     )
+                except SyntaxError as e:
+                    result = ExecutionResult(stdout="", error=e, defined_methods={})
+                    return result
 
-                    exec(compile(wrapper, cell_filename, "exec"), exec_globals)
+                # Keep the transformed body available to the after-execution hook.
+                code = cell.source
+                if cell.implicit_return_added:
+                    get_harness_metrics().implicit_return()
+                has_explicit_return = cell.explicit_return
+                wrapper_line_offset = cell.wrapper_line_offset
+
+                if wrap_in_function:
+                    exec_globals["__repl_captured_locals__"] = {}
+                    # Compile here so host annotation evaluation keeps its future flags.
+                    exec(compile(cell.execution_source(), cell_filename, "exec"), exec_globals)
                     # Execute with async safety (blocks Future.result() etc from event loop)
                     from aster.runtime.async_safety import agent_async_safety_context
 
@@ -1839,67 +1733,19 @@ class ActorRuntime:
                     # Extract captured locals (filter out non-serializable/internal items)
                     captured_locals = _extract_captured_locals(exec_globals)
 
-                    # Capture return value based on return type:
-                    # - Explicit return: always capture (even None)
-                    # - Implicit return: only capture non-None (like IPython)
-                    if has_explicit_return:
-                        returned_value = result_value
-                    elif implicit_return_added and result_value is not None:
-                        # Suppress None from implicit returns (matches IPython behavior)
-                        returned_value = result_value
+                    returned_value = cell.returned_value(result_value)
 
-                    # Still extract method definitions for helper functions
-                    # Re-execute just the function defs to bind them
-                    func_defs: list[ast.stmt] = [
-                        n
-                        for n in tree.body
-                        if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
-                    ]
-                    if func_defs:
-                        func_tree = ast.Module(body=func_defs, type_ignores=[])
-                        exec(compile(func_tree, cell_filename, "exec"), exec_globals)
-                        # Persisted helpers are compiled directly from the cell
-                        # AST, not through the async wrapper. Keep their source
-                        # cache aligned with those original line numbers.
-                        linecache.cache[cell_filename] = (
-                            len(source_code),
-                            None,
-                            source_code.splitlines(keepends=True),
-                            cell_filename,
-                        )
-                        # The wrapper's finally block captured the wrapped
-                        # function objects. Persist the direct-compiled versions
-                        # instead so later calls use source-relative line numbers.
-                        for node in func_defs:
-                            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                                if node.name in exec_globals:
-                                    captured_locals[node.name] = exec_globals[node.name]
-
-                    # Attach source code to defined functions for has_ellipsis_body() detection
-                    for method_name, method_code in method_sources.items():
-                        if method_name in exec_globals and callable(exec_globals[method_name]):
-                            try:
-                                exec_globals[method_name]._generated_source = method_code
-                            except (AttributeError, TypeError):
-                                # Some built-in functions don't allow attribute assignment
-                                pass
                 else:
                     # Original mode: separate function defs from other statements
-                    func_defs = [
-                        n
-                        for n in tree.body
-                        if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
-                    ]
                     other_stmts: list[ast.stmt] = [
                         n
-                        for n in tree.body
+                        for n in cell.tree.body
                         if not isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
                     ]
 
                     # Execute function definitions
-                    if func_defs:
-                        func_tree = ast.Module(body=func_defs, type_ignores=[])
-                        exec(compile(func_tree, cell_filename, "exec"), exec_globals)
+                    if cell.helper_ast is not None:
+                        exec(compile(cell.helper_ast, cell_filename, "exec"), exec_globals)
 
                     # Execute other statements
                     if other_stmts:
@@ -1943,22 +1789,9 @@ class ActorRuntime:
                             with agent_async_safety_context():
                                 exec(compile(other_tree, cell_filename, "exec"), exec_globals)
 
-                # Attach source code to defined functions for has_ellipsis_body() detection
-                for method_name, method_code in method_sources.items():
-                    if method_name in exec_globals and callable(exec_globals[method_name]):
-                        try:
-                            exec_globals[method_name]._generated_source = method_code
-                        except (AttributeError, TypeError):
-                            # Some built-in functions don't allow attribute assignment
-                            pass
-
                 # Helpers stay as REPL locals (captured via __repl_captured_locals__).
                 # The names list is kept in ExecutionResult.defined_methods for feedback only.
-                defined_methods: dict[str, Any] = {
-                    method_name: exec_globals[method_name]
-                    for method_name in method_sources
-                    if method_name in exec_globals and callable(exec_globals[method_name])
-                }
+                defined_methods = cell.finish_helpers(exec_globals)
 
                 result = ExecutionResult(
                     stdout=stdout_buffer.getvalue(),
@@ -2693,7 +2526,10 @@ class ActorRuntime:
 
         if needs_generation:
             # Check if we're already in a generation session (nested call)
-            in_session = _in_generation_session.get()
+            in_session = (
+                self._generation_lock_owner is not None
+                and (self, self._generation_lock_owner) in _generation_lock_owners.get()
+            )
 
             if in_session:
                 # We're inside a generation session - execute inline without acquiring lock
@@ -2712,9 +2548,18 @@ class ActorRuntime:
                 if isinstance(strategy, GenerationStrategyABC) and strategy.requires_lock:
                     self._ensure_generation_lock_on_current_loop()
                     async with self._generation_lock:
-                        return await self._execute_with_generation(
-                            method, args, kwargs, method_name
+                        owner = object()
+                        self._generation_lock_owner = owner
+                        token = _generation_lock_owners.set(
+                            (*_generation_lock_owners.get(), (self, owner))
                         )
+                        try:
+                            return await self._execute_with_generation(
+                                method, args, kwargs, method_name
+                            )
+                        finally:
+                            self._generation_lock_owner = None
+                            _generation_lock_owners.reset(token)
                 else:
                     # Lock-free execution (Methodic-style concurrent strategies)
                     return await self._execute_with_generation(method, args, kwargs, method_name)
@@ -3133,48 +2978,6 @@ class ActorRuntime:
             # Restore previous context variable value
             # (handles nested generation sessions correctly)
             _in_generation_session.set(prev_in_session)
-
-    def _indent_code(self, code: str, indent: str) -> str:
-        """Indent each line of code, preserving multiline string indentation."""
-        lines = code.split("\n")
-        try:
-            # Tokenize to find string literals
-            tokens = list(tokenize.generate_tokens(io.StringIO(code).readline))
-
-            # Track which lines are continuation lines of multiline strings
-            # Uses 0-indexed line numbers to match enumerate(lines)
-            string_ranges = set()
-            fstring_middle_type = getattr(tokenize, "FSTRING_MIDDLE", None)
-
-            for token in tokens:
-                # Check for STRING tokens or FSTRING_MIDDLE (Python 3.12+)
-                if token.type == tokenize.STRING or (
-                    fstring_middle_type and token.type == fstring_middle_type
-                ):
-                    # Convert 1-based tokenizer positions to 0-indexed
-                    start_line = token.start[0] - 1
-                    end_line = token.end[0] - 1
-
-                    # Check if this token spans multiple lines
-                    if end_line > start_line:
-                        # Mark continuation lines (not the first line, but include the last)
-                        for line_idx in range(start_line + 1, end_line + 1):
-                            string_ranges.add(line_idx)
-
-            # Indent normal lines, preserve string continuation lines
-            result_lines = []
-            for idx, line in enumerate(lines):
-                if idx in string_ranges:
-                    # String continuation - keep as-is
-                    result_lines.append(line)
-                else:
-                    # Normal code - add indent
-                    result_lines.append(indent + line)
-
-            return "\n".join(result_lines)
-        except (tokenize.TokenError, IndentationError):
-            # Fallback to simple indentation if tokenization fails
-            return "\n".join(indent + line for line in lines)
 
     async def _prepare_context(
         self,

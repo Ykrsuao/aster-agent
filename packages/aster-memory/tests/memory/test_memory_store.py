@@ -71,12 +71,96 @@ def test_save_persists_mutation(store, emb):
     assert got.access_count == 1
 
 
+def test_edit_commits_record_and_prepared_embedding_together(store, emb):
+    original = _add(store, emb, "original")
+    prepared = emb.embed("updated")
+    with store.edit(original.id, embedding=prepared) as current:
+        current.content = "updated"
+        current.touch()
+    assert store.get(original.id).content == "updated"
+    assert store.get(original.id).access_count == 1
+    assert np.array_equal(store.get_embedding(original.id), prepared)
+    assert store.knn(prepared, 1)[0][1] == pytest.approx(1)
+
+
+def test_unchanged_edit_discards_prepared_embedding(store, emb):
+    original = _add(store, emb, "original")
+    changes = store._conn.total_changes
+    with store.edit(original.id, embedding=emb.embed("unused")) as current:
+        assert current.content == original.content
+    assert store._conn.total_changes == changes
+    assert np.array_equal(store.get_embedding(original.id), emb.embed("original"))
+
+
+def test_transaction_rolls_back_records_edges_and_index(store, emb):
+    original = _add(store, emb, "original")
+    replacement = Memory(content="replacement")
+    with pytest.raises(RuntimeError, match="abort"):
+        with store.transaction():
+            store.add(replacement, emb.embed(replacement.content))
+            store.add_edge(replacement.id, original.id)
+            store.archive(original.id)
+            with store.edit(original.id, embedding=emb.embed("changed")) as current:
+                current.content = "changed"
+            raise RuntimeError("abort")
+    assert store.get(original.id).model_dump() == original.model_dump()
+    assert store.get(replacement.id) is None
+    assert store.neighbors(replacement.id) == []
+    assert np.array_equal(store.get_embedding(original.id), emb.embed("original"))
+    assert store.knn(emb.embed("original"), 2) == [(original.id, pytest.approx(1))]
+    with store.edit(original.id) as current:
+        current.touch()
+    assert store.get(original.id).access_count == 1
+
+
+def test_edit_serializes_increments_across_connections(tmp_path):
+    stores = [MemoryStore(tmp_path / "shared.sqlite") for _ in range(2)]
+    try:
+        original = stores[0].add(Memory(content="shared"))
+        barrier = threading.Barrier(2)
+
+        def increment(store):
+            barrier.wait(timeout=5)
+            for _ in range(40):
+                with store.edit(original.id) as current:
+                    current.touch()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(increment, store) for store in stores]
+            for future in futures:
+                future.result(timeout=15)
+        assert stores[0].get(original.id).access_count == 80
+        assert stores[1].get(original.id).recalled_count == 80
+    finally:
+        for store in stores:
+            store.close()
+
+
+def test_transaction_defers_index_writes_until_commit(store, emb):
+    class CommitCheckingIndex(NumpyVectorIndex):
+        def add(self, id, vector):
+            assert not store._conn.in_transaction
+            super().add(id, vector)
+
+        def remove(self, id):
+            assert not store._conn.in_transaction
+            super().remove(id)
+
+    store._index = CommitCheckingIndex()
+    original = _add(store, emb, "original")
+    with store.transaction():
+        store.archive(original.id)
+        replacement = _add(store, emb, "replacement")
+    assert store.knn(emb.embed("replacement"), 2) == [(replacement.id, pytest.approx(1))]
+
+
 def test_edges_roundtrip(store, emb):
     a = _add(store, emb, "alpha")
     b = _add(store, emb, "beta")
     a.add_edge(b.id, EdgeType.CAUSES, 0.8)
     store.save(a)
     got = store.get(a.id)
+    assert got.edges[0].created_at == a.edges[0].created_at
     assert any(e.target_id == b.id and e.type == EdgeType.CAUSES for e in got.edges)
     assert any(e.target_id == b.id for e in store.neighbors(a.id))
 

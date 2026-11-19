@@ -15,7 +15,7 @@ from aster.unifiedllm import FakeLLMClient
 
 @pytest.mark.asyncio
 async def test_helper_method_can_use_asyncio_gather():
-    """Test that a prebound helper method can call asyncio.gather().
+    """Test that a helper method can call asyncio.gather().
 
     This verifies that the helper method's execution namespace includes asyncio
     and matches ActorRuntime.execute_code() globals.
@@ -62,7 +62,7 @@ async def test_helper_method_can_use_doc_introspection():
     """Test that helper methods can access agentdoc helpers (doc, brief, etc).
 
     This verifies that helper methods have access to agentdoc introspection functions
-    that are part of ExecutionNamespaceBuilder.
+    that are part of the runtime execution namespace.
     """
     # helpers are plain callables — LLM calls them as helper(self, ...).
     code = """

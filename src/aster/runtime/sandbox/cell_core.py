@@ -2,29 +2,24 @@
 # SPDX-License-Identifier: Apache-2.0
 """Cell execution core used inside the sandbox worker.
 
-``run_cell_source`` reproduces the REPL semantics of
-``ActorRuntime.execute_code`` (the ``wrap_in_function=True`` path): an async
-wrapper that captures the last-expression / explicit ``return`` value, persists
-locals into the namespace, registers the cell with ``linecache`` for accurate
-tracebacks, and surfaces ``return_result()`` as an ``ExecutionSignal``.
+``run_cell_source`` uses the same execution-cell source preparation as
+``ActorRuntime.execute_code`` (the ``wrap_in_function=True`` path), persists
+locals into the namespace, and surfaces ``return_result()`` as an
+``ExecutionSignal``.
 
 It runs *inside the worker*, on a plain namespace dict, with no dependency on the
-live agent or the parent event loop — those concerns stay on the parent. Keeping
-the wrapper string byte-for-byte aligned with the actor preserves
-``wrapper_line_offset`` so error line numbers match the in-process backend.
+live agent or the parent event loop — those concerns stay on the parent.
 """
 
 from __future__ import annotations
 
-import ast
 import contextlib
-import linecache
-import types
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 from aster.agentdoc import FileBackedTruncatingStringIO, TruncatingStringIO
 from aster.events import _NO_RETURN, ExecutionResult, ExecutionSignal
+from aster.runtime._python_cell import prepare_cell
 
 
 class _HookedBuffer:
@@ -52,33 +47,6 @@ class _HookedBuffer:
     @property
     def was_truncated(self):
         return self._buffer.was_truncated
-
-
-def _has_top_level_return(tree: ast.Module) -> bool:
-    """True if the module body has a ``return`` outside any nested def/class."""
-
-    class _V(ast.NodeVisitor):
-        found = False
-
-        def visit_Return(self, node: ast.Return) -> None:
-            self.found = True
-
-        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-            pass
-
-        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-            pass
-
-        def visit_ClassDef(self, node: ast.ClassDef) -> None:
-            pass
-
-    v = _V()
-    v.visit(tree)
-    return v.found
-
-
-def _indent(code: str, prefix: str) -> str:
-    return "\n".join(prefix + line if line else line for line in code.split("\n"))
 
 
 async def run_cell_source(
@@ -147,78 +115,21 @@ async def run_cell_source(
     defined_methods: dict[str, Any] = {}
     try:
         with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
-            source_code = code
             try:
-                tree = ast.parse(code, filename=cell_filename)
+                cell = prepare_cell(
+                    code,
+                    cell_filename,
+                    variables=namespace,
+                    wrap_in_function=True,
+                )
             except SyntaxError as exc:
                 return build_result(error=exc)
 
-            method_sources: dict[str, str] = {}
-            for node in ast.walk(tree):
-                if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                    if node.args.args and node.args.args[0].arg == "self":
-                        seg = ast.get_source_segment(code, node)
-                        if seg:
-                            method_sources[node.name] = seg
-
-            has_explicit_return = _has_top_level_return(tree)
-
-            # Implicit last-expression return (IPython/Jupyter style).
-            # Insert ``return `` at the statement's COLUMN, not the line start:
-            # a ``;``-compound final line (``a(); b()``) must keep every earlier
-            # statement live — line-prefixing made them dead code (or a bogus
-            # SyntaxError for ``x = 1; f(x)``).
-            implicit_return_added = False
-            if tree.body and not has_explicit_return and isinstance(tree.body[-1], ast.Expr):
-                last_stmt = tree.body[-1]
-                last_line_no = last_stmt.lineno
-                lines = code.split("\n")
-                if 1 <= last_line_no <= len(lines):
-                    original = lines[last_line_no - 1]
-                    col = last_stmt.col_offset
-                    lines[last_line_no - 1] = f"{original[:col]}return {original[col:]}"
-                    code = "\n".join(lines)
-                    implicit_return_added = True
-
-            # Names to declare ``global`` so REPL rebinds (``x = x + 1``) work.
-            global_vars = [
-                name
-                for name, val in namespace.items()
-                if (
-                    not name.startswith("_")
-                    and name not in ("self", "asyncio", "__builtins__")
-                    and not callable(val)
-                    and not isinstance(val, types.ModuleType)
-                )
-            ]
-            global_decl = f"    global {', '.join(global_vars)}\n" if global_vars else ""
-            global_var_set = set(global_vars)
-
-            wrapper_header = f"async def __repl_wrapper__():\n{global_decl}    try:\n"
-            wrapper_line_offset = wrapper_header.count("\n")
-
+            has_explicit_return = cell.explicit_return
+            wrapper_line_offset = cell.wrapper_line_offset
             namespace["__repl_captured_locals__"] = {}
-            indented = _indent(code, "        ")
-            wrapper = f"""async def __repl_wrapper__():
-{global_decl}    try:
-{indented}
-    finally:
-        __repl_captured_locals__.update({{
-            k: v for k, v in locals().items()
-            if not k.startswith('_') and k not in ('self', 'asyncio')
-        }})
-        for _gvar in {global_var_set!r}:
-            if _gvar in globals():
-                __repl_captured_locals__[_gvar] = globals()[_gvar]
-"""
-            linecache.cache[cell_filename] = (
-                len(wrapper),
-                None,
-                wrapper.splitlines(keepends=True),
-                cell_filename,
-            )
-
-            exec(compile(wrapper, cell_filename, "exec"), namespace)
+            # Compile here to retain the guest's postponed annotation evaluation.
+            exec(compile(cell.execution_source(), cell_filename, "exec"), namespace)
             try:
                 result_value = await namespace["__repl_wrapper__"]()
             finally:
@@ -227,37 +138,9 @@ async def run_cell_source(
                 for k, v in captured.items():
                     namespace[k] = v
 
-            if has_explicit_return:
-                returned_value = result_value
-            elif implicit_return_added and result_value is not None:
-                returned_value = result_value
+            returned_value = cell.returned_value(result_value)
 
-            # Re-bind top-level function defs so helpers persist by name.
-            func_defs: list[ast.stmt] = [
-                n for n in tree.body if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
-            ]
-            if func_defs:
-                exec(
-                    compile(ast.Module(body=func_defs, type_ignores=[]), cell_filename, "exec"),
-                    namespace,
-                )
-                # Persisted helpers are compiled directly from the cell AST, not
-                # through the async wrapper. Keep their source cache aligned with
-                # those original line numbers for later-cell tracebacks.
-                linecache.cache[cell_filename] = (
-                    len(source_code),
-                    None,
-                    source_code.splitlines(keepends=True),
-                    cell_filename,
-                )
-            for name, src in method_sources.items():
-                fn = namespace.get(name)
-                if callable(fn):
-                    with contextlib.suppress(AttributeError, TypeError):
-                        cast(Any, fn)._generated_source = src
-            defined_methods = {
-                name: namespace[name] for name in method_sources if callable(namespace.get(name))
-            }
+            defined_methods = cell.finish_helpers(namespace)
             return build_result()
     except ExecutionSignal as sig:
         return build_result(signal=sig)

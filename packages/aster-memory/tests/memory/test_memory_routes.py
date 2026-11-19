@@ -39,7 +39,7 @@ def _serve_from_tmp(tmp_path, monkeypatch):
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    return TestClient(app, base_url="http://localhost", client=("127.0.0.1", 54321))
 
 
 @pytest.fixture

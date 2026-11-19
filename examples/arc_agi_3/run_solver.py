@@ -213,7 +213,7 @@ def _load_dotenv() -> None:
     f = REPO_ROOT / ".env"
     if not f.exists():
         return
-    for line in f.read_text().splitlines():
+    for line in f.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -241,8 +241,8 @@ def main() -> int:
     # embeds the real game name. The results dir keeps only the run_multi/viewer
     # structure and receives the durable artifacts at run end. The subdirs the
     # live viewer tails (agent_logs/traces/steps) and the agent+harness share
-    # (ipc, team_aster, agent_logs) are symlinked from results -> neutral so the
-    # dashboard reads them live; the symlinks are replaced by real copies at the
+    # (ipc, team_aster, agent_logs) are linked from results -> neutral so the
+    # dashboard reads them live; the directory links become real copies at the
     # end (see _copy_back). The agent itself only ever sees the neutral path.
     import re as _re
 
@@ -270,12 +270,20 @@ def main() -> int:
     _LINKS = ("ipc", "team_aster", "agent_logs", "traces", "steps")
     for name in _LINKS:
         link = run_dir / name
-        if link.is_symlink() or link.exists():
+        if link.is_symlink() or link.is_junction() or link.exists():
             if link.is_symlink() or link.is_file():
                 link.unlink()
+            elif link.is_junction():
+                link.rmdir()
             else:
                 shutil.rmtree(link, ignore_errors=True)
-        link.symlink_to(neutral / name)
+        if sys.platform == "win32":
+            # Directory junctions do not require Windows symlink privileges.
+            import _winapi
+
+            _winapi.CreateJunction(str(neutral / name), str(link))
+        else:
+            link.symlink_to(neutral / name, target_is_directory=True)
 
     launcher_cmd = [
         MAIN_PY,
@@ -396,7 +404,7 @@ def main() -> int:
     if args.reasoning_effort:
         llm_uri = f"{llm_uri}#{args.reasoning_effort}"
     if not llm_uri and (REPO_ROOT / ".env").exists():
-        for line in (REPO_ROOT / ".env").read_text().splitlines():
+        for line in (REPO_ROOT / ".env").read_text(encoding="utf-8").splitlines():
             if line.startswith("ARC_LLM_MODEL="):
                 llm_uri = line.split("=", 1)[1].strip()
                 break
@@ -453,7 +461,7 @@ def main() -> int:
 
     # End-of-run copy-back: the agent+harness worked entirely in the neutral /tmp
     # dir (no game name in any path). Move the durable artifacts into the results
-    # dir — replacing the results->neutral symlinks with real copies — so the
+    # dir — replacing the results->neutral directory links with real copies — so the
     # viewer, analysis, and seeding find memory.sqlite / helpers / knowledge /
     # agent_logs / traces / steps / ipc / result.json where they expect. Then the
     # neutral dir is deleted so nothing lingers under /tmp. Idempotent.
@@ -475,12 +483,14 @@ def main() -> int:
                             shutil.copy2(src, f"{ws_store}{suffix}")
                         except Exception as e:
                             print(f"[run] warning: memory fallback copy failed: {e}")
-        # 2) move neutral -> results, swapping each symlink for a real copy.
+        # 2) move neutral -> results, swapping each directory link for a real copy.
         if neutral.exists():
             for name in ("team_aster", "agent_logs", "traces", "steps", "ipc"):
                 src, dst = neutral / name, run_dir / name
                 if dst.is_symlink() or dst.is_file():
                     dst.unlink()
+                elif dst.is_junction():
+                    dst.rmdir()
                 elif dst.is_dir():
                     shutil.rmtree(dst, ignore_errors=True)
                 if src.is_dir():
@@ -526,9 +536,12 @@ def main() -> int:
         _teardown()
         raise SystemExit(128 + signum)
 
-    for _s in (signal.SIGTERM, signal.SIGHUP):
+    for name in ("SIGTERM", "SIGHUP"):
+        signum = getattr(signal, name, None)
+        if signum is None:
+            continue
         try:
-            signal.signal(_s, _sig_teardown)
+            signal.signal(signum, _sig_teardown)
         except (ValueError, OSError):
             pass
 
@@ -555,7 +568,7 @@ def main() -> int:
 
     result_path = run_dir / "result.json"
     if result_path.exists():
-        result = json.loads(result_path.read_text())
+        result = json.loads(result_path.read_text(encoding="utf-8"))
         print(
             f"[run] finished: termination={result.get('termination_reason')} "
             f"levels={result.get('levels_completed')} "

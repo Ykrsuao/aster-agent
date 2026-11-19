@@ -3,14 +3,21 @@
 """Tests for extract_and_parse_json robustness."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel
 
-from aster.unifiedllm import extract_and_parse_json
+from aster.unifiedllm import CompletionClient, ResponsesClient, extract_and_parse_json
 from aster.unifiedllm.unifiedllm import _llm_metrics_callback
 
 
 class TestExtractAndParseJson:
+    @pytest.mark.parametrize("wrapper", ["{}", "```json\n{}\n```", "Result: {}"])
+    def test_json_looking_strings_keep_their_type(self, wrapper):
+        payload = {"text": "[1, 2]", "example": '{"a": 1}'}
+        assert extract_and_parse_json(wrapper.format(json.dumps(payload))) == payload
+
     def test_plain_json(self):
         """Clean JSON is parsed without modification."""
         result = extract_and_parse_json('{"answer": "42", "confidence": 0.9}')
@@ -98,3 +105,27 @@ uv run python scripts/run_local.py
         """Non-JSON text raises JSONDecodeError."""
         with pytest.raises(json.JSONDecodeError):
             extract_and_parse_json("this is not json at all")
+
+
+@pytest.mark.parametrize("responses", [False, True])
+def test_structured_output_preserves_json_looking_string_fields(responses):
+    class Result(BaseModel):
+        text: str
+
+    content = json.dumps({"text": "[1, 2]"})
+    if responses:
+        raw = SimpleNamespace(
+            output=[{"type": "message", "content": [{"type": "output_text", "text": content}]}],
+            status="completed",
+        )
+        response = ResponsesClient._response_from_output(None, raw, None, None, Result)
+    else:
+        from aster.unifiedllm._litellm import litellm
+
+        raw = litellm.ModelResponse(
+            choices=[
+                {"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}
+            ]
+        )
+        response = CompletionClient._response_from_chat(raw, None, None, Result)
+    assert response.parsed == Result(text="[1, 2]")

@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from acp import RequestError, text_block
-from acp.schema import AgentPlanUpdate, RequestPermissionResponse
+from acp.schema import AgentPlanUpdate, RequestPermissionResponse, UsageUpdate
 from aster_acp.server import CodingACPAdapter
 from aster_cli.coding.reply_strategy import CodingReplyStrategy
 
@@ -20,6 +20,7 @@ from aster.config import CodeActConfig
 from aster.events import Task
 from aster.skill_registry import SkillRegistry
 from aster.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
+from aster.unifiedllm.reasoning import ReasoningConfig
 
 _PNG = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l1QAAAAASUVORK5CYII="
@@ -76,11 +77,11 @@ def reply(identifier, *, source=None, message="Complete"):
 
 
 @asynccontextmanager
-async def session_for(tmp_path, *responses, enabled=True, images=False):
+async def session_for(tmp_path, *responses, enabled=True, images=False, model_factory=None):
     llm = FakeLLMClient(responses, strict_exhaustion=True)
     if images:
         llm.media_inputs = ("image",)
-    adapter = CodingACPAdapter(lambda: llm)
+    adapter = CodingACPAdapter(lambda: llm, model_factory=model_factory)
     client = Client()
     adapter.on_connect(client)
     handshake = await adapter.initialize(
@@ -106,7 +107,7 @@ async def extension(adapter, session, method, **params):
     )
 
 
-async def test_negotiation_leaves_existing_clients_execution_unchanged(tmp_path):
+async def test_clients_without_aster_capabilities_are_asked_before_execution(tmp_path):
     target = tmp_path / "legacy.txt"
     source = f"open({str(target)!r}, 'w').write('legacy')"
     async with session_for(
@@ -115,13 +116,23 @@ async def test_negotiation_leaves_existing_clients_execution_unchanged(tmp_path)
         assert handshake.field_meta["aster"]["runtimeControls"] is True
         assert handshake.agent_capabilities.prompt_capabilities.image is True
         assert handshake.agent_capabilities.prompt_capabilities.embedded_context is True
-        assert session.agent._execution_control is None
-        assert new.modes is None
+        assert session.agent._execution_control is session.controls
+        assert new.modes is not None and new.modes.current_mode_id == "code"
         await adapter.prompt(session.handle.id, [text_block("Write the file")])
+        assert [request.raw_input for request in client.permissions] == [{"code": source}]
         assert target.read_text() == "legacy"
-        assert not client.permissions
-        with pytest.raises(RequestError):
-            await extension(adapter, session, "configure", mode="plan")
+
+
+async def test_clients_without_aster_capabilities_can_refuse_execution(tmp_path):
+    target = tmp_path / "legacy.txt"
+    source = f"open({str(target)!r}, 'w').write('legacy')"
+    async with session_for(
+        tmp_path, reply("write", source=source), reply("done"), enabled=False
+    ) as (adapter, session, client, llm, handshake, new):
+        client.choice = "reject"
+        await adapter.prompt(session.handle.id, [text_block("Write the file")])
+        assert len(client.permissions) == 1
+        assert not target.exists()
 
 
 @pytest.mark.parametrize(
@@ -176,6 +187,8 @@ async def test_pending_approval_can_be_cancelled_and_settings_do_not_race_turn(t
         with pytest.raises(RequestError):
             await extension(adapter, session, "configure", approval="session")
         with pytest.raises(RequestError):
+            await extension(adapter, session, "configure", reasoningLevel=None)
+        with pytest.raises(RequestError):
             await adapter.set_session_mode(session.handle.id, "plan")
         await adapter.cancel(session.handle.id)
         assert (await turn).stop_reason == "cancelled"
@@ -188,14 +201,27 @@ async def test_pending_approval_can_be_cancelled_and_settings_do_not_race_turn(t
 async def test_model_change_updates_next_call_and_session_grant_is_not_restored(
     tmp_path, monkeypatch
 ):
-    async with session_for(tmp_path) as (adapter, session, client, llm, handshake, new):
+    candidates = []
+
+    def make_model(name):
         candidate = FakeLLMClient([reply("next", message="New model")], strict_exhaustion=True)
-        candidate.model = "beta"
+        candidate.model = name
+        candidates.append(candidate)
+        return candidate
+
+    async with session_for(tmp_path, model_factory=make_model) as (
+        adapter,
+        session,
+        client,
+        llm,
+        handshake,
+        new,
+    ):
         session.controls._model_names = lambda: ["beta"]
-        session.controls._model_factory = lambda name: candidate
         close = AsyncMock()
         monkeypatch.setattr(llm, "aclose", close)
         changed = await extension(adapter, session, "configure", model="beta", approval="session")
+        candidate = candidates[0]
         assert changed["model"] == "beta"
         assert session.agent.llm is candidate
         close.assert_awaited_once()
@@ -208,6 +234,45 @@ async def test_model_change_updates_next_call_and_session_grant_is_not_restored(
         restored = (await adapter._sessions.get(session.handle.id)).value
         assert loaded.modes.current_mode_id == "code"
         assert restored.controls.status()["approval"] == "ask"
+        assert restored.controls.status()["model"] == "beta"
+        assert len(candidates) == 2 and restored.agent.llm is candidates[1]
+
+
+async def test_reasoning_extension_preserves_selection_until_explicitly_cleared(tmp_path):
+    async with session_for(tmp_path) as (adapter, session, client, llm, handshake, new):
+        llm._reasoning_config = ReasoningConfig(
+            levels={"low": {"reasoning_effort": "low"}, "high": {"reasoning_effort": "high"}},
+            default="low",
+        )
+        llm._context_window = 1_048_576
+        inspected = await extension(adapter, session, "runtime")
+        assert inspected["reasoningLevels"] == ["low", "high"]
+        assert inspected["contextWindow"] == 1_048_576
+        changed = await extension(adapter, session, "configure", reasoningLevel="high")
+        assert changed["reasoningLevel"] == "high"
+        assert changed["reasoningSelection"] == llm.reasoning_level == "high"
+        await extension(adapter, session, "configure", mode="plan")
+        assert llm.reasoning_level == "high"
+        reset = await extension(adapter, session, "configure", reasoningLevel=None)
+        assert reset["reasoningSelection"] is llm.reasoning_level is None
+        assert reset["reasoningDefault"] == reset["reasoningLevel"] == "low"
+        await session.bridge.flush()
+        usage = [update for update in client.updates if isinstance(update, UsageUpdate)]
+        assert usage[-1].used == 0 and usage[-1].size == 1_048_576
+        assert usage[-1].field_meta["aster"]["usagePending"] is True
+        assert usage[-1].field_meta["aster"]["usageAvailable"] is False
+        assert llm.call_count == 0
+
+
+@pytest.mark.parametrize("level", ["", " ", 1, True, [], {}, "x" * 257, "high"])
+async def test_reasoning_extension_rejects_invalid_or_undeclared_levels(tmp_path, level):
+    async with session_for(tmp_path) as (adapter, session, client, llm, handshake, new):
+        before = session.controls.status()
+        with pytest.raises(RequestError):
+            await extension(adapter, session, "configure", reasoningLevel=level, mode="plan")
+        assert session.controls.status() == before
+        assert llm.reasoning_level is None
+        assert llm.call_count == 0
 
 
 async def test_task_inspection_and_targeted_stop_work_during_foreground_prompt(
@@ -335,11 +400,14 @@ async def test_invalid_attachment_is_rejected_before_recording_or_using_turn_id(
         handshake,
         new,
     ):
-        with pytest.raises(RequestError):
+        invalid_image = {**image(), "data": "not-valid-base64"}
+        with pytest.raises(RequestError) as raised:
             await adapter.prompt(
-                session.handle.id, [text_block("Look"), image()], aster={"turnId": "same"}
+                session.handle.id, [text_block("Look"), invalid_image], aster={"turnId": "same"}
             )
+        assert raised.value.data == {"reason": "The image attachment is not valid base64."}
         assert session.handle.info.turn_count == 0
         assert llm.call_count == 0
+        assert llm.media_inputs == ()
         await adapter.prompt(session.handle.id, [text_block("Just text")], aster={"turnId": "same"})
         assert session.handle.info.turn_count == 1

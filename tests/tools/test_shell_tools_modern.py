@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import json
 import random
+import shlex
 import shutil
 import string
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -28,10 +30,21 @@ from aster.tools.shell_tools import (
     is_pure_search_command,
 )
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("rg") is None or shutil.which("grep") is None,
-    reason="needs rg and grep on PATH",
+_REQUIRES_RG = pytest.mark.skipif(
+    shutil.which("rg") is None, reason="requires rg for live searches and anchor harvesting"
 )
+_REQUIRES_POSIX_GREP = pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("grep") is None,
+    reason="requires POSIX grep oracle",
+)
+_REQUIRES_POSIX_PIPELINE = pytest.mark.skipif(
+    sys.platform == "win32" or any(shutil.which(tool) is None for tool in ("grep", "rg", "head")),
+    reason="requires POSIX grep/rg/head pipeline",
+)
+_SEARCH_COMMANDS = [
+    pytest.param("grep -rn", marks=(_REQUIRES_POSIX_GREP, _REQUIRES_RG), id="grep"),
+    pytest.param("rg -n", marks=_REQUIRES_RG, id="rg"),
+]
 
 
 # --------------------------------------------------------------------------
@@ -77,18 +90,33 @@ def repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _grep_anchor_lines(repo: Path, cmd: str) -> set[tuple[str, int]]:
-    """Ground truth: (relpath, line) the agent's own grep -n reports."""
-    res = subprocess.run(cmd, cwd=repo, shell=True, capture_output=True, text=True)
+@pytest.fixture
+async def make_shell():
+    shells = []
+
+    def create(cwd: Path) -> ShellTools:
+        shell = ShellTools(cwd=str(cwd))
+        shells.append(shell)
+        return shell
+
+    yield create
+    for shell in shells:
+        await shell.close()
+
+
+def _search_oracle(repo: Path, cmd: str) -> tuple[int, set[tuple[str, int]]]:
+    """Independent native search: exit status and displayed (relpath, line) anchors."""
+    res = subprocess.run(
+        shlex.split(cmd), cwd=repo, capture_output=True, text=True, encoding="utf-8"
+    )
+    assert res.returncode in (0, 1, 2), res.stderr
     out = set()
     for ln in res.stdout.splitlines():
         parts = ln.split(":", 2)
         if len(parts) >= 2 and parts[1].isdigit():
-            p = parts[0]
-            if p.startswith("./"):
-                p = p[2:]
+            p = str(Path(parts[0]))
             out.add((p, int(parts[1])))
-    return out
+    return res.returncode, out
 
 
 # --------------------------------------------------------------------------
@@ -97,35 +125,45 @@ def _grep_anchor_lines(repo: Path, cmd: str) -> set[tuple[str, int]]:
 @pytest.mark.parametrize(
     "cmd",
     [
-        "grep -rn 'foo' .",
-        "grep -rni 'foo' .",
+        pytest.param("grep -rn 'foo' .", marks=_REQUIRES_POSIX_GREP),
+        pytest.param("grep -rni 'foo' .", marks=_REQUIRES_POSIX_GREP),
         "rg -n 'foo' .",
-        "grep -rn 'def ' .",
-        "grep -rn 'nomatch_zzz' .",
+        "rg -ni 'foo' .",
+        pytest.param("grep -rn 'def ' .", marks=_REQUIRES_POSIX_GREP),
+        "rg -n 'def ' .",
+        pytest.param("grep -rn 'nomatch_zzz' .", marks=_REQUIRES_POSIX_GREP),
+        "rg -n 'nomatch_zzz' .",
     ],
 )
+@_REQUIRES_RG
 @pytest.mark.asyncio
-async def test_matches_equal_grep(repo: Path, cmd: str):
-    sh = ShellTools(cwd=str(repo))
+async def test_matches_equal_search(repo: Path, cmd: str, make_shell):
+    sh = make_shell(repo)
     r = await sh.run(cmd)
-    truth = _grep_anchor_lines(repo, cmd)
+    code, truth = _search_oracle(repo, cmd)
+    assert r.returncode == code
+    assert code in (0, 1)
     assert r.matches is not None, "pure search should attach matches"
-    got = {(m.path, m.start) for m in r.matches}
+    got = {(str(Path(m.path)), m.start) for m in r.matches}
     assert got == truth
 
 
+@pytest.mark.parametrize("search", _SEARCH_COMMANDS)
 @pytest.mark.asyncio
-async def test_match_anchor_is_editable(repo: Path):
-    sh = ShellTools(cwd=str(repo))
-    r = await sh.run("grep -rn 'fooo = 1' .")
+async def test_match_anchor_is_editable(repo: Path, search: str, make_shell):
+    sh = make_shell(repo)
+    r = await sh.run(f"{search} 'fooo = 1' .")
+    assert r.success
     assert r.matches, "should find the assignment"
-    m = next(x for x in r.matches if x.path == "a.py")
+    m = next(x for x in r.matches if Path(x.path) == Path("a.py"))
     await sh.replace(m, "fooo = 999\n")
     assert "fooo = 999" in (repo / "a.py").read_text()
 
 
 @pytest.mark.asyncio
-async def test_repeated_noncontiguous_search_path_keeps_resolved_path(repo: Path, monkeypatch):
+async def test_repeated_noncontiguous_search_path_keeps_resolved_path(
+    repo: Path, monkeypatch, make_shell
+):
     """A cached path must not inherit the preceding result's resolved path."""
 
     class FakeSession:
@@ -143,7 +181,7 @@ async def test_repeated_noncontiguous_search_path_keeps_resolved_path(repo: Path
     async def fake_get_session():
         return FakeSession()
 
-    sh = ShellTools(cwd=str(repo))
+    sh = make_shell(repo)
     monkeypatch.setattr(sh, "_get_session", fake_get_session)
 
     matches = await sh._harvest_matches(
@@ -160,14 +198,16 @@ async def test_repeated_noncontiguous_search_path_keeps_resolved_path(repo: Path
     ]
 
 
+@pytest.mark.parametrize("search", _SEARCH_COMMANDS)
 @pytest.mark.asyncio
-async def test_search_match_stays_bound_after_cwd_change(repo: Path):
-    sh = ShellTools(cwd=str(repo))
+async def test_search_match_stays_bound_after_cwd_change(repo: Path, search: str, make_shell):
+    sh = make_shell(repo)
     other = repo / "other"
     other.mkdir()
     (other / "a.py").write_text("fooo = 1\n")
 
-    result = await sh.run("grep -n 'fooo = 1' a.py")
+    result = await sh.run(f"{search} 'fooo = 1' a.py")
+    assert result.success
     assert result.matches
     match = result.matches[0]
     await sh.run("cd other")
@@ -183,33 +223,47 @@ async def test_search_match_stays_bound_after_cwd_change(repo: Path):
 @pytest.mark.parametrize(
     "cmd",
     [
-        "grep -rno 'foo' .",  # -o: no full line anchor
-        "grep -rnA1 'foo' .",  # context lines
-        "cat a.py",  # not a search
-        "grep -rnP 'fo+' .",  # PCRE
+        pytest.param("grep -rno 'foo' .", marks=_REQUIRES_POSIX_GREP),  # no full line anchor
+        pytest.param("rg -no 'foo' .", marks=_REQUIRES_RG),
+        pytest.param("grep -rnA1 'foo' .", marks=_REQUIRES_POSIX_GREP),  # context lines
+        pytest.param("rg -nA1 'foo' .", marks=_REQUIRES_RG),
+        pytest.param("rg -l 'foo' .", marks=_REQUIRES_RG),  # no line numbers
+        "Get-Content a.py" if sys.platform == "win32" else "cat a.py",
+        pytest.param("grep -rnP 'fo+' .", marks=_REQUIRES_POSIX_GREP),  # PCRE
     ],
 )
 @pytest.mark.asyncio
-async def test_fail_closed(repo: Path, cmd: str):
-    sh = ShellTools(cwd=str(repo))
+async def test_fail_closed(repo: Path, cmd: str, make_shell):
+    sh = make_shell(repo)
     r = await sh.run(cmd)
+    assert r.success
     assert r.matches is None
 
 
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        pytest.param("grep -r 'foo' .", marks=_REQUIRES_POSIX_GREP),
+        "rg 'foo' .",
+    ],
+)
+@_REQUIRES_RG
 @pytest.mark.asyncio
-async def test_grep_without_n_is_unverifiable(repo: Path):
-    """grep without -n prints no line numbers -> can't verify -> attach nothing."""
-    sh = ShellTools(cwd=str(repo))
-    r = await sh.run("grep -r 'foo' .")
+async def test_search_without_n_is_unverifiable(repo: Path, cmd: str, make_shell):
+    """A search without -n has no verifiable line numbers and attaches nothing."""
+    sh = make_shell(repo)
+    r = await sh.run(cmd)
+    assert r.success
     assert r.matches is None
 
 
+@_REQUIRES_POSIX_PIPELINE
 @pytest.mark.asyncio
-async def test_truncated_head_attaches_displayed_subset(repo: Path):
+async def test_truncated_head_attaches_displayed_subset(repo: Path, make_shell):
     """A safe ``| head -N`` truncates the *display* to a prefix; the shown lines
     are still real matches, so attach exactly those (subset, not the full set).
     """
-    sh = ShellTools(cwd=str(repo))
+    sh = make_shell(repo)
     full = await sh.run("grep -rn 'foo' .")
     assert full.matches is not None and len(full.matches) > 1
 
@@ -226,10 +280,11 @@ async def test_truncated_head_attaches_displayed_subset(repo: Path):
     assert shown <= {(m.path, m.start) for m in full.matches}
 
 
+@_REQUIRES_POSIX_PIPELINE
 @pytest.mark.asyncio
-async def test_truncated_head_match_is_editable(repo: Path):
+async def test_truncated_head_match_is_editable(repo: Path, make_shell):
     """A Match from a head-truncated grep edits at the correct anchor."""
-    sh = ShellTools(cwd=str(repo))
+    sh = make_shell(repo)
     r = await sh.run("grep -rn 'fooo = 1' . | head -5")
     assert r.matches, "should attach the assignment despite the head pipe"
     m = next(x for x in r.matches if x.path == "a.py")
@@ -240,30 +295,35 @@ async def test_truncated_head_match_is_editable(repo: Path):
 @pytest.mark.parametrize(
     "cmd",
     [
-        "grep -n 'foo' a.py",  # single explicit file: grep omits the path
-        "grep -rn 'foo' a.py",  # -r with one file still prints "line:" only
+        pytest.param("grep -n 'foo' a.py", marks=_REQUIRES_POSIX_GREP),  # omits the path
+        pytest.param("grep -rn 'foo' a.py", marks=_REQUIRES_POSIX_GREP),  # still "line:" only
+        "rg -n 'foo' a.py",
     ],
 )
+@_REQUIRES_RG
 @pytest.mark.asyncio
-async def test_single_file_grep_attaches_matches(repo: Path, cmd: str):
-    """A grep targeting one explicit file omits the filename ("line:content"),
+async def test_single_file_search_attaches_matches(repo: Path, cmd: str, make_shell):
+    """A search targeting one explicit file omits the filename ("line:content"),
     but the path is known a priori, so matches must still attach and be correct.
     """
-    sh = ShellTools(cwd=str(repo))
+    sh = make_shell(repo)
     r = await sh.run(cmd)
-    truth = _grep_anchor_lines(repo, cmd.replace(" a.py", " --with-filename a.py"))
+    code, truth = _search_oracle(repo, cmd.replace(" a.py", " --with-filename a.py"))
+    assert r.returncode == code == 0
     assert r.matches is not None, "single-file pure search should attach matches"
-    got = {(m.path, m.start) for m in r.matches}
+    got = {(str(Path(m.path)), m.start) for m in r.matches}
     assert got == truth
     # every reported line belongs to the one file we searched
     assert {m.path for m in r.matches} == {"a.py"}
 
 
+@pytest.mark.parametrize("search", _SEARCH_COMMANDS)
 @pytest.mark.asyncio
-async def test_single_file_grep_match_is_editable(repo: Path):
-    """A Match from a single-file grep can be passed to replace() to edit in place."""
-    sh = ShellTools(cwd=str(repo))
-    r = await sh.run("grep -n 'fooo = 1' a.py")
+async def test_single_file_search_match_is_editable(repo: Path, search: str, make_shell):
+    """A single-file search Match can be passed to replace() to edit in place."""
+    sh = make_shell(repo)
+    r = await sh.run(f"{search} 'fooo = 1' a.py")
+    assert r.success
     assert r.matches, "single-file grep should find the assignment"
     await sh.replace(r.matches[0], "fooo = 999\n")
     assert "fooo = 999" in (repo / "a.py").read_text()
@@ -282,23 +342,28 @@ def _random_corpus(tmp: Path, seed: int) -> Path:
         lines = [
             "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 30))) for _ in range(nlines)
         ]
-        (root / f"f{i}.txt").write_text("\n".join(lines) + ("\n" if lines else ""))
+        (root / f"f{i}.txt").write_text(
+            "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8"
+        )
     return root
 
 
+@pytest.mark.parametrize("search", _SEARCH_COMMANDS)
 @pytest.mark.parametrize("seed", range(40))
 @pytest.mark.asyncio
-async def test_property_oracle(tmp_path: Path, seed: int):
+async def test_property_oracle(tmp_path: Path, seed: int, search: str, make_shell):
     root = _random_corpus(tmp_path, seed)
     rng = random.Random(seed * 7919)
     pat = rng.choice(["a", "b", "abc", "x", ":", "la", "f"])
-    cmd = f"grep -rn -F {pat!r} ."
-    sh = ShellTools(cwd=str(root))
+    cmd = f"{search} -F {shlex.quote(pat)} ."
+    sh = make_shell(root)
     r = await sh.run(cmd)
-    truth = _grep_anchor_lines(root, cmd)
+    code, truth = _search_oracle(root, cmd)
+    assert r.returncode == code
+    assert code in (0, 1)
     # invariant: either matches is None (gate/verify declined) OR it equals truth
     if r.matches is not None:
-        assert {(m.path, m.start) for m in r.matches} == truth
+        assert {(str(Path(m.path)), m.start) for m in r.matches} == truth
 
 
 # --------------------------------------------------------------------------
@@ -385,19 +450,26 @@ def code_repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
+@pytest.mark.parametrize("search", _SEARCH_COMMANDS)
 @pytest.mark.parametrize("pattern", REAL_SCRAPED_PATTERNS)
 @pytest.mark.asyncio
-async def test_scraped_patterns_oracle(code_repo: Path, pattern: str):
-    """Differential oracle on real model-issued grep patterns."""
-    cmd = f"grep -rn {pattern!r} ."
+async def test_scraped_patterns_oracle(code_repo: Path, pattern: str, search: str, make_shell):
+    """Differential oracle on real model-issued grep/rg patterns."""
+    cmd = f"{search} {shlex.quote(pattern)} ."
     if not is_pure_search_command(cmd):
         pytest.skip("gate declined (not a pure search)")
-    sh = ShellTools(cwd=str(code_repo))
+    sh = make_shell(code_repo)
     r = await sh.run(cmd)
-    truth = _grep_anchor_lines(code_repo, cmd)
-    # Invariant: matches is None OR equals grep's own reported anchors.
+    code, truth = _search_oracle(code_repo, cmd)
+    assert r.returncode == code
+    if code == 2:
+        # grep BRE and rg regex differ; an invalid pattern must fail closed.
+        assert not truth
+        assert r.matches is None
+        return
+    # Invariant: matches is None OR equals the search's own reported anchors.
     if r.matches is not None:
-        assert {(m.path, m.start) for m in r.matches} == truth
+        assert {(str(Path(m.path)), m.start) for m in r.matches} == truth
     else:
         # If grep found anchors but we attached none, that is allowed only when
         # the gate/verify declined — but these are all pure searches with -n, so
@@ -405,18 +477,21 @@ async def test_scraped_patterns_oracle(code_repo: Path, pattern: str):
         assert truth == set() or r.matches is not None
 
 
+@pytest.mark.parametrize("search", _SEARCH_COMMANDS)
 @pytest.mark.parametrize("pattern", [p for p in REAL_SCRAPED_PATTERNS if "|" in p])
 @pytest.mark.asyncio
-async def test_scraped_alternation_patterns(code_repo: Path, pattern: str):
+async def test_scraped_alternation_patterns(code_repo: Path, pattern: str, search: str, make_shell):
     """Alternation patterns (the | is in the quoted pattern, NOT a shell pipe)."""
-    cmd = f"grep -rn {pattern!r} ."
+    cmd = f"{search} {shlex.quote(pattern)} ."
     # the gate must NOT mistake the in-pattern | for a shell pipe
     assert is_pure_search_command(cmd), "quoted | must not trip the pipe gate"
-    sh = ShellTools(cwd=str(code_repo))
+    sh = make_shell(code_repo)
     r = await sh.run(cmd)
-    truth = _grep_anchor_lines(code_repo, cmd)
+    code, truth = _search_oracle(code_repo, cmd)
+    assert r.returncode == code
+    assert code in (0, 1)
     if r.matches is not None:
-        assert {(m.path, m.start) for m in r.matches} == truth
+        assert {(str(Path(m.path)), m.start) for m in r.matches} == truth
 
 
 # --- Tests for is_pure_search_command with real-world patterns ---

@@ -6,6 +6,7 @@ Uses ``FakeLLMClient`` so no network/LLM is needed — the hooks, store and
 consolidation are exercised directly.
 """
 
+import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +20,8 @@ from aster_memory import (
     MemoryType,
 )
 from aster_memory.config import ReflectionPolicy, SpontaneousConfig, WritePolicy
+from aster_memory.schema import AccessRecord
+from aster_memory.store import MemoryStore
 
 from aster import Agent
 from aster.events import Error, Task
@@ -198,6 +201,58 @@ def test_remember_dedups_on_write(agent):
     assert mgr.store.get(id1).reinforcement_count >= 1
 
 
+def test_remember_rechecks_owner_before_reinforcing(agent, monkeypatch):
+    mgr = _install(agent)
+    try:
+        mid = mgr.remember("Identical fact about shipping releases.")
+        knn = mgr.store.knn
+
+        def knn_with_new_owner(*args, **kwargs):
+            matches = knn(*args, **kwargs)
+            with mgr.store.edit(mid) as current:
+                current.owner = "AnotherAgent@instance"
+            return matches
+
+        monkeypatch.setattr(mgr.store, "knn", knn_with_new_owner)
+        assert mgr.remember("Identical fact about shipping releases.") != mid
+        current = mgr.store.get(mid)
+        assert current.owner == "AnotherAgent@instance"
+        assert current.reinforcement_count == 0
+    finally:
+        mgr.uninstall()
+
+
+@pytest.mark.parametrize("operation", ["forget", "associate"])
+def test_memory_write_keeps_ownership_check_and_mutation_together(
+    agent, tmp_path, monkeypatch, operation
+):
+    mgr = MemoryManager.install(
+        agent, config=MemoryConfig(enabled=True, path=str(tmp_path / "memory.sqlite"))
+    )
+    other = MemoryStore(mgr.store.path)
+    other._conn.execute("PRAGMA busy_timeout=0")
+    try:
+        mid = mgr.remember("Owned fact.")
+        check = mgr._assert_writable
+
+        def check_while_owner_changes(memory):
+            check(memory)
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                other.rename_owner(memory.owner, "AnotherAgent@instance")
+
+        monkeypatch.setattr(mgr, "_assert_writable", check_while_owner_changes)
+        if operation == "forget":
+            assert mgr.forget(mid)
+            assert other.get(mid).archived
+        else:
+            mgr.associate(mid, "destination")
+            assert other.neighbors(mid)[0].target_id == "destination"
+        assert other.get(mid).owner == mgr.owner
+    finally:
+        other.close()
+        mgr.uninstall()
+
+
 @pytest.mark.parametrize("content", ["A longer sentence. Another sentence! A third?", "Hi.", ""])
 def test_update_refreshes_content_metadata(agent, content):
     """Content edits recalculate size metadata while preserving identity and history."""
@@ -235,6 +290,81 @@ def test_update_reembeds_changed_tags_only_when_needed(agent, tags):
             assert mgr.update(mid, tags=tags, importance=9)
             embed.assert_not_called()
     finally:
+        mgr.uninstall()
+
+
+@pytest.mark.parametrize("field,value", [("content", "Revised fact."), ("tags", ["revised"])])
+def test_update_preserves_changes_committed_during_embedding(
+    agent, tmp_path, monkeypatch, field, value
+):
+    mgr = MemoryManager.install(
+        agent, config=MemoryConfig(enabled=True, path=str(tmp_path / "memory.sqlite"))
+    )
+    other = MemoryStore(mgr.store.path)
+    try:
+        mid = mgr.remember("Original fact.", tags=["original"])
+        embed = mgr.embedder.embed
+        calls = []
+
+        def embed_with_concurrent_edit(text):
+            calls.append(text)
+            if len(calls) == 1:
+                with other.edit(mid) as current:
+                    if field == "content":
+                        current.tags = ["concurrently added"]
+                    else:
+                        current.content = "Concurrently revised content."
+                    current.log_access(AccessRecord(ts=100.0, channel="recalled"))
+            return embed(text)
+
+        monkeypatch.setattr(mgr.embedder, "embed", embed_with_concurrent_edit)
+        assert mgr.update(mid, **{field: value})
+        current = other.get(mid)
+        assert getattr(current, field) == value
+        assert current.tags == (value if field == "tags" else ["concurrently added"])
+        assert current.content == (value if field == "content" else "Concurrently revised content.")
+        assert current.recalled_count == 1
+        assert current.reinforced_count == 1
+        assert len(calls) == 2
+        np.testing.assert_allclose(other.get_embedding(mid), embed(current.embedding_text()))
+    finally:
+        other.close()
+        mgr.uninstall()
+
+
+@pytest.mark.parametrize("change", ["archive", "delete", "owner"])
+def test_update_rechecks_record_after_embedding(agent, tmp_path, monkeypatch, change):
+    mgr = MemoryManager.install(
+        agent, config=MemoryConfig(enabled=True, path=str(tmp_path / "memory.sqlite"))
+    )
+    other = MemoryStore(mgr.store.path)
+    try:
+        mid = mgr.remember("Original fact.")
+        embed = mgr.embedder.embed
+
+        def embed_with_concurrent_edit(text):
+            if change == "archive":
+                other.archive(mid)
+            elif change == "delete":
+                other.delete(mid)
+            else:
+                with other.edit(mid) as current:
+                    current.owner = "AnotherAgent@instance"
+            return embed(text)
+
+        monkeypatch.setattr(mgr.embedder, "embed", embed_with_concurrent_edit)
+        if change == "owner":
+            with pytest.raises(PermissionError, match="cross-owner writes"):
+                mgr.update(mid, content="Updated fact.")
+            assert other.get(mid).content == "Original fact."
+        elif change == "delete":
+            assert not mgr.update(mid, content="Updated fact.")
+            assert other.get(mid) is None
+        else:
+            assert mgr.update(mid, content="Updated fact.")
+            assert other.get(mid).archived
+    finally:
+        other.close()
         mgr.uninstall()
 
 

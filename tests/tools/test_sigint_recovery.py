@@ -6,11 +6,22 @@ Verifies that on timeout the session resets cleanly: cwd preserved,
 commands work again immediately, and the whole cycle completes quickly.
 """
 
+import os
+import shlex
+import sys
 import time
 
 import pytest
 
 from aster.tools._bash_session import BashSession
+
+
+def _sleep(seconds: int) -> str:
+    return f"Start-Sleep -Seconds {seconds}" if os.name == "nt" else f"sleep {seconds}"
+
+
+def _quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'" if os.name == "nt" else shlex.quote(value)
 
 
 @pytest.fixture
@@ -30,40 +41,44 @@ class TestTimeoutRecovery:
         subdir = tmp_path / "mydir"
         subdir.mkdir()
 
-        await session.run(f"cd {subdir}")
+        await session.run(f"cd {_quote(str(subdir))}")
         assert session.cwd == subdir
 
         # This will timeout and reset
-        await session.run("sleep 30", timeout=2)
+        _, _, code = await session.run(_sleep(30), timeout=2)
+        assert code == 124
 
         # cwd should still be the subdir (preserved across reset)
-        out, _, _ = await session.run("pwd")
+        out, _, _ = await session.run("(Get-Location).Path" if os.name == "nt" else "pwd")
         assert str(subdir) in out, f"cwd lost after timeout. Got: {out!r}"
 
     async def test_timeout_returns_partial_output(self, session):
         """Output produced before timeout should be captured."""
         out, err, code = await session.run(
-            "echo before_timeout; sleep 30",
+            f"echo before_timeout; {_sleep(30)}",
             timeout=2,
         )
         assert "before_timeout" in out
+        assert code == 124
 
     async def test_timeout_returns_quickly(self, session):
         """Timeout + reset should complete well within the timeout window."""
         start = time.monotonic()
-        await session.run("sleep 60", timeout=2)
+        _, _, code = await session.run(_sleep(60), timeout=2)
         elapsed = time.monotonic() - start
         # Should complete within timeout + reset overhead (not 60s!)
         assert elapsed < 12, f"Timeout took too long: {elapsed:.1f}s"
+        assert code == 124
 
     async def test_timeout_exit_code(self, session):
         """Timed-out commands should return exit code 124."""
-        _, _, code = await session.run("sleep 30", timeout=2)
+        _, _, code = await session.run(_sleep(30), timeout=2)
         assert code == 124
 
     async def test_session_works_after_timeout(self, session):
         """After timeout+reset, session should still execute commands."""
-        await session.run("sleep 30", timeout=2)
+        _, _, code = await session.run(_sleep(30), timeout=2)
+        assert code == 124
 
         out, _, code = await session.run("echo still_alive")
         assert code == 0
@@ -72,7 +87,8 @@ class TestTimeoutRecovery:
     async def test_multiple_timeouts_session_survives(self, session):
         """Session should survive multiple consecutive timeouts."""
         for _ in range(3):
-            await session.run("sleep 30", timeout=2)
+            _, _, code = await session.run(_sleep(30), timeout=2)
+            assert code == 124
 
         out, _, code = await session.run("echo works")
         assert code == 0
@@ -81,9 +97,11 @@ class TestTimeoutRecovery:
     async def test_timeout_kills_pipeline(self, session):
         """Timeout should kill all processes in a pipeline."""
         start = time.monotonic()
-        await session.run("sleep 30 | cat", timeout=2)
+        command = f"{_sleep(30)} | Out-Null" if os.name == "nt" else "sleep 30 | cat"
+        _, _, code = await session.run(command, timeout=2)
         elapsed = time.monotonic() - start
         assert elapsed < 12, f"Pipeline timeout took too long: {elapsed:.1f}s"
+        assert code == 124
 
         out, _, code = await session.run("echo alive")
         assert code == 0
@@ -91,22 +109,32 @@ class TestTimeoutRecovery:
 
     async def test_timeout_kills_subshell(self, session):
         """Timeout should kill commands in a subshell."""
-        await session.run("(sleep 30)", timeout=2)
+        command = "& { Start-Sleep -Seconds 30 }" if os.name == "nt" else "(sleep 30)"
+        _, _, code = await session.run(command, timeout=2)
+        assert code == 124
 
         out, _, code = await session.run("echo works")
         assert code == 0
         assert "works" in out
 
-    async def test_env_preserved_after_timeout(self, session):
-        """Env vars preserved when pgrep-based child kill succeeds."""
-        await session.run("export TIMEOUT_TEST=hello")
-        out, _, _ = await session.run("echo $TIMEOUT_TEST")
+    async def test_env_lifecycle_after_timeout(self, session):
+        """Windows restarts its Job; POSIX preserves env when child-only kill succeeds."""
+        await session.run(
+            "$env:TIMEOUT_TEST = 'hello'" if os.name == "nt" else "export TIMEOUT_TEST=hello"
+        )
+        read_env = "echo $env:TIMEOUT_TEST" if os.name == "nt" else "echo $TIMEOUT_TEST"
+        out, _, _ = await session.run(read_env)
         assert "hello" in out
 
-        # Timeout kills child — env preserved if pgrep works, lost if fallback to reset
-        await session.run("sleep 30", timeout=2)
-        out, _, code = await session.run("echo $TIMEOUT_TEST")
+        before = session._start_count
+        _, _, code = await session.run(_sleep(30), timeout=2)
+        assert code == 124
+        out, _, code = await session.run(read_env)
         assert code == 0  # Session works regardless
+        if os.name == "nt":
+            assert "hello" not in out
+            assert session._start_count == before + 1
+            return
         # Env preservation is best-effort (requires pgrep)
         if "hello" not in out:
             import warnings
@@ -116,12 +144,28 @@ class TestTimeoutRecovery:
             )
 
     async def test_timeout_with_nested_processes(self, session):
-        """Deeply nested processes (bash -c 'sleep') are also killed."""
-        await session.run("export NESTED_VAR=deep")
-        await session.run("bash -c 'sleep 30'", timeout=2)
+        """Timeout also stops a command waiting for its own child process."""
+        await session.run(
+            "$env:NESTED_VAR = 'deep'" if os.name == "nt" else "export NESTED_VAR=deep"
+        )
+        if os.name == "nt":
+            script = (
+                "import subprocess,sys; "
+                "subprocess.run([sys.executable, '-c', 'import time; time.sleep(30)'], check=True)"
+            )
+            command = f"& {_quote(sys.executable)} -c {_quote(script)}"
+        else:
+            command = "bash -c 'sleep 30'"
+        _, _, code = await session.run(command, timeout=2)
+        assert code == 124
 
-        out, _, code = await session.run("echo $NESTED_VAR")
+        out, _, code = await session.run(
+            "echo $env:NESTED_VAR" if os.name == "nt" else "echo $NESTED_VAR"
+        )
         assert code == 0  # Session works regardless
+        if os.name == "nt":
+            assert "deep" not in out
+            return
         # Env preservation is best-effort (requires pgrep)
         if "deep" not in out:
             import warnings
@@ -132,7 +176,8 @@ class TestTimeoutRecovery:
 
     async def test_fast_command_after_timeout(self, session):
         """Fast commands work immediately after timeout recovery."""
-        await session.run("sleep 30", timeout=2)
+        _, _, code = await session.run(_sleep(30), timeout=2)
+        assert code == 124
         # Should return instantly, not wait any residual time
         import time
 
@@ -141,4 +186,6 @@ class TestTimeoutRecovery:
         elapsed = time.monotonic() - t0
         assert code == 0
         assert "fast" in out
-        assert elapsed < 2, f"Post-timeout command took {elapsed:.1f}s"
+        # Windows recreates its runspace and compiles the native stdin bridge.
+        budget = 10 if os.name == "nt" else 2
+        assert elapsed < budget, f"Post-timeout command took {elapsed:.1f}s"

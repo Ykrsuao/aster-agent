@@ -41,6 +41,7 @@ from aster.unifiedllm.media_inputs import (
 )
 
 from . import replay_state, response_parts
+from ._registry_context import RegistryContext, resolve_context_window
 from .admission import _current_admission_controller, _run_admitted_attempt
 from .errors import EmptyContentError
 from .http_config import HttpConfig
@@ -351,31 +352,6 @@ class _ClientHttp:
         self.close()
 
 
-def _recursively_parse_json_strings(obj: Any) -> Any:
-    """Recursively parse any string values that are valid JSON objects/arrays.
-
-    Some models double-encode nested JSON, e.g., {"value": '{"key": "val"}'}.
-    This function detects and parses such strings.
-    """
-    if isinstance(obj, str):
-        # Try to parse as JSON if it looks like an object or array
-        stripped = obj.strip()
-        if stripped.startswith(("{", "[")):
-            try:
-                parsed = json.loads(stripped)
-                _record_llm_metric("json_double_decoded")
-                # Recursively process the parsed result
-                return _recursively_parse_json_strings(parsed)
-            except json.JSONDecodeError:
-                pass
-        return obj
-    elif isinstance(obj, dict):
-        return {k: _recursively_parse_json_strings(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [_recursively_parse_json_strings(item) for item in obj]
-    return obj
-
-
 # ── Response cleanup: JSON parsing ────────────────────────────────────
 # Intercept point: JSON extraction and cleanup for structured output.
 # Handles fence removal, control char cleanup, escape fixing, nested
@@ -406,9 +382,7 @@ def extract_and_parse_json(text: str) -> dict[str, Any]:
         )
 
     try:
-        result = json.loads(text)
-        # Handle double-encoded JSON in nested values
-        return _recursively_parse_json_strings(result)
+        return json.loads(text)
     except json.JSONDecodeError as first_error:
         if "[...]" in text or '"..."' in text or ": ..." in text:
             raise json.JSONDecodeError(
@@ -424,7 +398,7 @@ def extract_and_parse_json(text: str) -> dict[str, Any]:
         try:
             result = json.loads(json_match.group(0))
             _record_llm_metric("json_nested_extraction")
-            return _recursively_parse_json_strings(result)
+            return result
         except json.JSONDecodeError:
             pass
 
@@ -438,8 +412,7 @@ def extract_and_parse_json(text: str) -> dict[str, Any]:
         _record_llm_metric("json_escape_fixed")
 
     try:
-        result = json.loads(text)
-        return _recursively_parse_json_strings(result)
+        return json.loads(text)
     except json.JSONDecodeError as e:
         preview = text[:500] if len(text) > 500 else text
         raise json.JSONDecodeError(
@@ -1249,7 +1222,7 @@ def _update_token_calibration(
 
 
 class UnifiedLLM(ABC):
-    _registry_config: dict[str, Any] | None
+    _registry_context: RegistryContext | None
     cache_breakpoint: Literal["auto", "openai", "anthropic"] | None
 
     def __init__(
@@ -1286,7 +1259,7 @@ class UnifiedLLM(ABC):
         self.model = model
         self.config = config
         self._context_window = context_window
-        self._registry_config = None
+        self._registry_context = None
         self._endpoint_model_info: tuple[str, dict[str, Any], str, dict[str, int]] | None = None
         self._model_info_revision = 0
         self.cache_breakpoint = None
@@ -1304,6 +1277,12 @@ class UnifiedLLM(ABC):
     def reasoning_default(self) -> str | None:
         """Documented route default; not a request override."""
         return self._reasoning_config.default
+
+    def set_reasoning_level(self, level: str | None) -> None:
+        """Select declared settings for subsequent calls; None restores request defaults."""
+        if level is not None:
+            self._reasoning_config.settings(level)
+        self.reasoning_level = level
 
     def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
         """Merge the client configuration with per-call ``overrides`` for one request.
@@ -1684,97 +1663,13 @@ class UnifiedLLM(ABC):
         if self._context_window is not None:
             return self._context_window
 
-        from aster.unifiedllm.route_identity import same_context_route
-
         client_type = "responses" if isinstance(self, ResponsesClient) else "completion"
-        # Clients built by the registry carry their entry's settings. Use only
-        # that entry; if it declares no context_window, do not borrow one from
-        # another alias that happens to use the same model.
-        if self._registry_config is not None:
-            route = getattr(self, "_registry_context_route", None)
-            if route is None or same_context_route(
-                self.model, self.config, client_type, route[0], route[1], route[2]
-            ):
-                cw = self._registry_config.get("context_window")
-                if cw is not None:
-                    return cw
-            info = self.get_model_info()
-            return info.get("max_input_tokens") if info else None
-
-        # Try registry lookup by model string. The property is reachable
-        # from any UnifiedLLM instance — including ones constructed
-        # directly via CompletionClient(...) — so trigger the lazy
-        # auto-load to match what users got from the pre-refactor
-        # import-time side effect.
-        from aster.unifiedllm.registry import (
-            MODELS,
-            _lookup_api_key_env,
-            _registry_lock,
-            ensure_loaded,
+        window = resolve_context_window(
+            self.model, self.config, client_type, self._registry_context
         )
+        if window is not None:
+            return window
 
-        ensure_loaded()
-
-        model_str = self.model
-
-        # Snapshot under the lock so a concurrent reload_registry()
-        # can't make us observe a half-cleared MODELS dict mid-lookup.
-        with _registry_lock:
-            models_snapshot = dict(MODELS)
-
-        # A directly built client has no entry of its own. Use a registry
-        # context_window only if every alias with the same route declares the
-        # same positive value. If they disagree, or one of them declares none,
-        # the result would depend on YAML order, so fall back instead.
-        #
-        # A direct client never has ``api_key_env``, so credentials are compared
-        # here rather than in same_context_route: a client without an api_key
-        # matches regardless of credentials; a client with one matches only an
-        # entry whose resolved key (api_key, else the value of api_key_env) is
-        # equal. Keys are compared in memory only and never logged.
-        client_key = self.config.get("api_key")
-        own_route = {
-            name: value
-            for name, value in self.config.items()
-            if name not in ("api_key", "api_key_env")
-        }
-        windows = set()
-        undeclared = False
-        for key, cfg in models_snapshot.items():
-            entry_client_type = cfg.get("client_type", "completion")
-            if client_key is not None:
-                # Resolve the entry key as the registry does (validated name,
-                # NVIDIA synonyms, empty means unset), but without its warnings:
-                # this loop visits every entry. A malformed api_key_env gives None.
-                entry_key = cfg.get("api_key")
-                if entry_key is None:
-                    entry_key, _ = _lookup_api_key_env(cfg)
-                if entry_key != client_key:
-                    continue
-            # Completion and Responses clients are never sent the registry-only
-            # ``endpoint`` key (the decision-route spelling), so leave it out of
-            # the comparison, as client_from_config does. Decision entries keep it.
-            skipped = ("api_key", "api_key_env") + (
-                () if entry_client_type == "decision" else ("endpoint",)
-            )
-            route = {name: value for name, value in cfg.items() if name not in skipped}
-            if same_context_route(
-                model_str,
-                own_route,
-                client_type,
-                cfg.get("model_name", key),
-                route,
-                entry_client_type,
-            ):
-                cw = cfg.get("context_window")
-                if type(cw) is int and cw > 0:
-                    windows.add(cw)
-                else:
-                    undeclared = True
-        if len(windows) == 1 and not undeclared:
-            return windows.pop()
-
-        # Fallback to litellm
         info = self.get_model_info()
         return info.get("max_input_tokens") if info else None
 
@@ -2017,9 +1912,12 @@ def _collect_sync(
     """Consume a sync streaming or non-streaming litellm response, returning ModelResponse."""
     from ._litellm import litellm
 
+    # Tracing wraps the provider stream; read through the wrapper so its span
+    # completes, and take usage and pricing state from the provider stream.
+    stream, raw = raw, getattr(raw, "provider_stream", raw)
     if isinstance(raw, litellm.CustomStreamWrapper):
         with _reported_stream_tokens(raw) as reported:
-            chunks = list(raw)
+            chunks = list(stream)
         result = litellm.stream_chunk_builder(
             chunks, messages=messages, logging_obj=getattr(raw, "logging_obj", None)
         )
@@ -2051,10 +1949,13 @@ async def _collect_async(
     """Consume an async streaming or non-streaming litellm response, returning ModelResponse."""
     from ._litellm import litellm
 
+    # Tracing wraps the provider stream; read through the wrapper so its span
+    # completes, and take usage and pricing state from the provider stream.
+    stream, raw = raw, getattr(raw, "provider_stream", raw)
     if isinstance(raw, litellm.CustomStreamWrapper):
         chunks = []
         with _reported_stream_tokens(raw) as reported:
-            async for chunk in raw:  # type: ignore[attr-defined]
+            async for chunk in stream:  # type: ignore[attr-defined]
                 chunks.append(chunk)
                 emit_stream("chat", chunk)
         result = litellm.stream_chunk_builder(

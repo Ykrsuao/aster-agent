@@ -63,7 +63,13 @@ def _find_pid_on_port(port: int) -> str | None:
 
 @click.command()
 @click.option("--port", "-p", type=int, default=5001, help="Port number (default: 5001).")
-@click.option("--host", "-h", default="0.0.0.0", help="Host to bind to (default: 0.0.0.0).")
+@click.option(
+    "--host",
+    "-h",
+    default="127.0.0.1",
+    help="Host to bind to (default: 127.0.0.1). Use 0.0.0.0 to accept other machines; "
+    "they must present ASTER_VIEWER_AUTH_TOKEN.",
+)
 @click.option(
     "--db",
     "db_path_opt",
@@ -119,18 +125,25 @@ def command(port: int, host: str, db_path_opt: str | None):
         "propagate": False,
     }
 
+    token = os.environ.get("ASTER_VIEWER_AUTH_TOKEN", "").strip()
+    local_host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
+    if ":" in local_host and not local_host.startswith("["):
+        local_host = f"[{local_host}]"
+    local_url = f"http://{local_host}:{port}"
+    if token:
+        from urllib.parse import quote
+
+        local_url += f"/?token={quote(token, safe='')}"
+
     click.echo()
     click.secho("  Aster Viewer", fg="cyan", bold=True)
-    click.echo(f"  URL:  http://localhost:{port}")
+    click.echo(f"  URL:  {local_url}")
     click.echo(f"  DB:   {db_path}")
 
-    # When a token is configured the viewer is reachable from other machines.
-    # Print the one-time bootstrap link: opening it trades the token for a
-    # session cookie, after which plain deep links work for that browser.
-    token = os.environ.get("ASTER_VIEWER_AUTH_TOKEN", "").strip()
+    # The local bootstrap also works when the listener is bound only to loopback.
+    # Share remains available for deployments listening on a reachable interface.
     if token:
         import socket as _socket
-        from urllib.parse import quote
 
         # gethostname()/getfqdn()/AI_CANONNAME all return the short name when
         # the fully-qualified one comes from a DNS search domain, and a short
@@ -139,6 +152,8 @@ def command(port: int, host: str, db_path_opt: str | None):
         public_host = (
             os.environ.get("ASTER_VIEWER_PUBLIC_HOST", "").strip() or _socket.gethostname()
         )
+        if ":" in public_host and not public_host.startswith("["):
+            public_host = f"[{public_host}]"
         # Percent-encode: a '#' in the token would otherwise start the URL
         # fragment, so the browser would send only the part before it and the
         # bootstrap would fail with a confusing 401. '&', '+' and '/' break it

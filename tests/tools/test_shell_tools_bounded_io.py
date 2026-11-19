@@ -24,6 +24,7 @@ import os
 import shutil
 import threading
 import tracemalloc
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -42,9 +43,11 @@ from aster.tools.shell_tools import Match, ShellTools
 EXOTIC_BREAKS = "\v\f\x1c\x1d\x1e\x85\u2028\u2029"
 
 
-def _legacy_read(path: Path, start: int, end: int) -> tuple[str, int, int]:
+def _legacy_read(
+    path: Path, start: int, end: int, *, encoding: str | None = None
+) -> tuple[str, int, int]:
     """The pre-#90 implementation, kept as the differential reference."""
-    content = path.read_text()
+    content = path.read_text(encoding=encoding)
     all_lines = content.splitlines(keepends=True)
     total = len(all_lines)
     start = max(1, start)
@@ -53,8 +56,10 @@ def _legacy_read(path: Path, start: int, end: int) -> tuple[str, int, int]:
 
 
 @pytest.fixture
-def sh(tmp_path):
-    return ShellTools(cwd=str(tmp_path))
+async def sh(tmp_path):
+    tool = ShellTools(cwd=str(tmp_path))
+    yield tool
+    await tool.close()
 
 
 def _write_lines(path: Path, count: int, width: int = 64) -> None:
@@ -147,26 +152,34 @@ async def test_ranged_read_matches_legacy_slice(sh, tmp_path, start, end):
 
 @pytest.mark.parametrize("breaker", list(EXOTIC_BREAKS))
 @pytest.mark.asyncio
-async def test_exotic_line_breaks_keep_legacy_numbering(sh, tmp_path, breaker):
+async def test_exotic_line_breaks_keep_legacy_numbering(sh, tmp_path, breaker, monkeypatch):
     """str.splitlines() boundaries are preserved, not \\n-only file iteration."""
     path = tmp_path / "f.txt"
-    path.write_text(f"one{breaker}two\nthree{breaker}four\nfive\n")
+    path.write_text(f"one{breaker}two\nthree{breaker}four\nfive\n", encoding="utf-8")
+    # Exercise all Unicode separators even when the host locale cannot encode them.
+    # Other tests keep the native default-codec contract; this test isolates line splitting.
+    monkeypatch.setattr(
+        "aster.tools._bounded_io.open", partial(open, encoding="utf-8"), raising=False
+    )
 
     for start, end in ((1, 1), (1, 3), (2, 4), (3, 6)):
-        want_text, want_start, want_end = _legacy_read(path, start, end)
+        want_text, want_start, want_end = _legacy_read(path, start, end, encoding="utf-8")
         got = await sh.read("f.txt", (start, end))
         assert (got.text, got.start, got.end) == (want_text, want_start, want_end), (
             f"diverged for {breaker!r} at ({start}, {end})"
         )
 
 
-def test_iter_lines_matches_splitlines_exactly(tmp_path):
+def test_iter_lines_matches_splitlines_exactly(tmp_path, monkeypatch):
     path = tmp_path / "f.txt"
     body = f"a{EXOTIC_BREAKS}b\nc\r\nd\re\nlast-no-newline"
-    path.write_text(body)
+    path.write_bytes(body.encode("utf-8"))
+    monkeypatch.setattr(
+        "aster.tools._bounded_io.open", partial(open, encoding="utf-8"), raising=False
+    )
 
     assert list(iter_lines_keepends(path, max_line_chars=DEFAULT_MAX_FILE_BYTES)) == (
-        path.read_text().splitlines(keepends=True)
+        path.read_text(encoding="utf-8").splitlines(keepends=True)
     )
 
 
@@ -349,17 +362,17 @@ def test_read_specific_lines_omits_out_of_range(tmp_path):
 
 
 @pytest.mark.skipif(
-    shutil.which("rg") is None or shutil.which("grep") is None,
-    reason="needs rg and grep on PATH",
+    shutil.which("rg") is None,
+    reason="needs rg on PATH",
 )
 @pytest.mark.asyncio
-async def test_grep_anchor_harvest_does_not_read_whole_files(sh, tmp_path, monkeypatch):
-    """A grep hit must not pull its whole file in just to quote one line."""
+async def test_search_anchor_harvest_does_not_read_whole_files(sh, tmp_path, monkeypatch):
+    """A search hit must not pull its whole file in just to quote one line."""
     path = tmp_path / "big.py"
     filler = "".join(f"pad_{i}\n" for i in range(20_000))
     path.write_text(filler + "needle_here = 1\n")
 
-    result = await sh.run("grep -rn 'needle_here' .")
+    result = await sh.run("rg -n 'needle_here' .")
     assert result.matches, "expected structured anchors for a pure search"
     assert "needle_here" in result.matches[0].text
 
@@ -368,7 +381,7 @@ async def test_grep_anchor_harvest_does_not_read_whole_files(sh, tmp_path, monke
         raise AssertionError("anchor harvesting fell back to read_text()")
 
     monkeypatch.setattr(Path, "read_text", _explode)
-    again = await sh.run("grep -rn 'needle_here' .")
+    again = await sh.run("rg -n 'needle_here' .")
     assert again.matches
     assert "needle_here" in again.matches[0].text
 

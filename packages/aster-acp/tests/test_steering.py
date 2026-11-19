@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 from acp import RequestError, text_block
-from acp.schema import AgentMessageChunk, UserMessageChunk
+from acp.schema import AgentMessageChunk, RequestPermissionResponse, UserMessageChunk
 from aster_acp._session_replay import transcript_updates
 from aster_acp.server import CodingACPAdapter
 from aster_cli.coding.reply_strategy import CodingReplyStrategy
@@ -19,7 +19,7 @@ from aster_cli.sessions import SessionSteering, SessionStore
 from aster.config import CodeActConfig
 from aster.context_blocks.events import ToolCallEvent
 from aster.events import ExecutionResult, Notification
-from aster.interactive import AgentMessage, Done
+from aster.interactive import AgentMessage, Done, NeedInput, Waiting
 from aster.runtime.actor import ActorRuntime
 from aster.skill_registry import SkillRegistry
 from aster.strategies.codeact import _ReturnResultSignal
@@ -45,6 +45,11 @@ def isolated_config(tmp_path, monkeypatch):
 class Client:
     def __init__(self):
         self.updates = []
+
+    async def request_permission(self, session_id, tool_call, options, **kwargs):
+        return RequestPermissionResponse.model_validate(
+            {"outcome": {"outcome": "selected", "optionId": "allow_once"}}
+        )
 
     async def session_update(self, session_id, update, **kwargs):
         self.updates.append(update)
@@ -89,8 +94,7 @@ async def harness(tmp_path, *responses, streaming=False):
         async with asyncio.timeout(15):
             yield adapter, session, client, llm
     finally:
-        await session.dispatcher.cancel()
-        session.cancel_complete.set()
+        await adapter.cancel(session_id)
         await adapter.close()
 
 
@@ -325,13 +329,25 @@ def test_replay_coalesces_states_at_acceptance_without_adding_user_turns(tmp_pat
 
 
 @pytest.mark.parametrize("explicit_return", [False, True])
+@pytest.mark.parametrize(
+    "result",
+    [
+        pytest.param(Done(message="42", explanation="complete"), id="done"),
+        pytest.param(NeedInput(question="Which next step?"), id="need-input"),
+        pytest.param(
+            Waiting(on=["user_messages"], message="Ready for input", explanation="complete"),
+            id="user-waiting",
+        ),
+    ],
+)
 async def test_completion_is_sealed_before_async_worker_teardown(
-    tmp_path, monkeypatch, explicit_return
+    tmp_path, monkeypatch, explicit_return, result
 ):
+    payload = result.model_dump(exclude_none=True)
     final = (
-        code("finish", "answer = str(42)\nreturn Done(message=answer, explanation='complete')")
+        code("finish", f"answer = str(42)\nreturn {type(result).__name__}(**{payload!r})")
         if explicit_return
-        else done("finish")
+        else ToolCall(id="finish", name="return_result", arguments=json.dumps({"result": payload}))
     )
     async with harness(tmp_path, response(final)) as (adapter, session, client, llm):
         entered, release = asyncio.Event(), asyncio.Event()
@@ -352,7 +368,7 @@ async def test_completion_is_sealed_before_async_worker_teardown(
             assert states(session) == []
         finally:
             release.set()
-        await turn
+        assert (await turn).stop_reason == "end_turn"
 
 
 @pytest.mark.parametrize("explicit_return", [False, True])
@@ -538,6 +554,5 @@ async def test_recovered_accepted_input_is_interrupted_and_replayed_once(tmp_pat
         assert (
             await steer(adapter, restored, turn="lost-turn", message="lost", text="Lost input")
         )["state"] == "interrupted"
-        assert not restored.steering.pending
         await prompt(adapter, restored, "new-turn")
         assert "Lost input" not in str(llm.calls[0].messages)

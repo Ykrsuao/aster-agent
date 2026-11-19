@@ -4,6 +4,7 @@
 
 import gc
 import json
+from types import MappingProxyType
 from unittest.mock import patch
 
 import pytest
@@ -295,6 +296,16 @@ class TestScrubValue:
         )
         assert result == {"safe": {"client_secret": REDACTED, "refresh_token": REDACTED}}
         assert count == 2
+
+    def test_read_only_mappings_are_scrubbed(self):
+        value = MappingProxyType({"nested": MappingProxyType({"client_secret": "short"})})
+        assert scrub_value(value) == ({"nested": {"client_secret": REDACTED}}, 1)
+
+    def test_repeated_scrubbing_does_not_recount_redacted_values(self):
+        value, count = scrub_value({"client_secret": "short"})
+        assert count == 1
+        assert scrub_value(value) == (value, 0)
+        assert stats.total_scrubbed == 1
 
     def test_openai_encrypted_reasoning_is_redacted_from_mapping(self):
         result, count = scrub_value(

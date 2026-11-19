@@ -206,7 +206,7 @@ struct PasteTarget {
     conversation: u64,
     overlay: Option<Overlay>,
     draft: Vec<String>,
-    cursor: (usize, usize),
+    cursor: tui_textarea::DataCursor,
     selection: Option<((usize, usize), (usize, usize))>,
     query: String,
 }
@@ -516,6 +516,7 @@ fn handle_mouse(
                         | Overlay::Models
                         | Overlay::Modes
                         | Overlay::Permissions
+                        | Overlay::Sandbox
                         | Overlay::Hud
                 ) || (matches!(
                     overlay,
@@ -2859,9 +2860,34 @@ mod tests {
 
     #[tokio::test]
     async fn fatal_startup_reports_captured_stderr_after_terminal_run() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("aster_acp.py"),
-            "import sys\nprint('\\x1b]52;c;hidden\\x07startup 中文', file=sys.stderr)\nraise ModuleNotFoundError('REVIEW_MISSING_DEPENDENCY_SENTINEL')\n").unwrap();
+        let Some(workspace) = std::env::var_os("ASTER_TEST_FATAL_STARTUP_WORKSPACE") else {
+            let directory = tempfile::tempdir().unwrap();
+            let backend = directory.path().join("backend");
+            let workspace = directory.path().join("workspace");
+            std::fs::create_dir(&backend).unwrap();
+            std::fs::create_dir(&workspace).unwrap();
+            std::fs::write(backend.join("aster_acp.py"),
+                "import sys\nprint('\\x1b]52;c;hidden\\x07startup 中文', file=sys.stderr)\nraise ModuleNotFoundError('REVIEW_MISSING_DEPENDENCY_SENTINEL')\n").unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::fatal_startup_reports_captured_stderr_after_terminal_run",
+                    "--nocapture",
+                ])
+                .env("ASTER_TEST_FATAL_STARTUP_WORKSPACE", &workspace)
+                .env("PYTHONPATH", &backend)
+                .env("ASTER_USER_DIR", directory.path().join("user"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -2879,7 +2905,7 @@ mod tests {
             });
         let mut transport = Transport::spawn(&BackendConfig {
             python,
-            workspace: directory.path().to_path_buf(),
+            workspace: workspace.into(),
             model: "no-api-needed".into(),
             client_type: None,
             sandbox: false,

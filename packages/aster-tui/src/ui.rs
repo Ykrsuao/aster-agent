@@ -15,7 +15,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::state::{clean, Entry, Overlay, Phase, State, Tool};
+use crate::state::{clean, Choice, Entry, Overlay, Phase, State, Tool};
 use crate::terminal_image::PreviewState;
 use crate::text_selection::{self, Document, Region, RowSource, ScrollTarget};
 
@@ -601,7 +601,21 @@ mod diff_tests {
     }
 }
 
+fn showing_waiting_messages(state: &State) -> bool {
+    !state.queued.is_empty()
+        && state
+            .entries
+            .iter()
+            .all(|entry| matches!(entry, Entry::Notice { .. }))
+}
+
 fn transcript_rows(state: &mut State, columns: usize, p: Palette) -> Vec<Row> {
+    // Show first submissions immediately without committing unsent drafts to history.
+    let waiting: Vec<_> = if showing_waiting_messages(state) {
+        state.queued.iter().map(Entry::user).collect()
+    } else {
+        Vec::new()
+    };
     let cache = &mut state.transcript_cache;
     if cache.layout != Some((columns, state.monochrome)) {
         cache.assistants.clear();
@@ -609,11 +623,15 @@ fn transcript_rows(state: &mut State, columns: usize, p: Palette) -> Vec<Row> {
     }
     cache.assistants.resize_with(state.entries.len(), || None);
     let mut rows = Vec::new();
-    for (index, entry) in state.entries.iter().enumerate() {
-        if !matches!(entry, Entry::Assistant(_)) {
+    // Keep subsequent initialization errors below the submitted messages and in view.
+    for (position, entry) in waiting.iter().chain(state.entries.iter()).enumerate() {
+        let pending = position < waiting.len();
+        let index = position.saturating_sub(waiting.len());
+        if !pending && !matches!(entry, Entry::Assistant(_)) {
             cache.assistants[index] = None;
         }
-        let consecutive_tools = index > 0
+        let consecutive_tools = !pending
+            && index > 0
             && matches!((&state.entries[index - 1], entry),
                 (Entry::Tool(previous), Entry::Tool(_)) if !previous.expanded);
         if !rows.is_empty() && !consecutive_tools {
@@ -658,7 +676,7 @@ fn transcript_rows(state: &mut State, columns: usize, p: Palette) -> Vec<Row> {
                     );
                 }
                 let total = rows.len() - start;
-                if total > 3 {
+                if total > 3 && !pending {
                     let expanded = state.expanded_entries.contains(&index);
                     if !expanded {
                         rows.truncate(start + 2);
@@ -832,7 +850,7 @@ fn transcript_rows(state: &mut State, columns: usize, p: Palette) -> Vec<Row> {
             }
         }
         for row in &mut rows[start..] {
-            if row.toggle.is_none() {
+            if row.toggle.is_none() && !pending {
                 row.entry = Some(index);
             }
         }
@@ -1317,13 +1335,23 @@ fn search_preview(text: &str, query: &str, columns: usize) -> String {
     )
 }
 
+const WELCOME_MENU: [(&str, &str, &str); 4] = [
+    ("Resume session", "ctrl+r", "/sessions"),
+    ("Commands", "ctrl+k", "/"),
+    ("Keyboard shortcuts", "ctrl+x", "/help"),
+    ("Quit", "ctrl+q", "/exit"),
+];
+
+fn welcome_menu_columns(columns: u16) -> usize {
+    let minimum = WELCOME_MENU
+        .iter()
+        .map(|(label, key, _)| width(label) + width(key) + 2)
+        .max()
+        .unwrap_or(0);
+    1 + usize::from(usize::from(columns) >= minimum * 2 + 4)
+}
+
 fn welcome(frame: &mut Frame, area: Rect, p: Palette, hits: &mut HitAreas) {
-    let menu_width = area.width.saturating_sub(4).min(51);
-    if menu_width < 12 {
-        return;
-    }
-    let x = area.x + (area.width - menu_width) / 2;
-    let mut y = area.y + area.height.saturating_sub(12) / 3;
     // ASTER wordmark; measure the artwork so narrow terminals never crop letters.
     let logo = [
         " █████╗  ███████╗ ████████╗ ███████╗ ██████╗ ",
@@ -1334,27 +1362,51 @@ fn welcome(frame: &mut Frame, area: Rect, p: Palette, hits: &mut HitAreas) {
         "╚═╝  ╚═╝ ╚══════╝    ╚═╝    ╚══════╝ ╚═╝  ╚═╝",
     ];
     let logo_width = logo.iter().map(|line| width(line)).max().unwrap_or(0);
-    if area.height >= 18 && menu_width as usize >= logo_width {
+    let menu_columns = if area.height as usize >= logo.len() + WELCOME_MENU.len() {
+        1
+    } else {
+        welcome_menu_columns(area.width)
+    };
+    let menu_width = (area.width.saturating_sub(4) / menu_columns as u16).min(51);
+    if menu_width < 12 || area.height == 0 {
+        return;
+    }
+    let menu_gap = 4 * (menu_columns as u16 - 1);
+    let total_width = menu_width * menu_columns as u16 + menu_gap;
+    let x = area.x + (area.width - total_width) / 2;
+    let menu_rows = WELCOME_MENU.len().div_ceil(menu_columns) as u16;
+    let full_logo = area.width as usize >= logo_width
+        && usize::from(area.height) >= logo.len() + usize::from(menu_rows);
+    let logo_height = if full_logo { logo.len() as u16 } else { 1 };
+    let menu_height = menu_rows.min(area.height.saturating_sub(logo_height));
+    let gap = area.height.saturating_sub(logo_height + menu_height).min(2);
+    let mut y = area.y + area.height.saturating_sub(logo_height + gap + menu_height) / 3;
+    if full_logo {
+        let logo_x = area.x + (area.width - logo_width as u16) / 2;
         for line in logo {
             line_at(
                 frame,
-                Rect::new(x, y, menu_width, 1),
+                Rect::new(logo_x, y, logo_width as u16, 1),
                 Line::styled(line, p.muted()).alignment(Alignment::Center),
             );
             y += 1;
         }
-        y += 2;
+    } else {
+        line_at(
+            frame,
+            Rect::new(x, y, total_width, 1),
+            Line::styled("ASTER", p.muted()).alignment(Alignment::Center),
+        );
+        y += 1;
     }
-    for (label, key, command) in [
-        ("Resume session", "ctrl+r", "/sessions"),
-        ("Commands", "ctrl+k", "/"),
-        ("Keyboard shortcuts", "ctrl+x", "/help"),
-        ("Quit", "ctrl+q", "/exit"),
-    ] {
-        if y >= area.bottom() {
+    y += gap;
+    for (index, (label, key, command)) in WELCOME_MENU.into_iter().enumerate() {
+        let row = (index / menu_columns) as u16;
+        if row >= menu_height {
             break;
         }
-        let rect = Rect::new(x, y, menu_width, 1);
+        let column = (index % menu_columns) as u16;
+        let rect = Rect::new(x + column * (menu_width + menu_gap), y + row, menu_width, 1);
         let label = fit(
             label,
             menu_width.saturating_sub(width(key) as u16 + 2) as usize,
@@ -1370,12 +1422,12 @@ fn welcome(frame: &mut Frame, area: Rect, p: Palette, hits: &mut HitAreas) {
             ]),
         );
         hits.welcome_rows.push((rect, command));
-        y += 1;
     }
+    y += menu_height;
     if y + 3 < area.bottom() {
         line_at(
             frame,
-            Rect::new(x, y + 2, menu_width, 1),
+            Rect::new(x, y + 2, total_width, 1),
             Line::styled("Type a message to start building.", p.muted()),
         );
     }
@@ -1521,7 +1573,7 @@ fn approval_overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut
         &mut header,
         Line::styled(
             if state.sandbox {
-                "Sandbox execution"
+                "Python sandbox · shell/file tools on host"
             } else {
                 "Native execution · this computer"
             },
@@ -1689,7 +1741,7 @@ fn approval_overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut
         .title(Span::styled(
             if compact {
                 if state.sandbox {
-                    " Sandbox execution "
+                    " Python sandbox "
                 } else {
                     " Native execution "
                 }
@@ -1859,6 +1911,135 @@ fn context_viewport(
     viewport
 }
 
+fn effort_slider(
+    frame: &mut Frame,
+    area: Rect,
+    choices: &[Choice],
+    selected: usize,
+    p: Palette,
+    mut targets: Option<&mut Vec<(Rect, usize)>>,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let panel = p.text().bg(p.panel);
+    let muted = p.muted().bg(p.panel);
+    let Some(choice) = choices.get(selected) else {
+        let mut rows = Vec::new();
+        append(
+            &mut rows,
+            Line::styled(
+                "Effort controls have not been reported for this model.",
+                muted,
+            ),
+            area.width as usize,
+            None,
+        );
+        for (row, line) in rows.into_iter().take(area.height as usize).enumerate() {
+            line_at(
+                frame,
+                Rect::new(area.x, area.y + row as u16, area.width, 1),
+                line.line,
+            );
+        }
+        return;
+    };
+    let label = if choice.value.is_empty() {
+        choice.label.replace("Model default", "auto")
+    } else {
+        choice.label.clone()
+    };
+    line_at(
+        frame,
+        area,
+        Line::styled(fit(&format!("Effort: {label}"), area.width as usize), panel),
+    );
+    if area.height < 2 {
+        return;
+    }
+    let chips: Vec<String> = choices
+        .iter()
+        .enumerate()
+        .map(|(index, choice)| {
+            let value = if choice.value.is_empty() {
+                "auto"
+            } else {
+                &choice.label
+            };
+            if index == selected {
+                format!("[{value}]")
+            } else {
+                format!(" {value} ")
+            }
+        })
+        .collect();
+    let available = area.width.saturating_sub(4) as usize;
+    let mut start = 0;
+    let mut used: usize = chips[..=selected].iter().map(|chip| width(chip) + 1).sum();
+    while start < selected && used > available {
+        used = used.saturating_sub(width(&chips[start]) + 1);
+        start += 1;
+    }
+    let mut end = selected + 1;
+    while end < chips.len() && used + width(&chips[end]) < available {
+        used += width(&chips[end]) + 1;
+        end += 1;
+    }
+    let mut spans = vec![Span::styled(if start == 0 { "  " } else { "‹ " }, muted)];
+    let mut column = 2;
+    for (index, chip) in chips.iter().enumerate().take(end).skip(start) {
+        let chip = fit(chip, available.saturating_sub(column - 2));
+        let chip_width = width(&chip) as u16;
+        let style = if index == selected {
+            p.accent().bg(p.faint).add_modifier(Modifier::BOLD)
+        } else {
+            muted
+        };
+        if let Some(targets) = targets.as_mut() {
+            targets.push((
+                Rect::new(area.x + column as u16, area.y + 1, chip_width, 1),
+                index,
+            ));
+        }
+        column += chip_width as usize + 1;
+        spans.push(Span::styled(chip, style));
+        spans.push(Span::styled(" ", muted));
+    }
+    if end < chips.len() {
+        spans.push(Span::styled("›", muted));
+    }
+    line_at(
+        frame,
+        Rect::new(area.x, area.y + 1, area.width, 1),
+        Line::from(spans),
+    );
+    let note = if choices.len() == 1 && choice.detail.contains("unknown") {
+        "Levels unknown for this route"
+    } else if choices.len() == 1 && choice.detail.contains("does not support") {
+        "Effort selection unsupported"
+    } else {
+        "Preview · Enter applies to next requests"
+    };
+    let mut rows = Vec::new();
+    append(
+        &mut rows,
+        Line::styled(note, muted),
+        area.width as usize,
+        None,
+    );
+    for (row, line) in rows
+        .into_iter()
+        .take(area.height.saturating_sub(2) as usize)
+        .enumerate()
+    {
+        line_at(
+            frame,
+            Rect::new(area.x, area.y + 2 + row as u16, area.width, 1),
+            line.line,
+        );
+    }
+}
+
 fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas) {
     let Some(kind) = state.overlay else {
         return;
@@ -1880,8 +2061,10 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
             | Overlay::Tree
             | Overlay::Files
             | Overlay::Models
+            | Overlay::Reasoning
             | Overlay::Modes
             | Overlay::Permissions
+            | Overlay::Sandbox
             | Overlay::Hud
     );
     let choices = state.choices();
@@ -1908,6 +2091,14 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
     );
     let metadata_rows = if kind == Overlay::Rewind {
         2
+    } else if kind == Overlay::Models && !state.model.is_empty() {
+        4
+    } else if kind == Overlay::Sandbox {
+        wrap(
+            Line::from(crate::state::PYTHON_SANDBOX_SCOPE),
+            panel_width.saturating_sub(4) as usize,
+        )
+        .len() as u16
     } else {
         u16::from(matches!(
             kind,
@@ -1950,6 +2141,8 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
             );
         }
         rows.len().saturating_add(2).min(u16::MAX as usize) as u16
+    } else if kind == Overlay::Reasoning {
+        9
     } else if compact {
         5 + metadata_rows
             + u16::from(draft_warning)
@@ -2004,16 +2197,20 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
         Overlay::Tree => " Conversation tree ",
         Overlay::Files => " Attach workspace files ",
         Overlay::Attachments => " Attached context ",
-        Overlay::Models => " Switch model · /model ",
+        Overlay::Models => " Model · /model ",
+        Overlay::Reasoning => " Effort · /effort ",
         Overlay::Modes => " Session mode ",
-        Overlay::Permissions => " Execution permissions ",
+        Overlay::Permissions => " Permissions · this session ",
+        Overlay::Sandbox => " Python sandbox ",
         Overlay::Approval => " Review execution ",
         Overlay::Tasks => " Task progress ",
         Overlay::Rollback => " Choose rollback scope ",
         Overlay::RollbackConfirm => " Review file rollback ",
         Overlay::UndoConfirm => " Undo file rollback ",
     };
-    let title = if kind == Overlay::Context {
+    let title = if kind == Overlay::Permissions && panel_width < 32 {
+        " Permissions ".to_owned()
+    } else if kind == Overlay::Context {
         state.context_view.as_ref().map_or_else(
             || title.to_owned(),
             |view| {
@@ -2114,6 +2311,8 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
             Overlay::Files => "Find a file by path…",
             Overlay::Attachments => "Filter attached files and images…",
             Overlay::Models => "Choose a configured model…",
+            Overlay::Reasoning => "Choose a declared reasoning level…",
+            Overlay::Sandbox => "Choose Python execution…",
             Overlay::Hud => "Find a HUD setting…",
             Overlay::Tasks => "Find a plan step or background job…",
             _ => "What would you like to do?",
@@ -2274,8 +2473,20 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
         }
         Overlay::Attachments if selected_image => "Enter open original · Del remove · ↑↓ choose",
         Overlay::Attachments => "↑↓ choose · Del remove attachment",
+        Overlay::Models if !state.model.is_empty() && content.width < 30 => "↑↓ · ←→ · Enter",
+        Overlay::Models if !state.model.is_empty() && content.width < 38 => {
+            "↑↓ model · ←→ effort · Enter"
+        }
+        Overlay::Models if !state.model.is_empty() => "↑↓ model · ←→ effort · Enter apply",
         Overlay::Models => "↑↓ choose · Enter switch · Esc close",
-        Overlay::Modes | Overlay::Permissions => "↑↓ choose · Enter apply to this session",
+        Overlay::Reasoning if content.width < 30 => "←→ · Enter apply",
+        Overlay::Reasoning => "←→ effort · Enter apply to this session",
+        Overlay::Modes | Overlay::Permissions | Overlay::Sandbox if content.width < 38 => {
+            "↑↓ · Enter apply"
+        }
+        Overlay::Modes | Overlay::Permissions | Overlay::Sandbox => {
+            "↑↓ choose · Enter apply to this session"
+        }
         Overlay::Approval => "↑↓ choose · Enter confirm · Esc reject · PgDn code",
         Overlay::Tasks => "↑↓ select · Ctrl+X stop job · Ctrl+R refresh",
         Overlay::Hud => "↑↓ choose · Enter apply · Esc close",
@@ -2291,6 +2502,11 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
     };
     let count = if searchable
         && !choices.is_empty()
+        && (kind != Overlay::Models || content.width >= 38)
+        && (!matches!(
+            kind,
+            Overlay::Modes | Overlay::Permissions | Overlay::Sandbox
+        ) || content.width >= 30)
         && (!matches!(kind, Overlay::Queue | Overlay::Rewind | Overlay::Tree)
             || content.width >= 64)
     {
@@ -2315,6 +2531,60 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
     content.height = content.height.saturating_sub(1);
     if content.height == 0 {
         return;
+    }
+    if kind == Overlay::Sandbox {
+        let lines = wrap(
+            Line::styled(crate::state::PYTHON_SANDBOX_SCOPE, muted),
+            content.width as usize,
+        );
+        let available = content.height.saturating_sub(2) as usize;
+        for line in lines.into_iter().take(available) {
+            line_at(frame, content, line);
+            content.y += 1;
+            content.height -= 1;
+        }
+    }
+    if kind == Overlay::Reasoning {
+        for label in [
+            format!("Model: {}", clean(&state.model)),
+            format!(
+                "Current: {}",
+                clean(
+                    state.runtime["reasoningLevel"]
+                        .as_str()
+                        .unwrap_or("model default")
+                )
+            ),
+        ] {
+            if content.height <= 2 {
+                break;
+            }
+            line_at(
+                frame,
+                content,
+                Line::styled(fit(&label, content.width as usize), muted),
+            );
+            content.y += 1;
+            content.height -= 1;
+        }
+        effort_slider(
+            frame,
+            content,
+            &choices,
+            state.selected,
+            p,
+            Some(&mut hits.choice_rows),
+        );
+        return;
+    }
+    if kind == Overlay::Models && !state.model.is_empty() && content.height >= 4 {
+        if let Some(model) = choices.get(state.selected) {
+            let height = 4.min(content.height.saturating_sub(2));
+            let area = Rect::new(content.x, content.bottom() - height, content.width, height);
+            let (levels, selected) = state.model_effort_choices(&model.value);
+            effort_slider(frame, area, &levels, selected, p, None);
+            content.height -= height;
+        }
     }
     if kind == Overlay::Attachments {
         if let Some((message, error)) = &state.original_image_notice {
@@ -2494,8 +2764,10 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
         | Overlay::Files
         | Overlay::Attachments
         | Overlay::Models
+        | Overlay::Reasoning
         | Overlay::Modes
         | Overlay::Permissions
+        | Overlay::Sandbox
         | Overlay::Tasks
         | Overlay::Hud
         | Overlay::Changes
@@ -2647,6 +2919,20 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
                         "No configured models match this search."
                     } else {
                         "No models configured. Add a model to llm_config.yaml, then restart Aster."
+                    }
+                } else if kind == Overlay::Reasoning {
+                    if !state.query.is_empty() {
+                        "No declared reasoning levels match this search."
+                    } else if state.runtime.is_null() {
+                        "Waiting for the session's reasoning settings…"
+                    } else {
+                        "This backend does not expose reasoning controls. Update aster-acp."
+                    }
+                } else if kind == Overlay::Sandbox {
+                    if state.runtime["executionBackends"].as_array().is_none() {
+                        "Python sandbox switching is unavailable. Update aster-acp."
+                    } else {
+                        "No execution environments match this search."
                     }
                 } else if matches!(kind, Overlay::Modes | Overlay::Permissions) {
                     "Waiting for the session's available settings…"
@@ -3290,7 +3576,16 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
                 ("/reconnect", "Reconnect; recovered work stays paused"),
                 ("/retry", "Restore interrupted input for review"),
                 ("/drafts", "Choose saved input to restore"),
-                ("/model /mode", "Choose the session model and work mode"),
+                ("Alt+P /model", "Choose model (↑↓) and effort (←→)"),
+                (
+                    "/effort [level]",
+                    "Adjust effort; auto restores model defaults",
+                ),
+                (
+                    "/effort status",
+                    "Inspect the backend's current effort setting",
+                ),
+                ("/mode", "Choose the session work mode"),
                 (
                     "/hud [info]",
                     "Configure status rows or inspect live metrics",
@@ -3299,7 +3594,11 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
                     "/context [all]",
                     "Inspect context cells and token categories",
                 ),
-                ("/permissions", "Set approval for generated execution"),
+                ("/permissions", "Choose Auto, Manual, Accept edits or Plan"),
+                (
+                    "/sandbox [on|off]",
+                    "Choose Python sandbox for this session",
+                ),
                 ("Alt+T /tasks", "Inspect plan steps and background jobs"),
                 ("Alt+Enter", "Insert a new line"),
                 ("Ctrl+V / right click", "Paste clipboard text or an image"),
@@ -3316,7 +3615,6 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
                 ("/rewind", "Restore conversation; keep files unchanged"),
                 ("/tree", "Browse branches and continue from a message"),
                 ("Ctrl+C twice", "Exit within 2s with no text selected"),
-                ("Ctrl+D", "Exit with an empty draft"),
                 ("", ""),
                 ("WORKSPACE", ""),
                 ("/", "Suggest commands above the draft"),
@@ -3786,8 +4084,8 @@ fn slash_menu(frame: &mut Frame, state: &State, body: Rect, p: Palette, hits: &m
 pub fn render<B: Backend>(
     terminal: &mut Terminal<B>,
     state: &mut State,
-) -> std::io::Result<HitAreas> {
-    // Ratatui 0.29 shows a Frame cursor before moving it. During timer redraws
+) -> Result<HitAreas, B::Error> {
+    // Showing a Frame cursor before moving it during timer redraws
     // that briefly exposes the cursor at the last updated digit. Keep hardware
     // cursor ownership here, including positioning for IME candidate windows.
     terminal.hide_cursor()?;
@@ -3841,7 +4139,9 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
         available.height,
     );
     let header_height = u16::from(spacious);
-    let queue_height = u16::from(!state.queued.is_empty() && screen.height >= 12);
+    let waiting_messages = showing_waiting_messages(state);
+    let queue_height =
+        u16::from(!state.preparing() && !state.queued.is_empty() && screen.height >= 12);
     let attachment_height = u16::from(
         (screen.height >= 8 && (!state.attachments.is_empty() || state.can_undo_attachment()))
             || (screen.height >= 14 && (state.attachment_loading || state.recovery.is_some())),
@@ -3863,18 +4163,31 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
     let gap = u16::from(screen.height >= 12);
     let fixed_footer = 1;
     let above = queue_height + attachment_height + plan_height + activity_height + gap;
-    let body_reserve = if screen.height >= 24 {
+    let welcome_screen = state.entries.is_empty()
+        && state.queued.is_empty()
+        && state.editor.lines() == [""]
+        && state.slash_choices().is_empty();
+    let hud_min = u16::from(
+        screen.height >= 6
+            && state.hud.config.layout != crate::hud::Layout::Hidden
+            && !state.hud.config.elements.is_empty(),
+    );
+    let body_reserve = if welcome_screen && screen.height >= 6 {
+        let menu_height = WELCOME_MENU
+            .len()
+            .div_ceil(welcome_menu_columns(inner.width)) as u16;
+        (1 + menu_height).min(
+            screen
+                .height
+                .saturating_sub(header_height + fixed_footer + above + 1 + hud_min),
+        )
+    } else if screen.height >= 24 {
         6
     } else if screen.height >= 12 {
         2
     } else {
         u16::from(screen.height >= 6)
     };
-    let hud_min = u16::from(
-        screen.height >= 6
-            && state.hud.config.layout != crate::hud::Layout::Hidden
-            && !state.hud.config.elements.is_empty(),
-    );
     let editor_width = inner.width.saturating_sub(2);
     let editor_width = editor_width.saturating_sub(if editor_width >= 12 { 4 } else { 0 });
     let composer_height =
@@ -3889,8 +4202,12 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
         .height
         .saturating_sub(header_height + fixed_footer + above + body_reserve + composer_height)
         as usize;
-    // Status must stay smaller than the conversation even when every metric is enabled.
-    let hud_budget = hud_budget.min(usize::from((screen.height / 8).max(1)));
+    // Compact conversations keep status small; expanded layouts honor the configured rows.
+    let hud_budget = if !welcome_screen && state.hud.config.layout == crate::hud::Layout::Compact {
+        hud_budget.min(usize::from((screen.height / 8).max(1)))
+    } else {
+        hud_budget
+    };
     let hud_rows = crate::hud::rows(state, inner.width as usize, hud_budget);
     if (steps.is_none_or(|items| items.is_empty())
         || hud_rows.iter().any(|row| row.element == "tasks"))
@@ -3925,9 +4242,9 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
         sidebar: rail,
         ..HitAreas::default()
     };
-    if state.entries.is_empty() {
+    if state.entries.is_empty() && !waiting_messages {
         state.transcript_cache = TranscriptCache::default();
-        if state.editor.lines() == [""] && state.slash_choices().is_empty() {
+        if welcome_screen {
             welcome(frame, transcript, p, &mut hits);
         }
     } else {
@@ -4092,13 +4409,8 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
             .front()
             .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
             .unwrap_or_default();
-        let waiting = if state.preparing() {
-            "waiting for initialization"
-        } else {
-            "queued"
-        };
         let label = format!(
-            "{} {} {waiting} · {next}",
+            "{} {} queued · {next}",
             if state.queue_paused { "Ⅱ" } else { "↳" },
             state.queued.len(),
         );
@@ -4164,7 +4476,7 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
     });
     state
         .editor
-        .set_placeholder_text(if state.started.is_some() {
+        .set_placeholder_text(if state.started.is_some() || waiting_messages {
             "Queue a follow-up..."
         } else {
             "Type a message..."
@@ -4196,7 +4508,7 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
         state.overlay.is_none(),
     );
     let color = match state.phase {
-        Phase::Ready => p.muted,
+        Phase::Ready | Phase::Connecting | Phase::Preparing => p.muted,
         Phase::Failed => p.red,
         Phase::Cancelling => p.amber,
         _ => p.accent,
@@ -4217,25 +4529,38 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
     } else {
         "Ctrl+C again to exit"
     };
+    let preparation_hint = if inner.width >= 70 {
+        "Esc edit · Ctrl+E queue"
+    } else {
+        "Esc edit"
+    };
     let mut status = if confirming_exit {
         exit_hint.into()
     } else if state.preparing() {
-        if state.queue_paused {
-            if inner.width >= 70 {
-                "Initializing session… sending paused"
-            } else {
-                "Initializing… paused"
-            }
-        } else if !state.queued.is_empty() {
-            if inner.width >= 70 {
-                "Initializing session… will send automatically"
-            } else {
-                "Initializing… auto-send"
-            }
+        let count = state.queued.len();
+        if inner.width < 42 {
+            let label = match (state.queue_paused, count) {
+                (true, 0 | 1) => "Paused".into(),
+                (true, _) => format!("{count} paused"),
+                (false, 0 | 1) if state.phase == Phase::Connecting => "Connecting…".into(),
+                (false, 0 | 1) => "Starting".into(),
+                (false, _) => format!("{count} waiting"),
+            };
+            format!("{label} · Esc edit")
         } else {
-            "Initializing session…"
+            let label = if state.queue_paused {
+                "Sending paused"
+            } else if state.phase == Phase::Connecting {
+                "Connecting…"
+            } else {
+                "Starting conversation…"
+            };
+            let mut text = label.to_owned();
+            if count > 1 {
+                text.push_str(&format!(" · {count} messages"));
+            }
+            text
         }
-        .into()
     } else {
         format!("{} {}", if state.busy() { "·" } else { "✓" }, state.status)
     };
@@ -4243,14 +4568,9 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
         if let Some(seconds) = duration {
             status.push_str(&format!(" · {}", elapsed(seconds)));
         }
-        if !state.queued.is_empty() && queue_height == 0 {
-            let waiting = if state.preparing() {
-                "waiting"
-            } else {
-                "queued"
-            };
+        if !state.preparing() && !state.queued.is_empty() && queue_height == 0 {
             status.push_str(&format!(
-                " · {} {waiting}{} · Ctrl+E",
+                " · {} queued{} · Ctrl+E",
                 state.queued.len(),
                 if state.queue_paused { " (paused)" } else { "" }
             ));
@@ -4264,11 +4584,7 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
             if confirming_exit {
                 ""
             } else if state.preparing() {
-                if inner.width >= 50 {
-                    "Esc recalls your message"
-                } else {
-                    "Esc recalls"
-                }
+                preparation_hint
             } else if state.phase == Phase::Cancelling {
                 "Ctrl+C twice to exit"
             } else if state.busy() {
@@ -4412,18 +4728,15 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
         && activity_height == 0
         && state.overlay.is_none()
     {
+        frame.render_widget(Clear, footer);
         frame.render_widget(Block::default().style(p.text()), footer);
-        let hint = if state.queue_paused {
-            "Initializing · paused"
-        } else if footer.width >= 25 {
-            "Initializing… Esc recalls"
-        } else {
-            "Init… Esc recalls"
-        };
-        line_at(
+        pair(
             frame,
             footer,
-            Line::styled(fit(hint, footer.width as usize), p.muted()),
+            &status,
+            preparation_hint,
+            p.muted(),
+            p.muted(),
         );
     }
     if confirming_exit && (activity_height == 0 || state.overlay.is_some()) {
@@ -4464,7 +4777,7 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
         for x in fallback_area.x..fallback_area.right() {
             let cell = &frame.buffer_mut()[(x, y)];
             cell.symbol().hash(&mut signature);
-            cell.skip.hash(&mut signature);
+            cell.diff_option.hash(&mut signature);
         }
     }
     let document = state
@@ -4534,6 +4847,128 @@ mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
     use std::time::Instant;
+
+    #[test]
+    fn effort_slider_keeps_current_and_preview_distinct_in_narrow_windows() {
+        for columns in [24, 80] {
+            let mut state = State::new("workspace".into(), "demo".into(), false);
+            state.phase = Phase::Ready;
+            state.runtime = serde_json::json!({
+                "reasoningLevel":"high", "reasoningSelection":"high",
+                "reasoningDefault":"low", "reasoningLevels":["low", "high"]
+            });
+            state.open(Overlay::Reasoning);
+            let (text, hits) = snapshot(&mut state, columns, 18);
+            assert!(text.contains("Current: high"), "{text}");
+            assert!(text.contains("[high]"), "{text}");
+            assert!(text.contains("←→"), "{text}");
+            assert!(hits.query.is_none());
+            assert!(hits.choice_rows.iter().any(|(_, index)| *index == 2));
+            state.selected = 1;
+            let (text, _) = snapshot(&mut state, columns, 18);
+            assert!(text.contains("Current: high"), "{text}");
+            assert!(text.contains("[low]"), "{text}");
+        }
+    }
+
+    #[test]
+    fn combined_model_picker_shows_only_the_selected_models_declared_effort() {
+        for columns in [24, 80] {
+            let mut state = State::new("workspace".into(), "demo".into(), false);
+            state.phase = Phase::Ready;
+            state.runtime = serde_json::json!({
+                "reasoningLevel":null, "reasoningSelection":null, "reasoningLevels":null,
+                "models":[
+                    {"id":"demo", "reasoningLevels":null},
+                    {"id":"secondary", "reasoningLevels":["low","high"], "reasoningSelection":null}
+                ]
+            });
+            state.open(Overlay::Models);
+            let (text, _) = snapshot(&mut state, columns, 18);
+            assert!(text.contains("Levels unknown"), "{text}");
+            assert!(!text.contains("[high]"), "{text}");
+            state.selected = 1;
+            state
+                .model_effort_drafts
+                .insert("secondary".into(), Some("high".into()));
+            let (text, hits) = snapshot(&mut state, columns, 18);
+            assert!(text.contains("secondary"), "{text}");
+            assert!(text.contains("[high]"), "{text}");
+            assert!(text.contains("←→"), "{text}");
+            assert!(hits.query.is_some());
+        }
+    }
+
+    #[test]
+    fn sandbox_picker_shows_its_scope_and_keeps_both_choices_reachable() {
+        for (columns, rows) in [(24, 12), (48, 18), (100, 24)] {
+            let mut state = State::new("workspace".into(), "model".into(), false);
+            state.phase = Phase::Ready;
+            state.runtime = serde_json::json!({
+                "executionBackend":"native", "executionBackends":["native", "sandbox"]
+            });
+            state.open(Overlay::Sandbox);
+            for (selected, label) in ["Native", "Python sandbox"].into_iter().enumerate() {
+                state.selected = selected;
+                let (text, hits) = snapshot(&mut state, columns, rows);
+                assert!(text.contains(label), "{columns}x{rows}: {text}");
+                assert!(
+                    hits.choice_rows.iter().any(|(_, index)| *index == selected),
+                    "{columns}x{rows}: {text}"
+                );
+                assert!(text.contains("Python sandbox"), "{columns}x{rows}: {text}");
+                if columns == 100 {
+                    assert!(text.contains("Shell/file tools stay on host"), "{text}");
+                    assert!(text.contains("not migrated"), "{text}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sandbox_picker_explains_missing_backend_capability() {
+        let mut state = State::new("workspace".into(), "model".into(), false);
+        state.phase = Phase::Ready;
+        state.runtime = serde_json::json!({"executionBackend":"native"});
+        state.open(Overlay::Sandbox);
+        let (text, _) = snapshot(&mut state, 100, 24);
+        assert!(text.contains("Update aster-acp"), "{text}");
+    }
+
+    #[test]
+    fn permissions_menu_keeps_all_four_choices_reachable_on_narrow_terminals() {
+        for columns in [24, 48, 80] {
+            for rows in [12, 18] {
+                let mut state = State::new("workspace".into(), "model".into(), false);
+                state.phase = Phase::Ready;
+                state.runtime_supported = true;
+                state.mode = "code".into();
+                state.approval_policy = "ask".into();
+                state.runtime = serde_json::json!({"permissionMode":"manual"});
+                state.open(Overlay::Permissions);
+                assert_eq!(state.selected, 1);
+                for (selected, label) in ["Auto", "Manual", "Accept edits", "Plan"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    state.selected = selected;
+                    let (text, hits) = snapshot(&mut state, columns, rows);
+                    assert!(text.contains(label), "{columns}x{rows}: {text}");
+                    assert!(
+                        hits.choice_rows.iter().any(|(_, index)| *index == selected),
+                        "{columns}x{rows}: {text}"
+                    );
+                    assert!(text.contains("Permissions"), "{columns}x{rows}: {text}");
+                    assert!(text.contains("Enter"), "{columns}x{rows}: {text}");
+                    if rows >= 18 {
+                        for label in ["Auto", "Manual", "Accept edits", "Plan"] {
+                            assert!(text.contains(label), "{columns}x{rows}: {text}");
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     fn tool() -> Tool {
         Tool {
@@ -5006,11 +5441,9 @@ mod tests {
                 .draw(|frame| hits = draw(frame, &mut state))
                 .unwrap();
             assert!(hits.attachment_original.is_empty());
-            assert!(!closed
-                .buffer
-                .content
-                .iter()
-                .any(|cell| cell.skip || cell.symbol().contains("\x1bP")));
+            assert!(!closed.buffer.content.iter().any(|cell| cell.diff_option
+                == ratatui::buffer::CellDiffOption::Skip
+                || cell.symbol().contains("\x1bP")));
             assert!(state.terminal_image.ready().is_none());
             assert_eq!(state.editor.lines(), &["keep draft"]);
         }
@@ -5797,8 +6230,11 @@ mod tests {
                 state.queued.push_back("waiting message".into());
                 state.editor.insert_str("another draft");
                 let (text, _) = snapshot(&mut state, columns, rows);
-                assert!(text.contains("Init"), "{columns}x{rows}\n{text}");
-                assert!(text.contains("Esc recalls"), "{columns}x{rows}\n{text}");
+                assert!(
+                    text.contains("Starting") || text.contains("Connecting"),
+                    "{columns}x{rows}\n{text}"
+                );
+                assert!(text.contains("Esc edit"), "{columns}x{rows}\n{text}");
                 assert!(!text.contains("Esc to stop"));
                 state.queue_paused = true;
                 let (paused, _) = snapshot(&mut state, columns, rows);

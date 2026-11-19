@@ -3,6 +3,8 @@
 """Tests for aster.Skill — path-based loading."""
 
 import math
+import shlex
+import sys
 from pathlib import Path
 
 import pytest
@@ -110,23 +112,34 @@ def skill_with_scripts(skill_dir):
     return skill_dir
 
 
+@pytest.fixture
+def python_interpreter():
+    if sys.platform == "win32":
+        return "& '" + sys.executable.replace("'", "''") + "'"
+    return shlex.quote(sys.executable)
+
+
 @pytest.mark.asyncio
-async def test_run_script_python(skill_with_scripts):
-    output = await TextSkill(path=skill_with_scripts).run_script("greet.py", interpreter="python3")
+async def test_run_script_python(skill_with_scripts, python_interpreter):
+    output = await TextSkill(path=skill_with_scripts).run_script(
+        "greet.py", interpreter=python_interpreter
+    )
     assert "hello from script" in output
 
 
 @pytest.mark.asyncio
-async def test_run_script_with_args(skill_with_scripts):
+async def test_run_script_with_args(skill_with_scripts, python_interpreter):
     output = await TextSkill(path=skill_with_scripts).run_script(
-        "echo_args.py", "foo", "bar", interpreter="python3"
+        "echo_args.py", "foo", "bar", interpreter=python_interpreter
     )
     assert "foo bar" in output
 
 
 @pytest.mark.asyncio
-async def test_run_script_nonzero_exit_in_output(skill_with_scripts):
-    output = await TextSkill(path=skill_with_scripts).run_script("fail.py", interpreter="python3")
+async def test_run_script_nonzero_exit_in_output(skill_with_scripts, python_interpreter):
+    output = await TextSkill(path=skill_with_scripts).run_script(
+        "fail.py", interpreter=python_interpreter
+    )
     assert "oops" in output
     assert "exit code: 1" in output
 

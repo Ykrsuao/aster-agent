@@ -106,7 +106,15 @@ fn main() {
     state.status = "Ready".into();
     if !matches!(
         mode,
-        "welcome" | "welcome-drafts" | "drafts" | "drafts-empty"
+        "welcome"
+            | "welcome-hud-full"
+            | "sent-hud-full"
+            | "starting"
+            | "starting-multiple"
+            | "starting-paused"
+            | "welcome-drafts"
+            | "drafts"
+            | "drafts-empty"
     ) {
         state.title = "Polish the terminal workspace".into();
         state.entries=vec![
@@ -141,6 +149,89 @@ fn main() {
         state.session_id = Some("session-current".into());
     }
     match mode {
+        "starting" | "starting-multiple" | "starting-paused" => {
+            state.phase = Phase::Preparing;
+            state.queued.push_back("hi".into());
+            if mode == "starting-multiple" {
+                state.queued.push_back("Check the current project".into());
+                state.queued.push_back("Summarize the changes".into());
+            }
+            state.queue_paused = mode == "starting-paused";
+            state.hud.configure("full").unwrap();
+        }
+        "permissions" | "permissions-plan" => {
+            state.phase = Phase::Ready;
+            state.status = "Ready".into();
+            state.started = None;
+            state.runtime_supported = true;
+            state.mode = if mode == "permissions-plan" {
+                "plan"
+            } else {
+                "code"
+            }
+            .into();
+            state.approval_policy = "ask".into();
+            state.runtime = json!({
+                "permissionMode":if mode == "permissions-plan" { "plan" } else { "manual" },
+                "mode":state.mode,
+                "approval":"ask"
+            });
+            state.open(Overlay::Permissions);
+        }
+        "reasoning" | "reasoning-unknown" | "reasoning-unsupported" => {
+            state.phase = Phase::Ready;
+            state.status = "Ready".into();
+            state.started = None;
+            state.runtime_supported = true;
+            state.runtime = json!({
+                "reasoningLevel":"high", "reasoningSelection":"high",
+                "reasoningDefault":"medium", "reasoningLevels":["low", "medium", "high"]
+            });
+            if mode == "reasoning" {
+                state.model = "declared-demo".into();
+            }
+            if mode != "reasoning" {
+                state.runtime["reasoningLevel"] = Value::Null;
+                state.runtime["reasoningSelection"] = Value::Null;
+                state.runtime["reasoningDefault"] = Value::Null;
+                state.runtime["reasoningLevels"] = if mode == "reasoning-unknown" {
+                    Value::Null
+                } else {
+                    json!([])
+                };
+            }
+            state.open(Overlay::Reasoning);
+        }
+        "model-effort" | "model-effort-unknown" => {
+            state.phase = Phase::Ready;
+            state.status = "Ready".into();
+            state.started = None;
+            state.runtime_supported = true;
+            state.model = "declared-demo".into();
+            state.runtime = json!({
+                "reasoningLevel":"medium", "reasoningSelection":null,
+                "reasoningDefault":"medium", "reasoningLevels":["low","medium","high"],
+                "models":[
+                    {"id":state.model, "name":"Declared demo"},
+                    {"id":"custom-demo", "name":"Custom demo", "reasoningLevels":["quick","deep"], "reasoningDefault":"quick"},
+                    {"id":"unsupported-demo", "name":"Unsupported demo", "reasoningLevels":[]}
+                ]
+            });
+            if mode == "model-effort-unknown" {
+                state.model = "deepseek-flash".into();
+                state.runtime["models"][0] = json!({"id":state.model});
+                state.runtime["reasoningLevel"] = Value::Null;
+                state.runtime["reasoningSelection"] = Value::Null;
+                state.runtime["reasoningDefault"] = Value::Null;
+                state.runtime["reasoningLevels"] = Value::Null;
+            }
+            state.open(Overlay::Models);
+            if mode == "model-effort" {
+                state
+                    .model_effort_drafts
+                    .insert(state.model.clone(), Some("high".into()));
+            }
+        }
         "model-switch" | "model-switch-empty" => {
             state.phase = Phase::Ready;
             state.status = "Ready".into();
@@ -610,13 +701,42 @@ fn main() {
                     {"title":"Check ACP usage","status":"done","elapsedSeconds":23}]
         });
         match mode {
-            "hud-full" | "hud-unknown" | "hud-monochrome" => state.hud.configure("full").unwrap(),
+            "hud-full" | "hud-tokens" | "hud-unknown" | "hud-monochrome" => {
+                state.hud.configure("full").unwrap()
+            }
             "hud-compact" => state.hud.configure("compact").unwrap(),
-            "hud-zh" => state.hud.configure("set language zh").unwrap(),
+            "hud-zh" => {
+                state.hud.configure("full").unwrap();
+                state.hud.configure("set language zh").unwrap();
+            }
             "hud-settings" => state.open(Overlay::Hud),
             _ => {}
         }
+        if mode == "hud-tokens" {
+            state.hud.configure("set context_value tokens").unwrap();
+        }
         state.monochrome = mode == "hud-monochrome";
+    }
+    if matches!(mode, "welcome-hud-full" | "sent-hud-full") {
+        state.hud.configure("full").unwrap();
+    }
+    if mode == "welcome-hud-full" {
+        state.context_window = Some(1_048_576);
+        state.hud.config.context_value = "tokens".into();
+    }
+    if mode == "sent-hud-full" {
+        state.session_id = Some("session-current".into());
+        let mut controller = Controller::new(state, None, false);
+        controller.paste("检查发消息后的状态栏".into());
+        let actions = controller.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::Request {
+                method: "session/prompt",
+                ..
+            }]
+        ));
+        state = controller.state;
     }
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     let mut hits = ui::HitAreas::default();
@@ -759,7 +879,9 @@ fn main() {
         let mut previous_fg = String::new();
         let mut previous_bg = String::new();
         for cell in row {
-            if cell.skip || cell.symbol().contains('\x1b') {
+            if cell.diff_option == ratatui::buffer::CellDiffOption::Skip
+                || cell.symbol().contains('\x1b')
+            {
                 cells.push(json!({"text":"", "fg":color(cell.fg, "#e1e1e1"),
                     "bg":color(cell.bg, "#141414"), "bold":false}));
                 continuation = 0;

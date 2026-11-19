@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for pass-by-reference memories: parsing, capture, resolution, rendering."""
 
+from pathlib import Path
+
 import pytest
 from aster_memory import (
     MemoryConfig,
@@ -55,7 +57,7 @@ def test_file_capture_rejects_escaping_paths(mgr, agent):
     with pytest.raises(ValueError, match="escapes the working dir"):
         capture(agent, mgr.store, "file:../../etc/passwd")
     with pytest.raises(ValueError, match="must be relative"):
-        capture(agent, mgr.store, "file:/etc/passwd")
+        capture(agent, mgr.store, f"file:{Path.cwd() / 'absolute.txt'}")
 
 
 def test_foreign_escaping_ref_resolves_dangling_not_raise(mgr, agent):

@@ -29,7 +29,7 @@ from aster_memory.config import ForgetPolicy, ReflectionPolicy
 from aster_memory.embeddings import Embedder
 from aster_memory.forgetting import ForgettingEngine
 from aster_memory.retrieval import _sigmoid, base_level_activation
-from aster_memory.schema import EdgeType, Memory, _now
+from aster_memory.schema import EdgeType, Memory, _now, owner_matches
 from aster_memory.store import MemoryStore
 
 logger = logging.getLogger(__name__)
@@ -161,29 +161,51 @@ class ReflectionEngine:
             emb = self.store.get_embedding(m.id)
             if emb is None:
                 continue
-            dirty = False
+            duplicates = []
             for nid, cos in self.store.knn(emb, 6, owner=self.owner):
                 if nid == m.id or nid in merged or cos < self.config.merge_threshold:
                     continue
-                dup = self.store.get(nid)
-                if dup is None or dup.type != m.type:
+                duplicates.append(nid)
+            if not duplicates:
+                continue
+            with self.store.transaction():
+                current = self.store.get(m.id)
+                current_emb = self.store.get_embedding(m.id)
+                if (
+                    current is None
+                    or current.archived
+                    or current_emb is None
+                    or not owner_matches(current.owner, self.owner)
+                ):
                     continue
-                # Fold the duplicate into the canonical memory.
-                m.reinforcement_count += 1 + dup.reinforcement_count
-                m.strength += dup.strength
-                m.importance = max(m.importance, dup.importance)
-                m.salience = max(m.salience, dup.salience)
-                m.confidence = max(m.confidence, dup.confidence)
-                for e in dup.edges:
-                    if e.target_id != m.id:
-                        m.add_edge(e.target_id, e.type, e.weight)
-                m.add_edge(dup.id, EdgeType.REFINES, 1.0)  # provenance
-                self.store.archive(dup.id)
-                merged.add(nid)
-                dirty = True
-                count += 1
-            if dirty:
-                self.store.save(m)
+                merged_here = []
+                for nid in duplicates:
+                    dup = self.store.get(nid)
+                    dup_emb = self.store.get_embedding(nid)
+                    if (
+                        dup is None
+                        or dup.archived
+                        or dup.type != current.type
+                        or not owner_matches(dup.owner, self.owner)
+                        or dup_emb is None
+                        or float(current_emb @ dup_emb) < self.config.merge_threshold
+                    ):
+                        continue
+                    current.reinforcement_count += 1 + dup.reinforcement_count
+                    current.strength += dup.strength
+                    current.importance = max(current.importance, dup.importance)
+                    current.salience = max(current.salience, dup.salience)
+                    current.confidence = max(current.confidence, dup.confidence)
+                    for e in dup.edges:
+                        if e.target_id != current.id:
+                            current.add_edge(e.target_id, e.type, e.weight)
+                    current.add_edge(dup.id, EdgeType.REFINES, 1.0)  # provenance
+                    self.store.archive(dup.id)
+                    merged_here.append(dup.id)
+                if merged_here:
+                    self.store.save(current)
+            merged.update(merged_here)
+            count += len(merged_here)
         return count
 
     # ------------------------------------------------------------------
@@ -230,23 +252,47 @@ class ReflectionEngine:
                 break  # LLM-cost ceiling; the rest wait for the next run
             clusters_done += 1
             cluster.sort(key=lambda x: (x.created_at, x.id))  # oldest -> newest
+            snapshots = {c.id: c.model_dump() for c in cluster}
             try:
                 consolidated, archive_ids = reconciler(cluster)
             except Exception:
                 continue
-            valid = {c.id for c in cluster}
-            archived_here = [aid for aid in (archive_ids or []) if aid in valid]
+            archived_here = list(
+                dict.fromkeys(aid for aid in (archive_ids or []) if aid in snapshots)
+            )
             if not archived_here:
                 continue
-            for aid in archived_here:
-                self.store.archive(aid)
-                superseded += 1
+            embedding = None
             if consolidated is not None:
                 if self.owner is not None and not consolidated.owner:
                     consolidated.owner = self.owner
                 for c in cluster:
-                    consolidated.add_edge(c.id, EdgeType.REFINES, 1.0)
-                self.store.add(consolidated, self.embedder.embed(consolidated.embedding_text()))
+                    if c.id != consolidated.id:
+                        consolidated.add_edge(c.id, EdgeType.REFINES, 1.0)
+                embedding = self.embedder.embed(consolidated.embedding_text())
+            with self.store.transaction():
+                # The reconciler and embedder ran without holding a write lock.
+                if any(
+                    (latest := self.store.get(mid)) is None
+                    or latest.archived
+                    or not owner_matches(latest.owner, self.owner)
+                    or latest.model_dump() != before
+                    for mid, before in snapshots.items()
+                ):
+                    continue
+                if consolidated is not None:
+                    if (
+                        consolidated.id not in snapshots
+                        and self.store.get(consolidated.id) is not None
+                    ):
+                        continue
+                    self.store.add(consolidated, embedding)
+                archived_count = 0
+                for aid in archived_here:
+                    if consolidated is None or aid != consolidated.id:
+                        self.store.archive(aid)
+                        archived_count += 1
+            superseded += archived_count
             reconciled += 1
         return reconciled, superseded
 
@@ -261,22 +307,26 @@ class ReflectionEngine:
             emb = self.store.get_embedding(m.id)
             if emb is None:
                 continue
-            existing = {e.target_id for e in m.edges}
-            new = 0
-            for nid, cos in self.store.knn(
-                emb, self.config.max_edges_per_node + 1, owner=self.owner
-            ):
-                if nid == m.id or nid in existing:
+            neighbors = self.store.knn(emb, self.config.max_edges_per_node + 1, owner=self.owner)
+            with self.store.edit(m.id) as current:
+                if (
+                    current is None
+                    or current.archived
+                    or not owner_matches(current.owner, self.owner)
+                ):
                     continue
-                if cos < self.config.edge_threshold or cos >= self.config.merge_threshold:
-                    continue
-                m.add_edge(nid, EdgeType.RELATED, weight=round(cos, 4))
-                existing.add(nid)
-                new += 1
-                if new >= self.config.max_edges_per_node:
-                    break
-            if new:
-                self.store.save(m)
+                existing = {e.target_id for e in current.edges}
+                new = 0
+                for nid, cos in neighbors:
+                    if nid == current.id or nid in existing:
+                        continue
+                    if cos < self.config.edge_threshold or cos >= self.config.merge_threshold:
+                        continue
+                    current.add_edge(nid, EdgeType.RELATED, weight=round(cos, 4))
+                    existing.add(nid)
+                    new += 1
+                    if new >= self.config.max_edges_per_node:
+                        break
                 added += new
         return added
 
@@ -289,16 +339,22 @@ class ReflectionEngine:
         for m in self.store.all_memories(owner=self.owner):
             if should_stop():
                 break
-            base = _sigmoid(base_level_activation(m.access_log, now, 0.5))
-            new_imp = 0.5 * m.importance + 3.0 * m.salience + 2.0 * base
-            new_imp = max(0.0, min(10.0, new_imp))
-            # Never drop explicitly-protected memories below the forgetting boundary.
-            if m.importance >= 8.0:
-                new_imp = max(new_imp, 8.0)
-            if not math.isclose(new_imp, m.importance, abs_tol=1e-6):
-                m.importance = new_imp
-                self.store.save(m)
-                n += 1
+            with self.store.edit(m.id) as current:
+                if (
+                    current is None
+                    or current.archived
+                    or not owner_matches(current.owner, self.owner)
+                ):
+                    continue
+                base = _sigmoid(base_level_activation(current.access_log, now, 0.5))
+                new_imp = 0.5 * current.importance + 3.0 * current.salience + 2.0 * base
+                new_imp = max(0.0, min(10.0, new_imp))
+                # Never drop explicitly-protected memories below the forgetting boundary.
+                if current.importance >= 8.0:
+                    new_imp = max(new_imp, 8.0)
+                if not math.isclose(new_imp, current.importance, abs_tol=1e-6):
+                    current.importance = new_imp
+                    n += 1
         return n
 
     # ------------------------------------------------------------------

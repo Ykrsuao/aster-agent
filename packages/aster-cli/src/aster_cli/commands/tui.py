@@ -57,7 +57,7 @@ def command(
     message waiting for preparation, stops a running task, or closes a panel or
     suggestions while keeping the draft. Ctrl+F searches; Ctrl+E manages the queue.
     Press Ctrl+C twice within 2 seconds to exit; the first press shows confirmation.
-    Ctrl+D exits when input is empty; Ctrl+Q exits at any time. Use /help for commands.
+    Ctrl+Q exits at any time. Use /help for commands.
     """
     if resume is not None and continue_last:
         raise click.UsageError("Use either --resume or --continue, not both.")
@@ -71,6 +71,8 @@ def command(
         raise click.ClickException(
             "Install Aster's Python dependencies in this checkout with: uv sync --extra tui"
         )
+
+    _confirm_workspace_trust(workspace)
 
     if model is None:
         from aster_cli._tui_model import resolve_tui_model
@@ -95,3 +97,25 @@ def command(
         raise click.ClickException(str(exc) or type(exc).__name__) from exc
     if returncode:
         raise click.exceptions.Exit(returncode)
+
+
+def _confirm_workspace_trust(workspace: Path) -> None:
+    """Ask before a folder's own skills, libraries and settings are used."""
+    from aster_cli._common import find_project_root, load_workspace_trust
+    from aster_cli._workspace_trust_prompt import prompt_workspace_trust
+
+    folders = dict.fromkeys((find_project_root(workspace), workspace))
+    # Loaded without the framework so the terminal can draw before it is imported.
+    workspace_trust = load_workspace_trust()
+    workspace_trust.enforce()
+    for folder in folders:
+        if workspace_trust.is_trusted(folder):
+            continue
+        if not prompt_workspace_trust(folder):
+            raise click.exceptions.Exit(0)
+        try:
+            workspace_trust.trust(folder)
+        except OSError as exc:
+            raise click.ClickException(
+                f"Could not save workspace trust ({ascii(str(exc))[1:-1]})."
+            ) from exc

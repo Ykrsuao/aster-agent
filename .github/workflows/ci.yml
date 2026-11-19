@@ -280,6 +280,7 @@ jobs:
         run: |
           set -euo pipefail
           npm ci --ignore-scripts
+          npm audit
           npm test
           # Build into an EMPTY dist/. Two reasons, both load-bearing:
           #  1. A file that is committed but that the build does not produce
@@ -320,6 +321,18 @@ jobs:
             exit 1
           fi
           echo "OK — committed dist/ is reproducible from source."
+
+  rust-dependency-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Audit the TUI dependency lockfile
+        run: |
+          cargo install cargo-audit --version 0.23.0 --locked
+          cargo audit --file packages/aster-tui/Cargo.lock
 
   secret-scan:
     runs-on: ubuntu-latest
@@ -397,11 +410,43 @@ jobs:
         run: .smoke/Scripts/python.exe scripts/windows_smoke.py
       - name: Terminal chat regressions
         run: |
-          uv sync --extra tui
+          uv sync --extra tui --extra mcp --extra tracing --extra viewer
           uv run --no-sync python -m pytest -q \
             packages/aster-cli/tests/test_tui_command.py \
             packages/aster-cli/tests/test_cli_utf8_output.py \
             packages/aster-acp/tests/test_session_titles.py
+      - name: Security regressions (no live API calls or VM)
+        shell: pwsh
+        env:
+          ASTER_MODEL_METADATA_REFRESH: "False"
+          LITELLM_LOCAL_MODEL_COST_MAP: "True"
+        # These modules import their dependencies directly; missing extras fail
+        # collection rather than silently skipping the security checks.
+        run: >-
+          uv run --no-sync python -m pytest -q
+          -m "not integration and not stress and not sandbox"
+          tests/test_mcp/test_oauth_discovery.py
+          tests/test_mcp/test_oauth_binding.py
+          tests/test_mcp/test_oauth_error_privacy.py
+          tests/tracing/test_secret_scrubber.py
+          tests/tracing/test_secret_scrubber_export.py
+          packages/aster-cli/tests/test_coding_instructions.py
+          packages/aster-cli/tests/test_start_dev_links.py
+          packages/aster-cli/tests/test_tui_model.py
+          packages/aster-acp/tests/test_file_edits.py
+          packages/aster-acp/tests/test_permission_paths.py
+          packages/aster-acp/tests/test_permission_modes.py
+          tests/runtime/test_repl_cell_contract.py
+          tests/agentdoc/test_variables_visibility.py
+          tests/runtime/sandbox/test_broker_policy.py
+          tests/viewer/test_main.py
+          --junitxml=artifacts/windows-security.xml
+      - name: Upload Windows security results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-security
+          path: artifacts/windows-security.xml
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:

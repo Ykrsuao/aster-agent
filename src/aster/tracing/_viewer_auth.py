@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Bearer-token auth for clients posting to a remote aster viewer.
 
-The viewer refuses writes from non-loopback clients unless
-``ASTER_VIEWER_AUTH_TOKEN`` is configured on the server
-(:func:`aster.viewer.main._require_viewer_authorization`), and it authenticates
-with ``Authorization: Bearer <token>``.
+The viewer refuses non-loopback API requests unless ``ASTER_VIEWER_AUTH_TOKEN``
+is configured on the server. Once configured, local and remote clients must
+authenticate (:func:`aster.viewer.main._require_viewer_authorization`). Exporters
+use ``Authorization: Bearer <token>``.
 
 Exporters read the same env var on the client side, so a remote run streams
 live by setting one variable at both ends::

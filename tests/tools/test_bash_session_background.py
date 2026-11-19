@@ -14,6 +14,10 @@ import pytest
 
 from aster.tools._bash_session import BashSession
 
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux", reason="Bash job control with Linux /proc process inspection"
+)
+
 
 def _alive(pid: int) -> bool:
     try:

@@ -65,6 +65,12 @@ Open a repository, then pick **Aster** from the `+` menu in the agent panel. Zed
 runs the command with your worktree as its working directory, so repository
 instructions, project skills and sessions resolve against the open project.
 
+Before running generated code, the agent sends the standard ACP
+`session/request_permission` request, so Zed shows a prompt with **Allow once**,
+**Allow for this session** and **Reject**. This applies to every client. A client
+that does not answer the request, or answers with anything else, gets no
+execution: the code is not run.
+
 Credentials go in `env` here rather than in Zed's own settings: the agent is a
 separate process and inherits only what Zed passes it. Use a secret-manager
 wrapper as the `command` if you would rather not put a key in `settings.json`.
@@ -164,6 +170,11 @@ the input-token count and `size` is the known context-window size, or `0` when
 the limit is unknown. Clients should show a token count when `size` is zero;
 they must not interpret that value as a full context window.
 
+Before the first response, `_meta.aster.usagePending: true` and
+`_meta.aster.usageAvailable: false` distinguish pending statistics from a measured
+zero. `used` is `0`, while `size` preserves a known model capacity. After a model
+switch, the adapter clears the old measurement and publishes the new capacity.
+
 Before creating or loading the live agent, and before adopting a replacement
 model, ACP refreshes optional endpoint metadata. Explicit OpenAI-compatible
 routes use one bounded `GET /models` and an exact wire-model ID match. The
@@ -181,6 +192,63 @@ price or usage, since the accumulated amount would then be incomplete. An
 explicitly reported zero is valid. Loading a saved session does not reconstruct
 historical costs, and new sessions start a separate accumulator.
 
+The `_aster/session/runtime` extension reports `contextWindow`, `reasoningLevels`
+(a list of declared labels, `null` for unknown support, or `[]` for unsupported),
+`reasoningSelection` (the explicit selection), `reasoningDefault` (documented
+route default) and `reasoningLevel` (the display label). No provider settings or
+credentials are included. Each entry in `models` includes the same reasoning
+fields so a picker can preview a model and effort together. Other models' choices
+come from the local registry without client construction or network checks;
+the active model reports its live selection. `_aster/session/configure` accepts a `reasoningLevel`
+label to select its declared request settings, or `null` to clear the selection.
+Omitting the field preserves the selection. Changes require an idle session with
+no pending approval or background jobs; combined model/effort changes validate
+against the candidate model before committing. Configuration updates publish
+runtime status and refresh usage metadata without making an inference call.
+
+Runtime status also reports `permissionMode`. Set it through
+`_aster/session/configure` with one of these values:
+
+| `permissionMode` | Execution behavior |
+|---|---|
+| `auto` | Allow generated code and file changes for this live session. |
+| `manual` | Request approval before generated execution. |
+| `accept_edits` | Automatically handle supported file reads and edits; request approval for commands and other code. |
+| `plan` | Use supplied context to plan, with generated execution disabled. |
+
+Selecting the first three modes also enters Code mode. The legacy `mode` and
+`approval` fields remain available; do not combine them with `permissionMode`
+in one configuration request. New or reconnected sessions start in Manual.
+The selected native or sandbox backend does not change with permission mode.
+
+Accept edits recognizes a single direct `await self.shell.read(...)`,
+`await self.shell.write_file(...)`, or path-based `await self.shell.replace(...)`
+with literal arguments. It executes the parsed file request through private
+host file tools, retaining activity events and the runtime's validation,
+middleware, and hooks. It does not evaluate the submitted Python or trust
+bindings in the native or sandbox REPL. Computed arguments, assignments,
+printing, shell commands, and mixed cells retain ordinary execution approval.
+The operation result is available in the usual execution output.
+
+Files with multiple hard links and new files whose parent directory does not
+exist require ordinary approval. Automatic operations verify the opened file's
+identity and location before reading or writing, and use that same handle for
+the operation. If a directory changes while a new file is being opened, execution
+is refused before content is written; an empty file may remain. It is not removed
+by pathname because another writer may already have replaced it.
+
+An explicit `model` change saves its configured alias as `tui.default_model`
+before confirming the runtime update. Validation or save failures preserve the
+previous runtime and default. New and loaded sessions in the same workspace use
+the last confirmed model; reasoning effort, mode and execution consent remain
+session settings. The save uses the highest-priority existing `settings.yaml`
+layer, or creates project settings if none exists. The terminal launcher still
+gives `--model` and `ASTER_MODEL` priority over this saved default.
+The initial `_aster/models/select` picker remains lazy: it saves only after
+`session/new` or `session/load` has prepared the selected model successfully.
+Embedding hosts can pass the startup alias with `CodingACPAdapter(..., model=alias)`;
+without it, the initial client's wire ID is used for display only and is not saved.
+
 ## Sandbox execution
 
 Pass `--sandbox` to run CodeAct's generated Python in a microsandbox microVM.
@@ -195,6 +263,17 @@ Add `--sandbox` to the command arguments in your ACP client, or set
 `ASTER_SANDBOX=true` in the server's environment. `--no-sandbox` explicitly
 overrides that environment setting; native execution is the default and works
 on Windows with PowerShell tools.
+
+Clients can change the current session through
+`_aster/session/configure` with `executionBackend: "sandbox"` or `"native"`.
+Runtime status advertises these choices in `executionBackends`. Send this change
+separately from model, reasoning, mode, and approval settings, while the session
+is idle and has no background jobs or pending approval. Enabling runs a test cell
+in a temporary microVM before confirming the change; startup failure or
+`session/cancel` keeps the previous backend. The next task creates its own worker.
+Conversation history and `self.vars` remain available; ordinary REPL locals are
+scoped to each task. The backend choice is live-session only; new and reloaded
+sessions use the server's startup setting. Approvals remain a separate setting.
 
 The adapter creates a separate strategy for each ACP session and sets
 `SandboxConfig.workspace` to that session's repository root. On Windows, the
@@ -217,34 +296,38 @@ survive process restarts, and use a process lock to prevent duplicate preparatio
 Snapshots from older Aster versions are reused when their environment matches.
 Changing the image or dependencies creates a separate cached environment.
 
-## Opening a repository runs code from it
+## Workspace trust
 
-**Creating a session imports Python from the workspace, before you send a
-prompt.** This is deliberate — it is how workspace skills work — but it means
-opening a folder is enough to execute code it contains. Treat opening a
-repository with Aster as equivalent to running its build.
+`aster-acp` checks folder trust before using a repository's Python skills,
+libraries, model settings, secrets or saved sessions. Untrusted folders use
+built-in and user-level configuration; their conversations are stored in the
+user directory. The first session message names the repository files being
+ignored. Paths explicitly configured through the server's environment remain
+available.
 
-Three paths load workspace code at `session/new` and `session/load`:
+Run `aster trust path/to/repo` to allow its files, then reopen the session.
+Use `aster trust --list` to inspect the saved choices and
+`aster trust --remove path/to/repo` to remove a choice. Trusting a directory also
+trusts its descendants. The TUI asks before loading an unfamiliar folder's files;
+other clients can direct the user to the same CLI commands. Unattended hosts can
+set `ASTER_TRUST_ALL_WORKSPACES=1` to allow every folder.
 
-- **Skill roots.** Every `.py` file under `.agents/skills`, `.cursor/skills`,
-  `.claude/skills`, or `.claude/commands` is imported. Module-level code runs
-  during import, before anything checks whether the file defines a skill, so the
-  contents are irrelevant.
-- **Workspace settings.** `<workspace>/.aster/settings.yaml` and the legacy
-  `.aster/config.toml` may name *additional* skill roots. Those paths are not
-  confined to the workspace: a relative path escaping it, an absolute path, or a
-  symlink is accepted as written.
-- **Libraries.** `<workspace>/.aster/libs/<package>/` is imported and its
-  directory is prepended to `sys.path` for the life of the process. One ACP
-  server serves several workspaces, so a package name there can shadow the same
-  import for later sessions on other workspaces.
+Hosts that embed `CodingACPAdapter` directly must enable the check before
+reading project configuration or creating sessions:
 
-The agent runs as you, in a process holding your model credentials. There is no
-consent prompt on these paths. Workspace imports happen on the host in both
-execution modes.
+```python
+from aster import workspace_trust
 
-**Open repositories you would run.** For anything else, use an OS-level sandbox,
-or start a separate server per workspace with credentials scoped to that task.
+workspace_trust.enforce()
+```
+
+Library use leaves the check disabled until the host enables it.
+
+Once trusted, workspace skill roots (including additional configured roots) and
+`.aster/libs` are imported on the host when the session opens, in both native and
+sandbox execution modes. Trust only repositories whose Python you would run.
+Python libraries share the server process, so use separate servers when
+workspaces need independent dependencies or credentials.
 
 ## How it behaves
 
@@ -266,10 +349,12 @@ one-process-per-agent boundary is the safe kill mechanism for that case.
 
 Each ACP session has an independent live agent and allows one foreground prompt
 at a time. Sessions are stored in `<workspace>/.aster/sessions`, where the TUI
-and ACP adapter can share list and replay metadata. These files are inside the
-workspace trust boundary: a repository can supply session records that appear
-in `session/list` and are replayed as conversation history by `session/load`.
-Open only repositories whose code and conversation history you trust. The
+and ACP adapter can share list and replay metadata. A repository could supply
+session records of its own, so that directory is used only for a trusted folder.
+Until the user runs `aster trust`, the folder's sessions are kept in the user
+directory, and its settings, secrets, libraries and skills are ignored; the
+session opens with a message naming what was left out. See "Trusted folders" in
+the `aster-cli` README. The
 adapter also advertises session close; closing a live session preserves its
 durable history.
 
@@ -381,9 +466,12 @@ Loaded `@slash_command` methods are advertised through ACP and matching
 `/command arguments` prompts are dispatched through the shared typed command
 router. Command discovery is refreshed when loaded skills change.
 
-The current adapter accepts text and resource-link prompts plus stdio, HTTP,
-and SSE MCP servers forwarded by an ACP client. ACP-transport MCP proxies,
-additional workspace directories, images, and embedded resources are not
-advertised yet. An unavailable, duplicate, or unsupported MCP server is skipped
-with a session warning so it cannot prevent a new or restored Aster session from
-opening.
+The current adapter accepts text, resource links, embedded text resources, and
+PNG/JPEG/GIF/WebP images. Images are forwarded to the selected model without
+requiring `media_inputs` configuration; image-only prompts are supported. Provider
+rejections are returned with their error message.
+
+Stdio, HTTP, and SSE MCP servers forwarded by an ACP client are supported.
+ACP-transport MCP proxies and additional workspace directories are not advertised
+yet. An unavailable, duplicate, or unsupported MCP server is skipped with a session
+warning so it cannot prevent a new or restored Aster session from opening.

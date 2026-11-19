@@ -111,6 +111,10 @@ class ChildBroker:
         """Assign ``value`` at ``path`` on the parent's live agent (``self.x = value``)."""
         self._rpc({"type": "tool_call", "kind": "setattr", "path": path}, value)
 
+    def truth(self, path: list[str]) -> bool:
+        """Evaluate truthiness on the host, including objects without ``__len__``."""
+        return bool(self._rpc({"type": "tool_call", "kind": "bool", "path": path}).get("result"))
+
     def iterate(self, path: list[str]) -> list[Any]:
         """Return ``list(obj)`` for the live object at ``path`` (materialized on the parent)."""
         return self._rpc({"type": "tool_call", "kind": "iter", "path": path}).get("result") or []
@@ -213,8 +217,8 @@ def _resolve_child_attr(broker: ChildBroker, local_obj: Any, path: list[str], na
     """Resolve ``local_obj.name`` for the cell: broker callable, value, or nested proxy.
 
     ``path`` is the dotted address of ``local_obj`` under ``self`` (empty for the
-    agent itself). Callables become broker callables; picklable values are fetched
-    fresh from the parent; non-picklable live objects become a nested proxy so
+    agent itself). Callables become broker callables; data values are fetched
+    fresh from the parent; host state APIs and non-picklable objects use a proxy so
     ``self.a.b(...)`` keeps working without ``a`` ever crossing the boundary.
     """
     new_path = [*path, name]
@@ -233,7 +237,7 @@ def _resolve_child_attr(broker: ChildBroker, local_obj: Any, path: list[str], na
 
 
 class _NestedProxy:
-    """Proxy for a non-picklable nested attribute (e.g. ``self.memory``).
+    """Proxy for a host-owned nested attribute (e.g. ``self.vars`` or ``self.memory``).
 
     Method calls broker to the parent's live object at this path; deeper attribute
     access recurses. Broker/path/local state lives in :data:`_PROXY_STATE`, not on
@@ -258,6 +262,13 @@ class _NestedProxy:
             return
         broker, path, _local = _PROXY_STATE[self]
         broker.set_attr([*path, name], value)
+
+    def __delattr__(self, name: str) -> None:
+        if name.startswith("__") and name.endswith("__"):
+            object.__delattr__(self, name)
+            return
+        broker, path, _local = _PROXY_STATE[self]
+        broker.call([*path, "__delattr__"], (name,), {})
 
     # Container/callable protocol: forward the operator to the parent's live object
     # so documented patterns like ``self.context["k"] = v`` keep working. Each
@@ -304,9 +315,8 @@ class _NestedProxy:
         return result
 
     def __bool__(self) -> bool:
-        # A live object exists -> truthy. Prevents Python's implicit __len__
-        # fallback from brokering a __len__ call for a plain ``if self.x:`` check.
-        return True
+        broker, path, _local = _PROXY_STATE[self]
+        return broker.truth(path)
 
     def __repr__(self) -> str:
         return f"<sandbox nested-proxy self.{'.'.join(_PROXY_STATE[self][1])}>"
@@ -316,9 +326,9 @@ class ParentAgentProxy:
     """Stands in for ``self`` in the cell namespace.
 
     Method access returns a broker callable (the call runs on the parent's live
-    agent); non-callable attribute access fetches a fresh picklable snapshot from
-    the parent, so agent state the parent mutates between turns stays authoritative;
-    a non-picklable live attribute becomes a nested proxy. The forked-local agent is
+    agent); data attribute access fetches a fresh snapshot from the parent, while
+    state APIs and non-picklable live attributes become nested proxies, so the
+    parent's state stays authoritative. The forked-local agent is
     used only for the (turn-invariant) callable/value classification.
 
     The broker and forked agent live in :data:`_PROXY_STATE`, not in instance
@@ -350,16 +360,24 @@ class ParentAgentProxy:
 
 
 def _introspect_wrapper(fn: Any, proxy: ParentAgentProxy, agent: Any) -> Any:
-    """Wrap ``doc``/``methods``/``variables`` so ``doc(self)`` works on the proxy."""
+    """Describe the live objects addressed by agent, skill, and method proxies."""
 
     def wrapper(obj: Any = proxy, *args: Any, **kwargs: Any) -> Any:
-        if obj is proxy and agent is None:
-            broker, _ = _PROXY_STATE[proxy]
-            return broker._rpc(
-                {"type": "tool_call", "kind": "introspect", "path": [fn.__name__]},
-                (args, kwargs),
-            ).get("result")
-        return fn(agent if obj is proxy else obj, *args, **kwargs)
+        if obj is proxy and agent is not None:
+            return fn(agent, *args, **kwargs)
+        if isinstance(obj, ParentAgentProxy):
+            broker, _ = _PROXY_STATE[obj]
+            path = []
+        elif isinstance(obj, _NestedProxy):
+            broker, path, _ = _PROXY_STATE[obj]
+        elif isinstance(obj, _BrokerCallable):
+            broker, path = _PROXY_STATE[obj], obj._path
+        else:
+            return fn(obj, *args, **kwargs)
+        return broker._rpc(
+            {"type": "tool_call", "kind": "introspect", "path": [fn.__name__, *path]},
+            (args, kwargs),
+        ).get("result")
 
     return wrapper
 
@@ -434,6 +452,14 @@ def build_namespace(
     )
     if framework_builtins:
         ns.update(framework_builtins)
+    # CodeAct also carries module imports in its builtins. Keep canonical
+    # introspection imports (including aliases) proxy-aware after that merge,
+    # while preserving user-defined helpers or parameters with the same names.
+    for name, value in list(ns.items()):
+        for fn in (doc, methods, variables):
+            if value is fn:
+                ns[name] = _introspect_wrapper(fn, proxy, agent)
+                break
 
     from aster.runtime.actor import _strip_blocked_modules
 

@@ -5,12 +5,17 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
+use std::num::NonZeroU16;
 
 use icy_sixel::{
     dither::sixel_dither as SixelDither, output::sixel_output as SixelOutput, DiffusionMethod,
     MethodForLargest, MethodForRep, PixelFormat, Quality,
 };
-use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+use ratatui::{
+    buffer::{Buffer, CellDiffOption},
+    layout::Rect,
+    style::Color,
+};
 
 use crate::attachments::{Attachment, MAX_IMAGE_BYTES};
 use crate::image_preview::decode_png_pixels;
@@ -124,8 +129,7 @@ impl PreviewCache {
             self.hide();
             return Ok(PreviewState::Unsupported);
         };
-        // A second cell guards Ratatui 0.29's treatment of an escape payload as
-        // a wide symbol. That cell is cleared together with the image below.
+        // Keep a guard cell in the image footprint so repainting clears it too.
         if mime_type != "image/png"
             || columns < 2
             || rows == 0
@@ -239,15 +243,16 @@ impl SixelImage {
         for y in footprint.top()..footprint.bottom() {
             for x in footprint.left()..footprint.right() {
                 if let Some(cell) = buffer.cell_mut((x, y)) {
-                    cell.set_skip(true);
+                    cell.set_diff_option(CellDiffOption::Skip);
                 }
             }
         }
         if let Some(cell) = buffer.cell_mut((area.x, area.y)) {
             let [r, g, b] = self.background;
+            // An escape sequence occupies one diff cell, regardless of its text length.
             cell.set_symbol(&self.sequence)
                 .set_bg(Color::Rgb(r, g, b))
-                .set_skip(false);
+                .set_diff_option(CellDiffOption::ForcedWidth(NonZeroU16::MIN));
         }
     }
 }

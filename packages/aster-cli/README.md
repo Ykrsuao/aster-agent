@@ -55,7 +55,11 @@ Use `uv run --extra tui aster connect` to create a model alias if needed.
 `--model` takes precedence over `ASTER_MODEL` and the saved
 `tui.default_model` in layered `settings.yaml`, in that order. Without an explicit
 choice, Aster uses the only configured chat model; multiple aliases require a
-default or `--model`. To save a project default, add this to `.aster/settings.yaml`:
+choice in the model picker. Confirming `/model ALIAS` or a picker selection saves
+the alias as the next startup default once preparation succeeds. The save updates
+the highest-priority existing settings file, or creates project settings when
+none exists, respecting `ASTER_SETTINGS` and `ASTER_PROJECT_DIR`.
+To set a project default manually, add this to `.aster/settings.yaml`:
 
 ```yaml
 tui:
@@ -123,7 +127,7 @@ conversation while hiding the sidebar. `NO_COLOR` uses terminal default colors.
 | Ctrl+Z / Ctrl+U | Undo input edits, including double-Esc draft clearing |
 | Ctrl+X / F1 | Keyboard help |
 | Ctrl+C twice within 2 seconds | Save and exit; the first press only shows confirmation |
-| Ctrl+D with empty input / Ctrl+Q | Save and exit |
+| Ctrl+Q | Save and exit |
 
 Esc cancels a running task from the main conversation; an open panel or slash
 suggestions close first, preserving the draft. The first Ctrl+C does not cancel
@@ -191,6 +195,64 @@ uv run --extra tui --extra sandbox aster -w . --model my-model --sandbox
 or `--client-type completion` overrides the selected model's client type.
 Both execution modes use the same ACP agent and session lifecycle as Zed;
 see [sandbox execution](../aster-acp/README.md#sandbox-execution) for its scope.
+
+Inside the terminal, `/sandbox` opens the Python execution picker;
+`/sandbox on` and `/sandbox off` switch directly while the session is idle.
+Enabling validates a temporary microVM first. Press Esc to cancel preparation;
+failure or cancellation keeps the previous setting. This controls generated
+Python only: shell commands and brokered tools still run on the host.
+
+## Trusted folders
+
+A repository can carry files that Aster acts on: Python skills and libraries
+that are imported, model settings that decide where API keys are sent, secrets
+that set environment variables, and saved sessions whose context expressions are
+evaluated. `aster` and `aster-acp` use those files only from folders you have
+trusted, so opening a repository is not enough to run its code.
+
+The first time `aster` opens an untrusted folder, including an empty folder, a
+**Folder access** page shows its path, the access explanation, and two choices:
+**Trust and continue** or **Quit**. Trust is initially selected; use the arrow
+keys to select, then Enter to confirm. Press 1 or y to select trust;
+2, n, q, Esc, or Ctrl+C exits. Declining or
+failing to save trust stops startup before model configuration or the backend
+is loaded. Input left over from before the page appeared cannot confirm trust.
+Trust is remembered in `trusted_workspaces.json` in the user directory, and
+trusting a folder covers its subfolders. Trusted folders are not prompted again.
+When launched from a project subdirectory, Aster also checks the project root
+whose configuration it reads. On short terminals, the full explanation and
+path remain available in scrollback above the compact menu.
+Workspace trust does not change command approvals or turn on a sandbox.
+The TUI starts its Python backend with safe module search (`-P`), so files in
+the working directory cannot implicitly shadow the installed backend. Explicit
+`PYTHONPATH` configuration remains available.
+
+```bash
+aster trust                 # trust the current folder
+aster trust path/to/repo
+aster trust --list
+aster trust --remove path/to/repo
+```
+
+In a folder that is not trusted, Aster ignores:
+
+- `.aster/settings.yaml`, `.aster/config.toml`, `.aster/llm_config.yaml` and
+  `.aster/secrets.yaml`;
+- libraries in `.aster/libs`;
+- skills in `.agents/skills`, `.cursor/skills`, `.claude/skills` and
+  `.claude/commands`, and any configured skill directory inside the folder;
+- sessions in `.aster/sessions`. Conversations held in the folder are stored in
+  the user directory instead, so they can still be listed and reopened.
+
+Repository instructions such as `AGENTS.md` are still read: they are text given
+to the model, not code. Other ACP clients receive a session message naming
+what was ignored; run `aster trust` and
+start a new session to use the files.
+
+Set `ASTER_TRUST_ALL_WORKSPACES=1` for unattended runs that should trust every
+folder. A directory named by `ASTER_PROJECT_DIR` is always used, because the
+person starting the process chose it. Scripts that import Aster as a library are
+not affected.
 
 ## Interactive coding sessions
 

@@ -82,8 +82,7 @@ async def test_new_session_reads_exact_gateway_context_without_model_call(
         )
 
     monkeypatch.setattr(httpx.AsyncClient, "send", send)
-    llm = client_class(model=_MODEL, api_base=_BASE, api_key="metadata-test-key")
-    llm._registry_config = {}
+    llm = _model(client_class)
     adapter = CodingACPAdapter(lambda: llm)
     adapter.on_connect(_Client())  # type: ignore[arg-type]
     try:
@@ -119,9 +118,17 @@ def _listing(
     return requests
 
 
-def _model() -> CompletionClient:
-    llm = CompletionClient(model=_MODEL, api_base=_BASE, api_key="metadata-test-key")
-    llm._registry_config = {}
+def _model(
+    client_class: type[CompletionClient] | type[ResponsesClient] = CompletionClient,
+) -> CompletionClient | ResponsesClient:
+    llm = registry.client_from_config(
+        _MODEL,
+        {},
+        client_type="responses" if client_class is ResponsesClient else "completion",
+        api_base=_BASE,
+        api_key="metadata-test-key",
+    )
+    assert isinstance(llm, client_class)
     return llm
 
 
@@ -221,7 +228,7 @@ async def test_first_reply_reports_endpoint_context_and_keeps_missing_price_unkn
         assert pending
         assert all(
             update.used == 0
-            and update.size == 0
+            and update.size == (_WINDOW if metadata_status == 200 else 0)
             and (update.field_meta or {})["aster"]["usageAvailable"] is False
             for update in pending
         )

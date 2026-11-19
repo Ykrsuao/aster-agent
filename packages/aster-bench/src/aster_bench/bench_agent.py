@@ -32,6 +32,7 @@ with _hidden:
     from pydantic import BaseModel, Field
 
     from aster import Agent, Context, no_trace, strategy
+    from aster._platform import is_native_windows
     from aster.agentdoc import doc, spec
     from aster.config import CodeActConfig, LoopGuardConfig
     from aster.interactive import SummarizationConfig, install_summarizer
@@ -47,7 +48,9 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 _OPTIONAL_TESTBED_ACTIVATE = (
-    "if [ -f /opt/miniconda3/etc/profile.d/conda.sh ]; then "
+    None
+    if is_native_windows()
+    else "if [ -f /opt/miniconda3/etc/profile.d/conda.sh ]; then "
     "[ -d /opt/harbor/cpython312/bin ] && export PATH=/opt/harbor/cpython312/bin:$PATH; "
     "source /opt/miniconda3/etc/profile.d/conda.sh; "
     "conda env list | awk '{print $1}' | grep -qx testbed && conda activate testbed || true; "

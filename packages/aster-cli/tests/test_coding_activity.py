@@ -3,6 +3,8 @@
 """Semantic activity emitted by the shared interactive coding tools."""
 
 import asyncio
+import shlex
+import sys
 from pathlib import Path
 
 import aster_cli.coding.activity as activity
@@ -18,6 +20,13 @@ from aster_cli.coding.activity import (
 from aster.runtime.event_manager import EventManager
 from aster.tools import ShellTools
 from aster.tools.shell_tools import StaleMatchError
+
+
+def _python_command(code):
+    arguments = (Path(sys.executable).as_posix(), "-c", code)
+    if sys.platform == "win32":
+        return "& " + " ".join("'" + argument.replace("'", "''") + "'" for argument in arguments)
+    return shlex.join(arguments)
 
 
 def _observed_shell(tmp_path):
@@ -191,15 +200,16 @@ async def test_diff_generation_has_a_separate_input_safety_limit(tmp_path, monke
 
 async def test_run_emits_correlated_start_and_finish(tmp_path):
     shell, events = _observed_shell(tmp_path)
+    command = _python_command("import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())")
     try:
-        result = await shell.run("cat", stdin="hello")
+        result = await shell.run(command, stdin="hello")
     finally:
         await shell.close()
 
     started = next(event for event in events if isinstance(event, TerminalCommandStarted))
     finished = next(event for event in events if isinstance(event, TerminalCommandFinished))
     output = next(event for event in events if isinstance(event, TerminalCommandOutput))
-    assert started.command == "cat"
+    assert started.command == command
     assert started.stdin == "hello"
     assert started.working_directory == str(tmp_path)
     assert finished.command_id == started.command_id
@@ -211,8 +221,9 @@ async def test_run_emits_correlated_start_and_finish(tmp_path):
 
 async def test_run_stream_emits_output_chunks_and_finish(tmp_path):
     shell, events = _observed_shell(tmp_path)
+    command = _python_command("import sys; sys.stdout.buffer.write(b'hello\\n')")
     try:
-        streamed = [event async for event in shell.run_stream("printf 'hello\\n'")]
+        streamed = [event async for event in shell.run_stream(command)]
     finally:
         await shell.close()
 
@@ -230,8 +241,9 @@ async def test_run_stream_emits_output_chunks_and_finish(tmp_path):
 async def test_run_stream_forwards_and_records_bounded_stdin(tmp_path):
     shell, events = _observed_shell(tmp_path)
     payload = "line\n" * 10_000
+    command = _python_command("import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())")
     try:
-        streamed = [event async for event in shell.run_stream("cat", stdin=payload, timeout=5.0)]
+        streamed = [event async for event in shell.run_stream(command, stdin=payload, timeout=5.0)]
     finally:
         await shell.close()
     assert "".join(event.text for event in streamed if event.kind == "stdout") == payload
@@ -246,7 +258,7 @@ async def test_run_stream_forwards_and_records_bounded_stdin(tmp_path):
 
 async def test_closing_stream_after_done_does_not_emit_a_second_finish(tmp_path):
     shell, events = _observed_shell(tmp_path)
-    stream = shell.run_stream("printf 'hello\\n'")
+    stream = shell.run_stream(_python_command("import sys; sys.stdout.buffer.write(b'hello\\n')"))
     try:
         async for item in stream:
             if item.kind == "done":
@@ -265,8 +277,16 @@ async def test_activity_payloads_are_bounded(tmp_path):
     large = "x" * 50_000
     try:
         await shell.write_file("large.txt", large)
-        await shell.run("cat", stdin=large)
-        streamed = [item async for item in shell.run_stream("python3 -c \"print('y' * 50000)\"")]
+        await shell.run(
+            _python_command("import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"),
+            stdin=large,
+        )
+        streamed = [
+            item
+            async for item in shell.run_stream(
+                _python_command("import sys; sys.stdout.buffer.write(b'y' * 50000 + b'\\n')")
+            )
+        ]
     finally:
         await shell.close()
 

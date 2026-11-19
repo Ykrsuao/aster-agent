@@ -158,6 +158,95 @@ def test_direct_lookup_needs_every_matching_entry_to_declare_the_window():
     assert CompletionClient(MODEL, api_base=BASE).context_window == 8192
 
 
+@pytest.mark.parametrize("invalid", [0, -1, True, "8192", 8192.0])
+def test_direct_lookup_needs_every_matching_window_to_be_a_positive_integer(monkeypatch, invalid):
+    registry.MODELS["valid"] = entry()
+    registry.MODELS["invalid"] = entry(context_window=invalid)
+    monkeypatch.setattr(CompletionClient, "get_model_info", lambda self: {"max_input_tokens": 4096})
+
+    with CompletionClient(MODEL, api_base=BASE) as client:
+        assert client.context_window == 4096
+        assert client.get_context_limits().context_window == 4096
+
+
+@pytest.mark.parametrize("client_class", [CompletionClient, ResponsesClient])
+def test_factory_without_window_does_not_borrow_another_alias(monkeypatch, client_class):
+    client_type = "responses" if client_class is ResponsesClient else "completion"
+    registry.MODELS["declared"] = entry(client_type=client_type)
+    undeclared = {
+        key: value
+        for key, value in entry(client_type=client_type).items()
+        if key != "context_window"
+    }
+    monkeypatch.setattr(client_class, "get_model_info", lambda self: {"max_input_tokens": 4096})
+
+    with (
+        registry.client_from_config("undeclared", undeclared) as configured,
+        client_class(MODEL, api_base=BASE) as direct,
+    ):
+        assert configured.context_window == 4096
+        assert configured.get_context_limits().context_window == 4096
+        assert direct.context_window == 8192
+
+
+@pytest.mark.parametrize("client_class", [CompletionClient, ResponsesClient])
+def test_registry_miss_does_not_borrow_another_alias(monkeypatch, client_class):
+    client_type = "responses" if client_class is ResponsesClient else "completion"
+    registry.MODELS["declared"] = entry(client_type=client_type)
+    monkeypatch.setattr(client_class, "get_model_info", lambda self: {"max_input_tokens": 4096})
+
+    with (
+        registry.get_llm_client(MODEL, client_type=client_type, api_base=BASE) as configured,
+        client_class(MODEL, api_base=BASE) as direct,
+    ):
+        assert configured.context_window == 4096
+        assert configured.get_context_limits().context_window == 4096
+        assert direct.context_window == 8192
+
+
+@pytest.mark.parametrize("client_class", [CompletionClient, ResponsesClient])
+def test_factory_window_is_detached_from_caller_config(client_class):
+    client_type = "responses" if client_class is ResponsesClient else "completion"
+    raw = entry(client_type=client_type)
+
+    with registry.client_from_config("local", raw) as client:
+        raw["context_window"] = 16384
+        raw["api_base"] = "https://changed.test/v1"
+
+        assert client.context_window == 8192
+        assert client.get_context_limits().context_window == 8192
+        assert client.config["api_base"] == BASE
+
+
+@pytest.mark.parametrize("client_class", [CompletionClient, ResponsesClient])
+def test_reload_preserves_existing_factory_window_but_updates_live_lookup(tmp_path, client_class):
+    client_type = "responses" if client_class is ResponsesClient else "completion"
+    paths = []
+    for window in (8192, 16384):
+        path = tmp_path / f"{window}.yaml"
+        path.write_text(
+            f"models:\n  local:\n    model_name: {MODEL}\n"
+            f"    api_base: {BASE}\n    client_type: {client_type}\n"
+            f"    context_window: {window}\n    media_inputs: []\n"
+        )
+        paths.append(path)
+    registry.reload_registry(paths[0])
+
+    with (
+        registry.get_llm_client("local") as original,
+        client_class(MODEL, api_base=BASE) as direct,
+    ):
+        assert original.context_window == direct.context_window == 8192
+        registry.reload_registry(paths[1])
+
+        with registry.get_llm_client("local") as reloaded:
+            assert original.context_window == 8192
+            assert original.get_context_limits().context_window == 8192
+            assert direct.context_window == reloaded.context_window == 16384
+            assert direct.get_context_limits().context_window == 16384
+            assert reloaded.get_context_limits().context_window == 16384
+
+
 def test_alias_key_collision_does_not_prove_model_identity():
     registry.MODELS[MODEL] = {**entry(), "model_name": "openai/different"}
     assert CompletionClient(MODEL, api_base=BASE).context_window is None
@@ -258,11 +347,51 @@ def test_metadata_fallback_remains_distinct(monkeypatch):
     assert registry.get_llm_client("local", api_base="https://other.test/v1").context_window == 4096
 
 
-def test_attached_metadata_tracks_actual_route():
-    c = registry.client_from_config("local", entry())
-    assert c.context_window == 8192
-    c.config["api_base"] = "https://other.test/v1"
-    assert c.context_window is None
+@pytest.mark.parametrize("client_class", [CompletionClient, ResponsesClient])
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("model", "openai/replacement"),
+        ("api_base", "https://other.test/v1"),
+        ("api_key", "replacement-key"),
+        ("custom_llm_provider", "other"),
+        ("client", object()),
+    ],
+    ids=["model", "endpoint", "credentials", "provider", "client"],
+)
+def test_attached_metadata_tracks_actual_route(monkeypatch, client_class, field, replacement):
+    client_type = "responses" if client_class is ResponsesClient else "completion"
+    monkeypatch.setattr(client_class, "get_model_info", lambda self: {"max_input_tokens": 4096})
+
+    with registry.client_from_config("local", entry(client_type=client_type)) as client:
+        assert client.context_window == 8192
+        with monkeypatch.context() as change:
+            if field == "model":
+                change.setattr(client, "model", replacement)
+            else:
+                change.setitem(client.config, field, replacement)
+            assert client.context_window == 4096
+            assert client.get_context_limits().context_window == 4096
+
+        assert client.context_window == 8192
+        assert client.get_context_limits().context_window == 8192
+
+
+@pytest.mark.parametrize("client_class", [CompletionClient, ResponsesClient])
+def test_factory_uses_its_own_window_when_matching_aliases_conflict(monkeypatch, client_class):
+    client_type = "responses" if client_class is ResponsesClient else "completion"
+    registry.MODELS["local"] = entry(client_type=client_type)
+    registry.MODELS["other"] = entry(client_type=client_type, context_window=16384)
+    monkeypatch.setattr(client_class, "get_model_info", lambda self: {"max_input_tokens": 4096})
+
+    with (
+        registry.get_llm_client("local") as local,
+        registry.get_llm_client("other") as other,
+        client_class(MODEL, api_base=BASE) as direct,
+    ):
+        assert local.context_window == local.get_context_limits().context_window == 8192
+        assert other.context_window == other.get_context_limits().context_window == 16384
+        assert direct.context_window == direct.get_context_limits().context_window == 4096
 
 
 def test_equivalent_factory_override_retains_context():
@@ -308,7 +437,7 @@ def test_factory_same_endpoint_override_keeps_media_and_levels(spelling, same):
     c = registry.client_from_config("local", deepcopy(config), **{spelling: same})
     assert c.media_inputs == ("image",)
     assert c.reasoning_levels == ("low",)
-    assert c._reasoning_config.default == "low"
+    assert c.reasoning_default == "low"
     other = registry.client_from_config("local", deepcopy(config), **{spelling: BASE + "/x"})
     assert other.media_inputs == ()
     assert other.reasoning_levels is None

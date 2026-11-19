@@ -52,6 +52,10 @@ def command(model: str | None, client_type: str | None, sandbox: bool, select_mo
             from aster_acp.server import serve
 
         with phase("configuration"):
+            # Opening a folder must not be enough to use the files inside it.
+            from aster import workspace_trust
+
+            workspace_trust.enforce()
             load_secrets_into_env()
             # Session startup must not wait for the SDK's remote pricing catalogue.
             os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
@@ -75,7 +79,7 @@ def command(model: str | None, client_type: str | None, sandbox: bool, select_mo
             raise ValueError("Choose a model in Aster before starting a conversation.")
         return model_factory(model)
 
-    operation = serve(llm_factory, model_factory=model_factory, sandbox=sandbox)
+    operation = serve(llm_factory, model_factory=model_factory, model=model, sandbox=sandbox)
     mark("server_start")
     asyncio.run(operation)
 

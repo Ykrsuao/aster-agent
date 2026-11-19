@@ -18,10 +18,13 @@ from acp.schema import (
     AgentMessageChunk,
     AvailableCommandsUpdate,
     ContentToolCallContent,
+    CurrentModeUpdate,
     EnvVariable,
     HttpHeader,
     HttpMcpServer,
+    ImageContentBlock,
     McpServerStdio,
+    RequestPermissionResponse,
     SseMcpServer,
     TextContentBlock,
     ToolCallProgress,
@@ -101,9 +104,23 @@ def _completed_llm() -> FakeLLMClient:
     )
 
 
+@pytest.fixture
+def image_input():
+    return ImageContentBlock(
+        type="image",
+        data="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l1QAAAAASUVORK5CYII=",
+        mime_type="image/png",
+    )
+
+
 class _RecordingClient:
     def __init__(self) -> None:
         self.updates: list[object] = []
+
+    async def request_permission(self, session_id, tool_call, options, **kwargs):
+        return RequestPermissionResponse.model_validate(
+            {"outcome": {"outcome": "selected", "optionId": "allow_once"}}
+        )
 
     async def session_update(self, session_id: str, update: object, **kwargs) -> None:
         self.updates.append(update)
@@ -116,6 +133,11 @@ class _RegistrationAwareClient:
         self.registered: set[str] = set()
         self.accepted: list[tuple[str, object]] = []
         self.dropped: list[tuple[str, object]] = []
+
+    async def request_permission(self, session_id, tool_call, options, **kwargs):
+        return RequestPermissionResponse.model_validate(
+            {"outcome": {"outcome": "selected", "optionId": "allow_once"}}
+        )
 
     async def session_update(self, session_id: str, update: object, **kwargs) -> None:
         target = self.accepted if session_id in self.registered else self.dropped
@@ -358,6 +380,85 @@ async def test_adapter_completes_one_session_prompt(tmp_path):
     await adapter.close()
 
 
+@pytest.mark.parametrize("media_inputs", [(), ("audio",), ("image",)])
+@pytest.mark.parametrize("with_text", [False, True])
+async def test_adapter_sends_images_without_media_configuration(
+    tmp_path, image_input, media_inputs, with_text
+):
+    llm = _completed_llm()
+    llm.media_inputs = media_inputs
+    adapter = CodingACPAdapter(lambda: llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    session = await adapter.new_session(str(tmp_path))
+    prompt = [image_input]
+    if with_text:
+        prompt.insert(0, text_block("Describe this image."))
+
+    response = await adapter.prompt(session.session_id, prompt)
+
+    assert response.stop_reason == "end_turn"
+    assert len(llm.calls) == 1
+    image_parts = [
+        block
+        for message in llm.calls[0].messages
+        for block in message.get("content", [])
+        if (isinstance(block, dict) or hasattr(block, "get")) and block.get("type") == "image_url"
+    ]
+    assert len(image_parts) == 1
+    assert image_parts[0]["image_url"]["url"] == "data:image/png;base64," + image_input.data
+    assert set(llm.media_inputs) == set(media_inputs) | {"image"}
+    if with_text:
+        assert any(
+            "Describe this image." in str(message.get("content"))
+            for message in llm.calls[0].messages
+        )
+    await adapter.close()
+
+
+@pytest.mark.parametrize("restore", [False, True])
+async def test_adapter_preserves_images_on_text_followup_after_model_change(
+    tmp_path, image_input, restore
+):
+    original = _completed_llm()
+    original.media_inputs = ()
+    models = []
+
+    def make_model(name):
+        llm = _completed_llm()
+        llm.model = name
+        llm.media_inputs = ()
+        models.append(llm)
+        return llm
+
+    adapter = CodingACPAdapter(lambda: original, model_factory=make_model)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    await adapter.prompt(created.session_id, [image_input])
+    session = await _session(adapter, created.session_id)
+    session.controls._model_names = lambda: ["beta"]
+    await adapter.ext_method(
+        "aster/session/configure", {"sessionId": created.session_id, "model": "beta"}
+    )
+    if restore:
+        await adapter.close_session(created.session_id)
+        await adapter.load_session(str(tmp_path), created.session_id)
+
+    selected = models[-1]
+    assert selected.media_inputs == ()
+    response = await adapter.prompt(created.session_id, [text_block("What is in that image?")])
+
+    assert response.stop_reason == "end_turn"
+    assert len(selected.calls) == 1
+    assert any(
+        block.get("type") == "image_url"
+        and block["image_url"]["url"] == "data:image/png;base64," + image_input.data
+        for message in selected.calls[0].messages
+        for block in message.get("content", [])
+        if isinstance(block, dict) or hasattr(block, "get")
+    )
+    await adapter.close()
+
+
 @pytest.mark.parametrize("close_method", ["session", "adapter"])
 async def test_prepared_session_is_hidden_and_unused_storage_is_cleaned_up(tmp_path, close_method):
     adapter = CodingACPAdapter(_completed_llm)
@@ -419,7 +520,7 @@ async def test_adapter_ends_user_wait_and_accepts_the_next_prompt(tmp_path):
     final_message = "The next step is complete."
     observed: list[dict[str, list[object]]] = []
 
-    async def handle(notification):
+    async def handle(notification, *, _strategy):
         observed.append(notification)
         if len(observed) == 1:
             session.agent.message(waiting_message)
@@ -543,7 +644,7 @@ async def test_adapter_dispatches_agent_facing_skill_command(tmp_path, monkeypat
     runtime = await _session(adapter, created.session_id)
     notifications: list[dict[str, list[object]]] = []
 
-    async def handle(notification):
+    async def handle(notification, *, _strategy):
         notifications.append(notification)
         return Done(explanation="done")
 
@@ -660,9 +761,10 @@ async def test_initial_commands_are_deferred_until_new_session_returns(tmp_path)
     await runtime.bridge.flush()
 
     assert client.dropped == []
-    assert len(client.accepted) == 2
+    assert len(client.accepted) == 3
     assert isinstance(client.accepted[0][1], AvailableCommandsUpdate)
-    initial_usage = client.accepted[1][1]
+    assert isinstance(client.accepted[1][1], CurrentModeUpdate)
+    initial_usage = client.accepted[2][1]
     assert isinstance(initial_usage, UsageUpdate)
     assert initial_usage.field_meta is not None
     assert initial_usage.field_meta["aster"]["hud"]["calls"] == 0
@@ -679,8 +781,12 @@ async def test_first_prompt_resends_commands_if_initial_update_was_dropped(tmp_p
     await asyncio.sleep(0)
     runtime = await _session(adapter, created.session_id)
     await runtime.bridge.flush()
-    assert len(client.dropped) == 2
-    assert {type(update) for _, update in client.dropped} == {AvailableCommandsUpdate, UsageUpdate}
+    assert len(client.dropped) == 3
+    assert {type(update) for _, update in client.dropped} == {
+        AvailableCommandsUpdate,
+        CurrentModeUpdate,
+        UsageUpdate,
+    }
 
     client.registered.add(created.session_id)
     response = await adapter.prompt(created.session_id, [text_block("hello")])
@@ -770,7 +876,7 @@ async def test_cancel_clears_agent_facing_slash_result_and_session_remains_usabl
     runtime.agent.skills.register("test.agent-facing", AgentFacingSkill())
     started = asyncio.Event()
 
-    async def blocking_handle(notification):
+    async def blocking_handle(notification, *, _strategy):
         slash = notification["slash_commands"][0]
         assert isinstance(slash, SlashCommandResult)
         assert slash.text == "work:first"
@@ -791,7 +897,7 @@ async def test_cancel_clears_agent_facing_slash_result_and_session_remains_usabl
 
     observed: list[dict[str, list[object]]] = []
 
-    async def resumed_handle(notification):
+    async def resumed_handle(notification, *, _strategy):
         observed.append(notification)
         return Done(explanation="done")
 
@@ -1505,24 +1611,33 @@ async def test_adapter_maps_generation_limits_to_stop_reasons(
     await adapter.close()
 
 
-async def test_adapter_propagates_generation_error_message_to_acp_client(tmp_path):
+@pytest.mark.parametrize("with_image", [False, True])
+async def test_adapter_propagates_generation_error_message_to_acp_client(
+    tmp_path, image_input, with_image
+):
     client = _RecordingClient()
     adapter = CodingACPAdapter(_completed_llm)
     adapter.on_connect(client)  # type: ignore[arg-type]
     session = await adapter.new_session(str(tmp_path))
     runtime = await _session(adapter, session.session_id)
-    message = "LLM API error after retries: Missing credentials"
+    message = (
+        "LLM API error after retries: This model does not support images"
+        if with_image
+        else "LLM API error after retries: Missing credentials"
+    )
+    prompt = [image_input] if with_image else [text_block("do the work")]
 
     with (
         patch.object(
             runtime.dispatcher,
             "submit",
             side_effect=GenerationError(message),
-        ),
+        ) as submit,
         pytest.raises(RequestError) as raised,
     ):
-        await adapter.prompt(session.session_id, [text_block("do the work")])
+        await adapter.prompt(session.session_id, prompt)
 
+    submit.assert_awaited_once()
     assert raised.value.code == -32603
     assert str(raised.value) == message
     assert raised.value.data == {"details": message}

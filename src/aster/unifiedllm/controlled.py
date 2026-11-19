@@ -47,6 +47,10 @@ class AdmissionControl(UnifiedLLM):
         """Return the wrapped client's documented reasoning default."""
         return getattr(self.base_llm, "reasoning_default", None)
 
+    def set_reasoning_level(self, level: str | None) -> None:
+        """Change the client that actually sends requests, preserving admission control."""
+        self.base_llm.set_reasoning_level(level)
+
     def call(self, *args: Any, **kwargs: Any) -> Any:
         """Delegate a synchronous call without applying async admission."""
         return self.base_llm.call(*args, **kwargs)

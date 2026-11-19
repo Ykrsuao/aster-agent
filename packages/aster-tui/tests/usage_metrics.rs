@@ -1274,10 +1274,9 @@ fn native_context_grid_preserves_notes_scroll_bounds_and_draft_on_close() {
         state.overlay = None;
         let (closed, hits) = native_frame(&mut terminal, state);
         assert!(hits.context_grid.is_none());
-        assert!(!closed
-            .content
-            .iter()
-            .any(|cell| cell.skip || cell.symbol().contains("\x1bP")));
+        assert!(!closed.content.iter().any(|cell| cell.diff_option
+            == ratatui::buffer::CellDiffOption::Skip
+            || cell.symbol().contains("\x1bP")));
         assert!(state.terminal_image.ready().is_none());
         assert!(
             state.attachments.is_empty(),

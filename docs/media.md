@@ -10,11 +10,16 @@ permission-first headless guide, before model configuration, network/media
 checks or registry writes. Bound samples and private user media separately.
 For guided human setup, [aster connect](model-connect.md) chooses media formats,
 configures the reply limit and known context size, and tests the route.
-Aster assumes models are text-only until configured. Set `media_inputs` in the
-model's registry entry or client constructor. Supported values are `image`,
+For Python SDK calls, Aster assumes models are text-only until configured. Set
+`media_inputs` in the model's registry entry or client constructor. Supported values are `image`,
 `audio`, `video`, and `pdf`. Omitted, null, or empty lists mean text-only.
 Use a list (or a tuple in Python); bare strings, duplicates, and unknown values
 are rejected. If you enable a format the provider does not accept, requests may fail.
+
+The terminal chat and ACP adapter send attached images directly, even when the
+saved model's `media_inputs` list is empty. Image-only messages are supported, and
+images stay in later requests after switching models or reopening a conversation.
+If the provider rejects image input, Aster reports its error.
 
 ```yaml
 models:
@@ -114,7 +119,7 @@ max_attachments_per_execution=3))` through the agent's `truncation=` setting to
 change this positive count; both classes are in `aster.config.truncation_config`.
 Limit file sizes separately. Predict's direct arguments have no per-cell cap.
 
-## Text-only requests and replay
+## Python SDK requests and replay
 
 For formats missing from `media_inputs`, Aster replaces attachments with text
 notices when sending the request, including attachments from earlier turns:

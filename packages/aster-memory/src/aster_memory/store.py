@@ -22,6 +22,7 @@ import json
 import sqlite3
 import threading
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -115,6 +116,7 @@ class MemoryStore:
         # still needs application-level serialization. Keep the lock reentrant
         # because row hydration and retrieval paths call other store helpers.
         self._lock = threading.RLock()
+        self._pending_index: set[str] | None = None
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         with self._lock:
             self._conn.row_factory = sqlite3.Row
@@ -198,7 +200,12 @@ class MemoryStore:
     def _row_to_memory(self, row: sqlite3.Row) -> Memory:
         data = json.loads(row["data"])
         edges = [
-            Edge(target_id=e["dst"], type=EdgeType(e["type"]), weight=e["weight"])
+            Edge(
+                target_id=e["dst"],
+                type=EdgeType(e["type"]),
+                weight=e["weight"],
+                created_at=e["created_at"],
+            )
             for e in self._edge_rows(row["id"])
         ]
         data["edges"] = [e.model_dump(mode="json") for e in edges]
@@ -213,16 +220,61 @@ class MemoryStore:
     def _edge_rows(self, src: str) -> list[dict]:
         with self._lock:
             cur = self._conn.execute(
-                "SELECT dst, type, weight FROM memory_edges WHERE src = ?", (src,)
+                "SELECT dst, type, weight, created_at FROM memory_edges WHERE src = ?", (src,)
             )
             return [dict(r) for r in cur.fetchall()]
 
     # ------------------------------------------------------------------
     # writes
     # ------------------------------------------------------------------
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Commit grouped writes together; nested writes join the outer transaction.
+
+        Keep model/embedding calls outside this context. Derived vector indexes
+        are updated only after commit, so rollback never exposes their writes.
+        """
+        with self._lock:
+            if self._pending_index is not None:
+                yield
+                return
+            self._conn.execute("BEGIN IMMEDIATE")
+            self._pending_index = set()
+            try:
+                yield
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+            finally:
+                pending = self._pending_index
+                self._pending_index = None
+            # Some indexes share this connection and commit their own writes.
+            for id in pending:
+                row = self._conn.execute(
+                    "SELECT archived, embedding FROM memories WHERE id = ?", (id,)
+                ).fetchone()
+                if row is not None and not row["archived"] and row["embedding"] is not None:
+                    self._index.add(id, _blob_to_vec(row["embedding"]))
+                else:
+                    self._index.remove(id)
+
+    @contextmanager
+    def edit(self, id: str, *, embedding: np.ndarray | None = None) -> Iterator[Memory | None]:
+        """Read and mutate the latest record under one database write transaction.
+
+        Keep the body to in-memory changes; the updated record is saved on exit.
+        """
+        with self.transaction():
+            memory = self.get(id)
+            before = memory.model_dump() if memory is not None else None
+            yield memory
+            if memory is not None and memory.model_dump() != before:
+                self.save(memory, embedding=embedding)
+
     def add(self, memory: Memory, embedding: np.ndarray | None = None) -> Memory:
         """Insert (or replace) a memory and its edges. Persists the embedding."""
-        with self._lock:
+        with self.transaction():
             blob = _vec_to_blob(embedding) if embedding is not None else None
             payload = memory.model_dump(mode="json", exclude={"edges"})
             self._conn.execute(
@@ -255,21 +307,17 @@ class MemoryStore:
                     " VALUES (?,?,?,?,?)",
                     (memory.id, e.target_id, e.type.value, e.weight, e.created_at),
                 )
-            self._conn.commit()
-            if embedding is not None and not memory.archived:
-                self._index.add(memory.id, embedding)
-            elif memory.archived:
-                self._index.remove(memory.id)
+            self._pending_index.add(memory.id)
             return memory
 
-    def save(self, memory: Memory) -> None:
-        """Persist mutations to an existing memory (keeps the stored embedding)."""
-        with self._lock:
+    def save(self, memory: Memory, *, embedding: np.ndarray | None = None) -> None:
+        """Persist mutations, keeping the stored embedding unless one is supplied."""
+        with self.transaction():
             payload = memory.model_dump(mode="json", exclude={"edges"})
             self._conn.execute(
                 """UPDATE memories SET type=?, content=?, importance=?, salience=?,
                    strength=?, last_accessed=?, access_count=?, archived=?, owner=?,
-                   status=?, data=? WHERE id=?""",
+                   status=?, data=?, embedding=COALESCE(?, embedding) WHERE id=?""",
                 (
                     memory.type.value,
                     memory.content,
@@ -282,6 +330,7 @@ class MemoryStore:
                     memory.owner,
                     memory.status,
                     json.dumps(payload),
+                    _vec_to_blob(embedding) if embedding is not None else None,
                     memory.id,
                 ),
             )
@@ -292,35 +341,31 @@ class MemoryStore:
                     " VALUES (?,?,?,?,?)",
                     (memory.id, e.target_id, e.type.value, e.weight, e.created_at),
                 )
-            self._conn.commit()
-            if memory.archived:
-                self._index.remove(memory.id)
+            if embedding is not None or memory.archived:
+                self._pending_index.add(memory.id)
 
     def add_edge(
         self, src: str, dst: str, type: EdgeType = EdgeType.RELATED, weight: float = 1.0
     ) -> None:
         from aster_memory.schema import _now
 
-        with self._lock:
+        with self.transaction():
             self._conn.execute(
                 "INSERT OR REPLACE INTO memory_edges (src, dst, type, weight, created_at)"
                 " VALUES (?,?,?,?,?)",
                 (src, dst, type.value, weight, _now()),
             )
-            self._conn.commit()
 
     def archive(self, id: str) -> None:
-        with self._lock:
+        with self.transaction():
             self._conn.execute("UPDATE memories SET archived = 1 WHERE id = ?", (id,))
-            self._conn.commit()
-            self._index.remove(id)
+            self._pending_index.add(id)
 
     def delete(self, id: str) -> None:
-        with self._lock:
+        with self.transaction():
             self._conn.execute("DELETE FROM memories WHERE id = ?", (id,))
             self._conn.execute("DELETE FROM memory_edges WHERE src = ? OR dst = ?", (id, id))
-            self._conn.commit()
-            self._index.remove(id)
+            self._pending_index.add(id)
 
     # ------------------------------------------------------------------
     # reads
@@ -356,11 +401,10 @@ class MemoryStore:
         inside the data JSON is harmless. Used to heal legacy owner spellings
         (e.g. the TUI's module:qualname keys) into the canonical short name.
         """
-        with self._lock:
+        with self.transaction():
             if old == new or not old:
                 return 0  # never mass-claim the unowned/shared namespace
             cur = self._conn.execute("UPDATE memories SET owner = ? WHERE owner = ?", (new, old))
-            self._conn.commit()
             return cur.rowcount
 
     def owner_of(self, id: str) -> str | None:
@@ -381,7 +425,12 @@ class MemoryStore:
     def neighbors(self, id: str) -> list[Edge]:
         with self._lock:
             return [
-                Edge(target_id=e["dst"], type=EdgeType(e["type"]), weight=e["weight"])
+                Edge(
+                    target_id=e["dst"],
+                    type=EdgeType(e["type"]),
+                    weight=e["weight"],
+                    created_at=e["created_at"],
+                )
                 for e in self._edge_rows(id)
             ]
 
@@ -506,12 +555,11 @@ class MemoryStore:
         """
         from aster_memory.schema import _now
 
-        with self._lock:
+        with self.transaction():
             self._conn.execute(
                 "INSERT INTO maintenance_log (ts, kind, report) VALUES (?,?,?)",
                 (_now(), kind, json.dumps(report)),
             )
-            self._conn.commit()
 
     def maintenance_history(self, limit: int = 20) -> list[dict]:
         with self._lock:

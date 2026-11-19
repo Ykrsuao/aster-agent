@@ -3,6 +3,7 @@
 """Tests for new BashSession APIs added in the concurrency fix."""
 
 import asyncio
+import sys
 
 import pytest
 
@@ -21,7 +22,7 @@ class TestRunWithTimeoutFlag:
 
     async def test_returns_four_tuple_on_success(self, session):
         stdout, stderr, code, timed_out = await session.run_with_timeout_flag("echo hello")
-        assert stdout == "hello"
+        assert stdout.splitlines() == ["hello"]
         assert code == 0
         assert timed_out is False
 
@@ -34,9 +35,11 @@ class TestRunWithTimeoutFlag:
 
     async def test_exit_code_124_not_confused_with_timeout(self, session):
         """A command that exits 124 naturally should NOT report timed_out=True."""
-        stdout, stderr, code, timed_out = await session.run_with_timeout_flag(
-            "bash -c 'exit 124'", timeout=5
-        )
+        command = "bash -c 'exit 124'"
+        if sys.platform == "win32":
+            python = sys.executable.replace("'", "''")
+            command = f"& '{python}' -c 'import sys; sys.exit(124)'"
+        stdout, stderr, code, timed_out = await session.run_with_timeout_flag(command, timeout=5)
         assert code == 124
         assert timed_out is False
 
@@ -47,7 +50,7 @@ class TestAsyncContextManager:
     async def test_async_with_starts_and_closes(self, tmp_path):
         async with BashSession(cwd=tmp_path) as session:
             stdout, stderr, code = await session.run("echo works")
-            assert stdout == "works"
+            assert stdout.splitlines() == ["works"]
             assert code == 0
         # After exit, session should be closed
         assert session._started is False
@@ -72,9 +75,9 @@ class TestLockSerialization:
                 session.run("echo first"),
                 session.run("echo second"),
             )
-            outputs = {r[0] for r in results}
-            assert "first" in outputs
-            assert "second" in outputs
+            outputs = [r[0].splitlines() for r in results]
+            assert ["first"] in outputs
+            assert ["second"] in outputs
             # Both should have exit code 0
             assert all(r[2] == 0 for r in results)
         finally:

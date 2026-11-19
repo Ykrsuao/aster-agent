@@ -60,6 +60,19 @@ async def test_working_directory_context_is_untraced(agent_type, monkeypatch, tm
         await agent.aclose()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
+async def test_real_shell_starts_in_working_directory(agent_type, tmp_path):
+    agent = agent_type(llm=FakeLLMClient(), working_dir=str(tmp_path))
+    try:
+        result = await agent.shell.run("echo aster-bench-shell-ready")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "aster-bench-shell-ready"
+        assert agent.shell.cwd == tmp_path
+    finally:
+        await agent.aclose()
+
+
 def test_trajectory_excludes_opaque_provider_state(monkeypatch, tmp_path):
     response = LLMResponse(
         parts=(

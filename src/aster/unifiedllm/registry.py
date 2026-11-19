@@ -65,6 +65,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 import yaml
 
+from ._registry_context import RegistryContext
+
 if TYPE_CHECKING:
     from aster.decisions import UnifiedDecisionModel
     from aster.unifiedllm import UnifiedLLM
@@ -336,6 +338,13 @@ def get_registry_config(name: str) -> dict[str, Any]:
     ensure_loaded()
     with _registry_lock:
         return dict(MODELS.get(name, {}))
+
+
+def _context_registry_snapshot() -> dict[str, dict[str, Any]]:
+    """Copy one coherent registry view for live context metadata queries."""
+    ensure_loaded()
+    with _registry_lock:
+        return {name: dict(config) for name, config in MODELS.items()}
 
 
 def get_llm_client(name: str, *, client_type: str | None = None, **overrides) -> UnifiedLLM:
@@ -638,37 +647,12 @@ def client_from_config(
             ):
                 dropped.append(key)
 
-    # A context_window belongs to one route. If an override changes the model,
-    # endpoint, client type, provider, client object or credentials, drop the
-    # entry's window: it may not hold for the new route. Passing api_key where
-    # the entry used api_key_env counts as a credential change even if the
-    # values match. A context_window passed in the overrides is always kept.
-    from aster.unifiedllm.route_identity import same_context_route
-
-    # Compare only settings that reach the client. A completion or responses
-    # entry may carry an ``endpoint`` key (the decision-route spelling) that
-    # client_from_config does not forward; including it would make every such
-    # entry look like a changed route and drop its context_window.
-    original_route = {
-        **{key: value for key, value in config.items() if key != "endpoint"},
-        "api_key": params.get("api_key"),
-    }
-    effective_route = {
-        **params,
-        **overrides,
-        "api_key_env": config.get("api_key_env") if "api_key" not in overrides else None,
-    }
-    same_route = same_context_route(
-        model,
-        original_route,
-        config.get("client_type", "completion"),
-        effective_route.get("model", model),
-        effective_route,
-        selected_client_type,
+    registry_context = RegistryContext.from_config(
+        model, config, params, overrides, client_type=selected_client_type
     )
-    if not same_route and config.pop("context_window", None) is not None:
+    if not registry_context.applies and config.pop("context_window", None) is not None:
         dropped.insert(0, "context_window")
-    if not same_route and config.pop("usage_source", None) is not None:
+    if not registry_context.applies and config.pop("usage_source", None) is not None:
         params.pop("usage_source", None)
         dropped.append("usage_source")
     # Say once per alias what the override cleared. Name only the alias and the
@@ -699,8 +683,5 @@ def client_from_config(
         if selected_client_type == "responses"
         else CompletionClient(**params)
     )
-    # Keep the entry's settings on the client so later context-window lookups
-    # can check they still describe the client's actual route.
-    client._registry_config = config
-    client._registry_context_route = (client.model, dict(client.config), selected_client_type)
+    client._registry_context = registry_context
     return client

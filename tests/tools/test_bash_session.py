@@ -2,9 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for persistent bash session."""
 
+import shlex
+import sys
+
 import pytest
 
 from aster.tools._bash_session import BashSession
+
+
+def _python_command(script: str) -> str:
+    arguments = [sys.executable, "-c", script]
+    if sys.platform == "win32":
+        return "& " + " ".join("'" + argument.replace("'", "''") + "'" for argument in arguments)
+    return shlex.join(arguments)
 
 
 @pytest.fixture
@@ -23,11 +33,14 @@ class TestBashSession:
         assert "hello" in out
 
     async def test_exit_code(self, session):
-        out, err, code = await session.run("false")
-        assert code != 0
+        out, err, code = await session.run(_python_command("import sys; sys.exit(7)"))
+        assert code == 7
 
     async def test_stderr(self, session):
-        out, err, code = await session.run("echo oops 1>&2")
+        out, err, code = await session.run(
+            _python_command("import sys; print('oops', file=sys.stderr)")
+        )
+        assert code == 0
         assert "oops" in err
 
     async def test_cd_persists(self, session, tmp_path):
@@ -49,8 +62,12 @@ class TestBashSession:
 
     async def test_env_persists(self, session):
         """Environment variables should persist."""
-        await session.run("export MY_VAR=hello123")
-        out, _, _ = await session.run("echo $MY_VAR")
+        assignment, read = "export MY_VAR=hello123", "echo $MY_VAR"
+        if sys.platform == "win32":
+            assignment, read = "$env:MY_VAR='hello123'", "Write-Output $env:MY_VAR"
+        _, _, code = await session.run(assignment)
+        assert code == 0
+        out, _, _ = await session.run(read)
         assert "hello123" in out
 
     async def test_multiline_output(self, session):
@@ -68,14 +85,16 @@ class TestBashSession:
 
     async def test_output_truncation(self, session):
         """Very long output should be truncated."""
-        out, _, _ = await session.run("python3 -c \"print('x' * 50000)\"")
+        out, _, code = await session.run(_python_command("print('x' * 50000)"))
+        assert code == 0
+        assert "<truncated-output>" in out
         assert len(out) <= 31000  # MAX_OUTPUT_CHARS + truncation message
 
     async def test_truncation_keeps_the_head_and_the_tail(self, session):
         """A long output keeps its end too: a failing command usually ends with its error."""
         script = "import sys; print('H' * 20000 + 'M' * 20000 + 'T' * 20000); "
         script += "sys.stderr.write('h' * 20000 + 'm' * 20000 + 't' * 20000)"
-        out, err, code = await session.run(f'python3 -c "{script}"')
+        out, err, code = await session.run(_python_command(script))
         assert code == 0
         for text, head, middle, tail in ((out, "H", "M", "T"), (err, "h", "m", "t")):
             # The standard notice of TruncatingStringIO, then the head, then the tail.
@@ -115,8 +134,12 @@ class TestBashSession:
         await s.close()
 
     async def test_pipe_commands(self, session):
-        out, _, code = await session.run("echo -e 'a\\nb\\nc' | sort -r")
+        command = "printf 'a\\nb\\nc\\n' | sort -r"
+        if sys.platform == "win32":
+            command = "'a', 'b', 'c' | Sort-Object -Descending"
+        out, _, code = await session.run(command)
         assert code == 0
+        assert out.splitlines() == ["c", "b", "a"]
 
     async def test_command_with_quotes(self, session):
         out, _, code = await session.run("echo 'hello world'")

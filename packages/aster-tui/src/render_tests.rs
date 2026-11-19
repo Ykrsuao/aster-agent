@@ -59,6 +59,8 @@ impl AuditBackend {
 }
 
 impl Backend for AuditBackend {
+    type Error = io::Error;
+
     fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
@@ -68,9 +70,9 @@ impl Backend for AuditBackend {
         });
         self.check(Failure::Draw)?;
         let cells: Vec<_> = content.collect();
-        self.inner.draw(cells.iter().copied())?;
+        self.inner.draw(cells.iter().copied()).unwrap();
         if let Some((x, y, _)) = cells.last() {
-            self.inner.set_cursor_position((*x + 1, *y))?;
+            self.inner.set_cursor_position((*x + 1, *y)).unwrap();
         }
         Ok(())
     }
@@ -78,25 +80,28 @@ impl Backend for AuditBackend {
     fn hide_cursor(&mut self) -> io::Result<()> {
         self.events.push(Event::Hide);
         self.visible = false;
-        self.inner.hide_cursor()
+        self.inner.hide_cursor().unwrap();
+        Ok(())
     }
 
     fn show_cursor(&mut self) -> io::Result<()> {
         self.events
-            .push(Event::Show(self.inner.get_cursor_position()?));
+            .push(Event::Show(self.inner.get_cursor_position().unwrap()));
         self.visible = true;
-        self.inner.show_cursor()
+        self.inner.show_cursor().unwrap();
+        Ok(())
     }
 
     fn get_cursor_position(&mut self) -> io::Result<Position> {
-        self.inner.get_cursor_position()
+        Ok(self.inner.get_cursor_position().unwrap())
     }
 
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
         let position = position.into();
         self.events.push(Event::Move(position));
         self.check(Failure::Move)?;
-        self.inner.set_cursor_position(position)
+        self.inner.set_cursor_position(position).unwrap();
+        Ok(())
     }
 
     fn clear(&mut self) -> io::Result<()> {
@@ -107,21 +112,23 @@ impl Backend for AuditBackend {
         self.events.push(Event::Clear {
             visible: self.visible,
         });
-        self.inner.clear_region(region)
+        self.inner.clear_region(region).unwrap();
+        Ok(())
     }
 
     fn size(&self) -> io::Result<Size> {
-        self.inner.size()
+        Ok(self.inner.size().unwrap())
     }
 
     fn window_size(&mut self) -> io::Result<WindowSize> {
-        self.inner.window_size()
+        Ok(self.inner.window_size().unwrap())
     }
 
     fn flush(&mut self) -> io::Result<()> {
         self.events.push(Event::Flush);
         self.check(Failure::Flush)?;
-        self.inner.flush()
+        self.inner.flush().unwrap();
+        Ok(())
     }
 }
 

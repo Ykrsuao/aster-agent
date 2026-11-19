@@ -14,6 +14,9 @@ depend on it:
 """
 
 import asyncio
+import os
+import shlex
+import sys
 
 import pytest
 
@@ -22,6 +25,10 @@ from aster.tools._bash_session import BashSession
 # Unbalanced double quote. Parsed as shell text this swallows every following
 # line, including the protocol, so the sentinel never arrives.
 UNPARSEABLE = """grep -n "needle\\(/tmp --glob '!build' """
+
+
+def _quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'" if os.name == "nt" else shlex.quote(value)
 
 
 @pytest.fixture
@@ -48,12 +55,15 @@ class TestUnparseableCommands:
             UNPARSEABLE, timeout=10.0
         )
         # The caller is an agent that can correct itself only if it is told why.
-        assert "unexpected EOF" in stderr or "syntax error" in stderr
+        if os.name == "nt":
+            assert "missing the terminator" in stderr
+        else:
+            assert "unexpected EOF" in stderr or "syntax error" in stderr
 
     async def test_session_survives_an_unparseable_command(self, session):
         await session.run(UNPARSEABLE, timeout=10.0)
         stdout, _stderr, code = await session.run("echo alive")
-        assert stdout == "alive"
+        assert stdout.splitlines() == ["alive"]
         assert code == 0
 
     async def test_unparseable_command_does_not_restart_the_session(self, session):
@@ -67,8 +77,10 @@ class TestUnparseableCommands:
         [
             'echo "unterminated',
             "echo 'unterminated",
-            "for i in 1 2 3; do echo $i",
-            "cat <<EOF\nno terminator",
+            "foreach ($i in 1,2,3) { Write-Output $i"
+            if os.name == "nt"
+            else "for i in 1 2 3; do echo $i",
+            "@'\nno terminator" if os.name == "nt" else "cat <<EOF\nno terminator",
             "echo $(",
         ],
     )
@@ -83,18 +95,24 @@ class TestProtocolIsolation:
     """A command that reads stdin cannot consume the control protocol."""
 
     async def test_cat_does_not_consume_the_protocol(self, session):
-        stdout, _stderr, code, timed_out = await session.run_with_timeout_flag("cat", timeout=10.0)
+        command = "[Console]::Write([Console]::In.ReadToEnd())" if os.name == "nt" else "cat"
+        stdout, _stderr, code, timed_out = await session.run_with_timeout_flag(
+            command, timeout=10.0
+        )
         assert not timed_out
         assert code == 0
         assert stdout == ""
 
     async def test_read_builtin_gets_eof(self, session):
         stdout, _stderr, code, timed_out = await session.run_with_timeout_flag(
-            "read line; echo got=$line", timeout=10.0
+            '$line = [Console]::In.ReadLine(); Write-Output "got=$line"'
+            if os.name == "nt"
+            else "read line; echo got=$line",
+            timeout=10.0,
         )
         assert not timed_out
         assert code == 0
-        assert stdout == "got="
+        assert stdout.splitlines() == ["got="]
 
 
 class TestStatePersistence:
@@ -103,23 +121,40 @@ class TestStatePersistence:
     async def test_cd_persists(self, session, tmp_path):
         sub = tmp_path / "sub"
         sub.mkdir()
-        await session.run(f"cd {sub}")
-        stdout, _stderr, _code = await session.run("pwd")
-        assert stdout.endswith("sub")
+        await session.run(f"cd {_quote(str(sub))}")
+        stdout, _stderr, _code = await session.run(
+            "(Get-Location).Path" if os.name == "nt" else "pwd"
+        )
+        assert stdout.strip() == str(sub)
         assert session.cwd == sub
 
     async def test_exported_variables_persist(self, session):
-        await session.run("export ASTER_TEST_VAR=persisted")
-        stdout, _stderr, _code = await session.run("echo $ASTER_TEST_VAR")
-        assert stdout == "persisted"
+        await session.run(
+            "$env:ASTER_TEST_VAR = 'persisted'"
+            if os.name == "nt"
+            else "export ASTER_TEST_VAR=persisted"
+        )
+        stdout, _stderr, _code = await session.run(
+            "echo $env:ASTER_TEST_VAR" if os.name == "nt" else "echo $ASTER_TEST_VAR"
+        )
+        assert stdout.splitlines() == ["persisted"]
 
     async def test_shell_functions_persist(self, session):
-        await session.run("noofn() { echo from_function; }")
+        await session.run(
+            "function noofn { Write-Output from_function }"
+            if os.name == "nt"
+            else "noofn() { echo from_function; }"
+        )
         stdout, _stderr, _code = await session.run("noofn")
-        assert stdout == "from_function"
+        assert stdout.splitlines() == ["from_function"]
 
     async def test_exit_code_is_reported(self, session):
-        _stdout, _stderr, code = await session.run("(exit 42)")
+        command = (
+            f"& {_quote(sys.executable)} -c 'import sys; sys.exit(42)'"
+            if os.name == "nt"
+            else "(exit 42)"
+        )
+        _stdout, _stderr, code = await session.run(command)
         assert code == 42
 
 
@@ -128,7 +163,10 @@ class TestLongCommands:
 
     async def test_200kb_command_runs(self, session):
         payload = "x" * 200_000
-        stdout, _stderr, code = await session.run(f"echo {payload} | wc -c", timeout=30.0)
+        command = (
+            f"('{payload}' + [char]10).Length" if os.name == "nt" else f"echo {payload} | wc -c"
+        )
+        stdout, _stderr, code = await session.run(command, timeout=30.0)
         assert code == 0
         assert stdout.strip() == str(len(payload) + 1)
 
@@ -149,9 +187,9 @@ class TestStreamingUsesTheSameFraming:
     async def test_stream_yields_output_and_persists_cd(self, session, tmp_path):
         sub = tmp_path / "streamed"
         sub.mkdir()
-        chunks = [
-            c async for n, c in session.run_stream(f"cd {sub} && echo streamed", timeout=10.0)
-        ]
+        separator = ";" if os.name == "nt" else "&&"
+        command = f"cd {_quote(str(sub))} {separator} echo streamed"
+        chunks = [c async for n, c in session.run_stream(command, timeout=10.0)]
         assert "streamed" in "".join(chunks)
         assert session.cwd == sub
 
@@ -163,19 +201,26 @@ class TestInitCommandUsesTheSameFraming:
     async def test_unbalanced_quote_in_init_does_not_wedge_start(self, tmp_path):
         s = BashSession(cwd=tmp_path, init_command='echo "unclosed')
         try:
+            if os.name == "nt":
+                with pytest.raises(RuntimeError, match="Shell init command failed"):
+                    await asyncio.wait_for(s.start(), timeout=10.0)
+                assert s._process is None
+                assert not s._started
+                return
             await asyncio.wait_for(s.start(), timeout=10.0)
             stdout, _stderr, code = await s.run("echo alive")
-            assert stdout == "alive"
+            assert stdout.splitlines() == ["alive"]
             assert code == 0
         finally:
             await s.close()
 
     async def test_stdin_reading_init_does_not_consume_the_protocol(self, tmp_path):
-        s = BashSession(cwd=tmp_path, init_command="cat")
+        command = "[Console]::Write([Console]::In.ReadToEnd())" if os.name == "nt" else "cat"
+        s = BashSession(cwd=tmp_path, init_command=command)
         try:
             await asyncio.wait_for(s.start(), timeout=10.0)
             stdout, _stderr, code = await s.run("echo alive")
-            assert stdout == "alive"
+            assert stdout.splitlines() == ["alive"]
             assert code == 0
         finally:
             await s.close()
@@ -183,18 +228,32 @@ class TestInitCommandUsesTheSameFraming:
     async def test_benign_init_still_applies_env_and_cwd(self, tmp_path):
         sub = tmp_path / "initdir"
         sub.mkdir()
-        s = BashSession(cwd=tmp_path, init_command=f"export ASTER_INIT_VAR=applied && cd {sub}")
+        command = (
+            f"$env:ASTER_INIT_VAR = 'applied'; cd {_quote(str(sub))}"
+            if os.name == "nt"
+            else f"export ASTER_INIT_VAR=applied && cd {_quote(str(sub))}"
+        )
+        s = BashSession(cwd=tmp_path, init_command=command)
         try:
             await asyncio.wait_for(s.start(), timeout=10.0)
             assert s.cwd == sub
-            stdout, _stderr, _code = await s.run("echo $ASTER_INIT_VAR")
-            assert stdout == "applied"
+            stdout, _stderr, _code = await s.run(
+                "echo $env:ASTER_INIT_VAR" if os.name == "nt" else "echo $ASTER_INIT_VAR"
+            )
+            assert stdout.splitlines() == ["applied"]
         finally:
             await s.close()
 
-    async def test_failed_init_logs_a_warning(self, tmp_path, caplog):
-        s = BashSession(cwd=tmp_path, init_command="false")
+    async def test_failed_init_is_reported(self, tmp_path, caplog):
+        command = "throw 'init failed'" if os.name == "nt" else "false"
+        s = BashSession(cwd=tmp_path, init_command=command)
         try:
+            if os.name == "nt":
+                with pytest.raises(RuntimeError, match="Shell init command failed.*init failed"):
+                    await asyncio.wait_for(s.start(), timeout=10.0)
+                assert s._process is None
+                assert not s._started
+                return
             with caplog.at_level("WARNING", logger="aster.tools._bash_session"):
                 await asyncio.wait_for(s.start(), timeout=10.0)
             messages = [r.getMessage() for r in caplog.records]

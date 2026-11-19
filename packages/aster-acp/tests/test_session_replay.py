@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from acp import text_block
-from acp.schema import AgentMessageChunk, ToolCallStart, UserMessageChunk
+from acp.schema import AgentMessageChunk, RequestPermissionResponse, ToolCallStart, UserMessageChunk
 from aster_acp._session_replay import record_activity, transcript_updates
 from aster_acp.event_bridge import ACPEventBridge
 from aster_acp.server import CodingACPAdapter
@@ -29,6 +29,11 @@ from aster.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 class RecordingClient:
     def __init__(self):
         self.updates = []
+
+    async def request_permission(self, session_id, tool_call, options, **kwargs):
+        return RequestPermissionResponse.model_validate(
+            {"outcome": {"outcome": "selected", "optionId": "allow_once"}}
+        )
 
     async def session_update(self, session_id, update, **kwargs):
         self.updates.append(update)

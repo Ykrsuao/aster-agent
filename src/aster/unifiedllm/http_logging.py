@@ -4,8 +4,26 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from aster.tracing._secret_scrubber import REDACTED, _is_sensitive_key, scrub_value
+
+
+def _redact_url(url) -> str:
+    """Keep routing details without URL credentials in saved or printed logs."""
+    parts = urlsplit(str(url))
+    query = urlencode(
+        [
+            (
+                name,
+                REDACTED
+                if _is_sensitive_key(name) or name.lower() in {"key", "token", "code", "sig"}
+                else scrub_value(value)[0],
+            )
+            for name, value in parse_qsl(parts.query, keep_blank_values=True)
+        ]
+    )
+    return urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, query, ""))
 
 
 def enable_http_request_logging(
@@ -132,7 +150,7 @@ def enable_http_request_logging(
 
                 if verbose:
                     print(f"\n💾 Saved HTTP request to: {filename}")
-                    print(f"   URL: {request.url}")
+                    print(f"   URL: {_redact_url(request.url)}")
                     print(f"   Method: {request.method}")
                     if "model" in body_dict:
                         print(f"   Model: {body_dict['model']}")
@@ -142,7 +160,7 @@ def enable_http_request_logging(
                         print(f"   Messages: {len(body_dict['messages'])}")
         except Exception as e:
             if verbose:
-                print(f"⚠️  Failed to log request: {e}")
+                print(f"⚠️  Failed to log request: {type(e).__name__}")
         return model_name
 
     def _save_response_file(response_dict, counter, model_name):
@@ -182,14 +200,14 @@ def enable_http_request_logging(
                 )
 
             except Exception as read_error:
-                response_dict["body"] = f"[Error reading response: {read_error}]"
+                response_dict["body"] = f"[Error reading response: {type(read_error).__name__}]"
 
             response_dict["body"] = _redact_body(response_dict["body"])
 
             _save_response_file(response_dict, counter, model_name)
         except Exception as e:
             if verbose:
-                print(f"⚠️  Failed to log response: {e}")
+                print(f"⚠️  Failed to log response: {type(e).__name__}")
         return response
 
     async def _log_response_async(response, request, counter, model_name):
@@ -221,14 +239,14 @@ def enable_http_request_logging(
                 )
 
             except Exception as read_error:
-                response_dict["body"] = f"[Error reading response: {read_error}]"
+                response_dict["body"] = f"[Error reading response: {type(read_error).__name__}]"
 
             response_dict["body"] = _redact_body(response_dict["body"])
 
             _save_response_file(response_dict, counter, model_name)
         except Exception as e:
             if verbose:
-                print(f"⚠️  Failed to log response: {e}")
+                print(f"⚠️  Failed to log response: {type(e).__name__}")
         return response
 
     # Sync transport handler
@@ -252,14 +270,14 @@ def enable_http_request_logging(
                         body_dict.get("model", "unknown").replace("/", "_").replace(":", "_")
                     )
                     request_data = {
-                        "url": str(request.url),
+                        "url": _redact_url(request.url),
                         "method": request.method,
                         "headers": _redact_headers(dict(request.headers)),
                         "body": _redact_body(body_dict),
                     }
             except Exception as e:
                 if verbose:
-                    print(f"⚠️  Failed to capture request: {e}")
+                    print(f"⚠️  Failed to capture request: {type(e).__name__}")
         else:
             model_name = _log_request(request, counter)
 
@@ -313,7 +331,7 @@ def enable_http_request_logging(
                     )
                 except Exception as e:
                     if verbose:
-                        print(f"⚠️  Failed to log error response: {e}")
+                        print(f"⚠️  Failed to log error response: {type(e).__name__}")
         elif save_responses:
             response = _log_response_sync(response, request, counter, model_name)
 
@@ -340,14 +358,14 @@ def enable_http_request_logging(
                         body_dict.get("model", "unknown").replace("/", "_").replace(":", "_")
                     )
                     request_data = {
-                        "url": str(request.url),
+                        "url": _redact_url(request.url),
                         "method": request.method,
                         "headers": _redact_headers(dict(request.headers)),
                         "body": _redact_body(body_dict),
                     }
             except Exception as e:
                 if verbose:
-                    print(f"⚠️  Failed to capture request: {e}")
+                    print(f"⚠️  Failed to capture request: {type(e).__name__}")
         else:
             model_name = _log_request(request, counter)
 
@@ -401,7 +419,7 @@ def enable_http_request_logging(
                     )
                 except Exception as e:
                     if verbose:
-                        print(f"⚠️  Failed to log error response: {e}")
+                        print(f"⚠️  Failed to log error response: {type(e).__name__}")
         elif save_responses:
             response = await _log_response_async(response, request, counter, model_name)
 

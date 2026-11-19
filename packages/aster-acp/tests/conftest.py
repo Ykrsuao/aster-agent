@@ -35,3 +35,18 @@ def _protocol_subprocess_environment(monkeypatch):
         return values
 
     monkeypatch.setattr(acp.transports, "default_environment", environment)
+
+
+@pytest.fixture(autouse=True)
+def _workspace_trust_isolation(monkeypatch):
+    """Keep the folder-trust check from leaking between tests.
+
+    Commands invoked in-process turn the check on for the whole process. These
+    suites exercise other behaviour in temporary folders, so every folder is
+    trusted here; tests of the check itself remove the variable.
+    """
+    from aster import workspace_trust
+
+    monkeypatch.setenv("ASTER_TRUST_ALL_WORKSPACES", "1")
+    with workspace_trust.enforced(workspace_trust.is_enforced()):
+        yield

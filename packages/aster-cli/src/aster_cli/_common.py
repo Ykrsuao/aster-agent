@@ -42,3 +42,34 @@ def format_size(size_bytes: int) -> str:
         return f"{size_bytes / (1024 * 1024):.1f} MB"
     else:
         return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+
+
+def load_workspace_trust():
+    """Return ``aster.workspace_trust`` without importing the framework.
+
+    The terminal launcher draws before the framework is imported. The module
+    is self-contained, so it is loaded from its file when the framework is not
+    already present. The launcher and the agent are separate processes, so the
+    copy's settings never need to match another one.
+    """
+    import importlib.util
+    import sys
+
+    loaded = sys.modules.get("aster.workspace_trust") or sys.modules.get("_aster_workspace_trust")
+    if loaded is not None:
+        return loaded
+    package = importlib.util.find_spec("aster")
+    if package is None or not package.submodule_search_locations:
+        raise ImportError("aster is not installed")
+    path = Path(next(iter(package.submodule_search_locations))) / "workspace_trust.py"
+    spec = importlib.util.spec_from_file_location("_aster_workspace_trust", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(spec.name, None)
+        raise
+    return module

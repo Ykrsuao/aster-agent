@@ -88,7 +88,8 @@ impl Transport {
     pub async fn spawn(config: &BackendConfig) -> Result<Self> {
         let mut command = Command::new(&config.python);
         command
-            .args(["-u", "-m", "aster_acp"])
+            // Ignore implicit workspace imports while keeping operator-supplied PYTHONPATH.
+            .args(["-P", "-u", "-m", "aster_acp"])
             .arg(if config.sandbox {
                 "--sandbox"
             } else {
@@ -398,11 +399,14 @@ async fn supervise(
     };
     writer.abort();
     let _ = writer.await; // closes stdin before waiting for graceful shutdown
+    let mut forced_tree_cleanup = None;
     if status.is_none() {
         status = Some(match timeout(grace, child.wait()).await {
             Ok(status) => status,
             Err(_) => {
-                let _ = process_tree.terminate();
+                // Retain descendant handles before the first termination; exited
+                // processes can leave job accounting before teardown completes.
+                forced_tree_cleanup = Some(process_tree.terminate_and_wait().await);
                 // Keep a direct-child fallback if a native tree operation fails.
                 let _ = child.start_kill();
                 match timeout(Duration::from_secs(5), child.wait()).await {
@@ -420,7 +424,10 @@ async fn supervise(
     }
     // A backend can exit while its descendants still own inherited pipes. Stop
     // the tree on every exit path, including normal shutdown and backend failure.
-    let tree_cleanup = process_tree.terminate_and_wait().await;
+    let tree_cleanup = match forced_tree_cleanup {
+        Some(result) => result,
+        None => process_tree.terminate_and_wait().await,
+    };
     if expected {
         stdout.abort();
     }
@@ -499,6 +506,92 @@ mod tests {
         })
         .await
         .expect("backend did not produce an event")
+    }
+
+    #[tokio::test]
+    async fn startup_ignores_workspace_modules_and_keeps_explicit_pythonpath() {
+        if let Some(workspace) = std::env::var_os("ASTER_TEST_STARTUP_WORKSPACE") {
+            let workspace = PathBuf::from(workspace);
+            let mut transport = Transport::spawn(&BackendConfig {
+                python: python(),
+                workspace: workspace.clone(),
+                model: "no-api-needed".into(),
+                client_type: None,
+                sandbox: false,
+            })
+            .await
+            .unwrap();
+            transport
+                .request(
+                    "initialize",
+                    json!({"protocolVersion": 1, "clientCapabilities": {}}),
+                )
+                .await
+                .unwrap();
+            let response = loop {
+                match next(&mut transport).await {
+                    Event::Message(value) => break value,
+                    Event::Diagnostic(_) => (),
+                    Event::Closed(reason) => panic!("{reason}"),
+                }
+            };
+            transport.shutdown().await.unwrap();
+            assert_eq!(response["result"]["controlled_backend"], true, "{response}");
+            assert_eq!(
+                Path::new(response["result"]["cwd"].as_str().unwrap())
+                    .canonicalize()
+                    .unwrap(),
+                workspace.canonicalize().unwrap()
+            );
+            assert!(!workspace.join("imported.txt").exists());
+            return;
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let backend = directory.path().join("trusted modules");
+        std::fs::create_dir(&backend).unwrap();
+        std::fs::write(
+            backend.join("aster_acp.py"),
+            r#"
+import json, os, sys
+import aster
+for line in sys.stdin:
+    request = json.loads(line)
+    print(json.dumps({'jsonrpc': '2.0', 'id': request['id'],
+        'result': {'controlled_backend': True, 'cwd': os.getcwd()}}), flush=True)
+"#,
+        )
+        .unwrap();
+        for planted in ["aster_acp.py", "aster.py", "aster/__init__.py"] {
+            let workspace = tempfile::tempdir_in(directory.path()).unwrap();
+            let module = workspace.path().join(planted);
+            std::fs::create_dir_all(module.parent().unwrap()).unwrap();
+            std::fs::write(
+                module,
+                "from pathlib import Path\nPath('imported.txt').write_text('executed')\nraise RuntimeError('WORKSPACE_MODULE_EXECUTED')\n",
+            )
+            .unwrap();
+            // A separate test process keeps explicit Python configuration out of parallel tests.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "transport::tests::startup_ignores_workspace_modules_and_keeps_explicit_pythonpath",
+                    "--nocapture",
+                ])
+                .env("ASTER_TEST_STARTUP_WORKSPACE", workspace.path())
+                .env("PYTHONPATH", &backend)
+                .env("ASTER_USER_DIR", directory.path().join("user"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{planted}:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(!workspace.path().join("imported.txt").exists());
+        }
     }
 
     #[tokio::test]
@@ -739,6 +832,48 @@ open('graceful-exit', 'w').close()
     #[tokio::test]
     async fn forced_shutdown_stops_unmanaged_descendants() {
         descendant_cleanup("time.sleep(60)", false).await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn forced_shutdown_releases_descendant_file_mappings_before_returning() {
+        for attempt in 0..20 {
+            let (dir, mut transport) = fixture(
+                r#"
+import json, subprocess, sys, time
+child = subprocess.Popen([sys.executable, '-u', '-c', '''
+import mmap, time
+with open('mapped.txt', 'w+b') as file:
+    file.truncate(1024 * 1024)
+    mappings = [mmap.mmap(file.fileno(), 0) for _ in range(256)]
+    print('mapped', flush=True)
+    time.sleep(60)
+'''], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
+assert child.stdout.readline().strip() == b'mapped'
+print(json.dumps({'jsonrpc': '2.0', 'method': 'ready', 'params': {'pid': child.pid}}), flush=True)
+time.sleep(60)
+"#,
+            );
+            let pid = loop {
+                match next(&mut transport).await {
+                    Event::Message(message) => {
+                        break message["params"]["pid"].as_u64().unwrap() as u32
+                    }
+                    Event::Closed(reason) => panic!("{reason}: {}", transport.diagnostic_tail()),
+                    Event::Diagnostic(_) => {}
+                }
+            };
+            transport.shutdown().await.unwrap();
+            let replaced = std::fs::write(dir.path().join("mapped.txt"), b"replaced");
+            if replaced.is_err() {
+                // Capture the immediate verdict first; only then clean up a leaked fixture.
+                assert_descendant_stopped(pid);
+            }
+            assert!(
+                replaced.is_ok(),
+                "Mapped descendant survived forced shutdown on attempt {attempt}: {replaced:?}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -6,7 +6,7 @@ import json
 
 import pytest
 from acp import text_block
-from acp.schema import SessionInfoUpdate
+from acp.schema import RequestPermissionResponse, SessionInfoUpdate
 from aster_acp.server import CodingACPAdapter
 from aster_cli.sessions import SessionStore
 
@@ -22,6 +22,11 @@ async def test_first_prompt_titles_saved_session_without_overwriting_a_title(
     updates = []
 
     class Client:
+        async def request_permission(self, session_id, tool_call, options, **kwargs):
+            return RequestPermissionResponse.model_validate(
+                {"outcome": {"outcome": "selected", "optionId": "allow_once"}}
+            )
+
         async def session_update(self, session_id, update, **kwargs):
             updates.append(update)
 

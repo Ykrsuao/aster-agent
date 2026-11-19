@@ -14,13 +14,13 @@ The viewer (`src/aster/viewer/`) is a single FastAPI app that is both the **OTLP
 aster start-dev                                  # http://localhost:5001
 aster start-dev --port 5002                      # custom port
 aster start-dev --db /path/to/other.db           # separate trace store
-aster start-dev --host 127.0.0.1                 # default host is 0.0.0.0
+aster start-dev --host 0.0.0.0                   # reachable from other machines (default: 127.0.0.1)
 ```
 
 Stop with Ctrl-C. If deps are missing: `uv sync --extra viewer`. If the port is busy, the command reports the offending PID.
 
 - **Database resolution**: `--db` > `$ASTER_TRACE_DB` > `~/.config/aster/traces.db`.
-- Alternate entry point: `python -m aster.viewer` (this path honors `$ASTER_TRACE_VIEWER_PORT`, default 5001; `start-dev` uses `--port` instead). DB default for the raw module is `./traces.db` — prefer `start-dev`.
+- Alternate entry point: `python -m aster.viewer` (this path honors `$ASTER_TRACE_VIEWER_PORT`, default 5001, and `$ASTER_TRACE_VIEWER_HOST`, default 127.0.0.1; `start-dev` uses `--port` instead). DB default for the raw module is `./traces.db` — prefer `start-dev`.
 
 ## End-to-end workflow
 

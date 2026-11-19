@@ -503,6 +503,7 @@ async def test_changed_model_does_not_republish_the_previous_requests_context(
         assert len(client.updates) == 2
         pending = client.updates[-1]
         assert pending.used == 0
+        assert pending.size == 256_000
         assert pending.field_meta is not None
         assert pending.field_meta["aster"]["usagePending"] is True
         assert "context" not in pending.field_meta["aster"]

@@ -48,6 +48,7 @@ from aster_memory.schema import (
     Memory,
     MemoryRef,
     MemoryType,
+    owner_matches,
     role_of,
 )
 from aster_memory.store import MemoryStore
@@ -310,8 +311,14 @@ class MemoryManager:
             # Dedup within own scope only — never reinforce another agent's memory.
             for nid, cos in self.store.knn(emb, self.config.write.dedup_top_k, owner=self.role):
                 if cos >= self.config.write.dedup_threshold:
-                    existing = self.store.get(nid)
-                    if existing is not None and existing.type == type:
+                    with self.store.edit(nid) as existing:
+                        if (
+                            existing is None
+                            or existing.archived
+                            or existing.type != type
+                            or not owner_matches(existing.owner, self.role)
+                        ):
+                            continue
                         existing.log_access(
                             self._access("reinforced"),
                             cap=self.config.observability.access_log_cap,
@@ -319,20 +326,17 @@ class MemoryManager:
                         existing.reinforcement_count += 1
                         existing.importance = max(existing.importance, mem.importance)
                         existing.salience = max(existing.salience, mem.salience)
-                        self.store.save(existing)
-                        self.stats.reinforced += 1
-                        self._emit(
-                            MemoryWritten(
-                                memory_id=existing.id,
-                                mem_type=type.value,
-                                op="reinforce",
-                                importance=existing.importance,
-                            )
+                    self.stats.reinforced += 1
+                    self._emit(
+                        MemoryWritten(
+                            memory_id=existing.id,
+                            mem_type=type.value,
+                            op="reinforce",
+                            importance=existing.importance,
                         )
-                        mem_logger.debug(
-                            "memory.reinforce id=%s type=%s", existing.id[:8], type.value
-                        )
-                        return existing.id  # NOOP: reinforced the duplicate
+                    )
+                    mem_logger.debug("memory.reinforce id=%s type=%s", existing.id[:8], type.value)
+                    return existing.id  # NOOP: reinforced the duplicate
 
         self.store.add(mem, emb)
         self.stats.writes += 1
@@ -436,38 +440,59 @@ class MemoryManager:
         if m is None:
             return False
         self._assert_writable(m)
-        embedding_before = m.embedding_text()
-        if content is not None and content != m.content:
-            # Reuse the schema's derivation rules without losing record history.
-            data = m.model_dump(exclude={"size_chars", "token_len", "sentence_count"})
-            m = Memory.model_validate({**data, "content": content})
-        if importance is not None:
-            m.importance = max(0.0, min(10.0, importance))
-        if type is not None:
-            m.type = type
-            # Switching taxonomy: a todo opens its lifecycle; nothing else has one.
-            if m.type is MemoryType.TODO and m.status is None:
-                m.status = "open"
-            elif m.type is not MemoryType.TODO:
-                m.status = None
-        if status is not None:
-            if m.type is not MemoryType.TODO:
-                raise ValueError("status applies only to todo memories")
-            m.status = to_status(status)
-        if tags is not None:
-            m.tags = tags
-        if references is not None:
-            m.references = [capture(self.agent, self.store, r) for r in references]
-        m.reinforcement_count += 1
-        m.log_access(
-            self._access("reinforced"),
-            reinforce=False,
-            cap=self.config.observability.access_log_cap,
+        captured = (
+            [capture(self.agent, self.store, r) for r in references]
+            if references is not None
+            else None
         )
-        if m.embedding_text() != embedding_before:
-            self.store.add(m, self.embedder.embed(m.embedding_text()))  # re-embed + replace
-        else:
-            self.store.save(m)
+        embedding_fields = {}
+        if content is not None:
+            embedding_fields["content"] = content
+        if tags is not None:
+            embedding_fields["tags"] = tags
+        while True:
+            embedding_before = m.embedding_text()
+            embedding_after = m.model_copy(update=embedding_fields).embedding_text()
+            embedding = (
+                self.embedder.embed(embedding_after)
+                if embedding_after != embedding_before
+                else None
+            )
+            with self.store.edit(m.id, embedding=embedding) as current:
+                if current is None:
+                    return False
+                self._assert_writable(current)
+                m = current
+                if embedding_fields and m.embedding_text() != embedding_before:
+                    # Recompute outside the write transaction if another writer changed the input.
+                    continue
+                if content is not None and content != m.content:
+                    derived = Memory(content=content)
+                    for field in ("content", "size_chars", "token_len", "sentence_count"):
+                        setattr(m, field, getattr(derived, field))
+                if importance is not None:
+                    m.importance = max(0.0, min(10.0, importance))
+                if type is not None:
+                    m.type = type
+                    if m.type is MemoryType.TODO and m.status is None:
+                        m.status = "open"
+                    elif m.type is not MemoryType.TODO:
+                        m.status = None
+                if status is not None:
+                    if m.type is not MemoryType.TODO:
+                        raise ValueError("status applies only to todo memories")
+                    m.status = to_status(status)
+                if tags is not None:
+                    m.tags = tags
+                if captured is not None:
+                    m.references = captured
+                m.reinforcement_count += 1
+                m.log_access(
+                    self._access("reinforced"),
+                    reinforce=False,
+                    cap=self.config.observability.access_log_cap,
+                )
+            break
         self._emit(
             MemoryWritten(
                 memory_id=m.id, mem_type=m.type.value, op="update", importance=m.importance
@@ -478,11 +503,12 @@ class MemoryManager:
 
     def forget(self, memory_id: str) -> bool:
         """Archive (tombstone) a memory the agent judges wrong or obsolete."""
-        m = self._find(memory_id)
-        if m is None:
-            return False
-        self._assert_writable(m)
-        self.store.archive(m.id)
+        with self.store.transaction():
+            m = self._find(memory_id)
+            if m is None:
+                return False
+            self._assert_writable(m)
+            self.store.archive(m.id)
         self.stats.pruned += 1
         self._emit(
             MemoryWritten(
@@ -528,12 +554,12 @@ class MemoryManager:
                 full_id = self.store.resolve_id(key)
             except ValueError:
                 full_id = None  # ambiguous prefix: resolve() rendered DANGLING
-            target = self.store.get(full_id) if full_id else None
-            if target is not None:
-                target.log_access(
-                    self._access("deref"), cap=self.config.observability.access_log_cap
-                )
-                self.store.save(target)
+            if full_id is not None:
+                with self.store.edit(full_id) as target:
+                    if target is not None:
+                        target.log_access(
+                            self._access("deref"), cap=self.config.observability.access_log_cap
+                        )
         return render(resolved)
 
     def _count_resolution(self, status: str) -> None:
@@ -545,14 +571,15 @@ class MemoryManager:
     def associate(self, a_id: str, b_id: str, relation: str = "related") -> None:
         """Add a directed graph edge ``a_id -> b_id`` (ids may be unique prefixes)."""
         etype = EdgeType(relation)  # raises on an unknown relation (no silent RELATED)
-        src = self._find(a_id)
-        if src is not None:
-            self._assert_writable(src)  # the edge mutates the source's neighborhood
-            a_id = src.id
-        dst = self._find(b_id)
-        if dst is not None:
-            b_id = dst.id
-        self.store.add_edge(a_id, b_id, etype)
+        with self.store.transaction():
+            src = self._find(a_id)
+            if src is not None:
+                self._assert_writable(src)  # the edge mutates the source's neighborhood
+                a_id = src.id
+            dst = self._find(b_id)
+            if dst is not None:
+                b_id = dst.id
+            self.store.add_edge(a_id, b_id, etype)
 
     def reflect(self, *, trigger: str = "manual") -> ReflectionReport:
         """Run a consolidation pass (background thread when configured).
@@ -714,8 +741,11 @@ class MemoryManager:
         if self.config.observability.log_injections:
             # Logged WITHOUT touching: injection stays invisible to ACT-R.
             for m in injected:
-                m.log_access(self._access("injected"), cap=self.config.observability.access_log_cap)
-                self.store.save(m)
+                with self.store.edit(m.id) as current:
+                    if current is not None:
+                        current.log_access(
+                            self._access("injected"), cap=self.config.observability.access_log_cap
+                        )
         return text
 
     def _on_task(self, event: object) -> None:

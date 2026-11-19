@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
-from aster import Context, hidden, no_trace, strategy
+from aster import Context, hidden, no_trace, strategy, workspace_trust
 from aster.agentdoc import doc, spec
 from aster.agents import TokenBudgetSummarizer
 from aster.config import CodeActConfig, PredictConfig
@@ -25,6 +25,7 @@ from aster.storage.markers import nosnapshot
 from aster.strategies import PredictStrategy
 from aster.tools import SkillWriting, TodoManager
 from aster.tools.shell_tools import ShellTools
+from aster.tools.todo import Todo  # noqa: F401 - public REPL type and sandbox data contract
 from aster_cli.coding.activity import ActivityShellTools
 from aster_cli.coding.instructions import render_agent_instructions
 from aster_cli.coding.reply_strategy import CodingReplyStrategy
@@ -106,20 +107,20 @@ class CodingAgent(InteractiveAgent):
         self.shell = ActivityShellTools(self._base_shell, self.event_manager)
         self.repo = RepoTools(root=self.cwd, session=self.shell.session)
         self.todo = TodoManager()
-        # Libraries live at <project>/.aster/libs. get_project_dir() resolves
-        # that per process, which is what a one-workspace host like the TUI
-        # wants. A host serving several workspaces at once must say which
-        # project it means, or every session shares one directory — and
-        # SkillWriting puts it on sys.path and activates local.*, so that
-        # would expose one workspace's agent-authored code to another.
-        self.libs = SkillWriting(self, path=libs_dir or get_project_dir("libs"))
-
         self.skills = SkillRegistry(self)
         self.skills.register("aster.shell", self.shell)
         self.skills.register("aster.repo", self.repo)
         self.skills.register("aster.todo", self.todo)
+        # Hosts serving several workspaces must supply each workspace's library directory.
+        self.libs = SkillWriting(self, path=libs_dir or get_project_dir("libs"))
+
         self.skills.register("aster.libwriting", self.libs)
         self.skills.activate(["aster.shell", "aster.repo", "aster.todo", "aster.libwriting"])
+        # All host tools must be registered before saved libraries attach to them.
+        # Libraries are imported, so an untrusted workspace's are left alone.
+        if workspace_trust.allows_project_dir(Path(self.libs._path).parent):
+            self.skills.discover_libs(self.libs._path)
+        self.skills.activate(["local.*"])
         # Installed ``aster.skills`` entry points are part of the shared host
         # surface. Load them so hosts can expose ``@slash_command`` methods,
         # but leave them inactive until the user opts in with ``/skills``.

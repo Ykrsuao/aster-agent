@@ -16,6 +16,7 @@ first, then weighted) plus an associative-spread term over the graph:
 from __future__ import annotations
 
 import math
+from contextlib import nullcontext
 
 import numpy as np
 
@@ -180,31 +181,30 @@ class RetrievalEngine:
         cfg = self.config
         k = cfg.top_k if k is None else k
         hops = cfg.hops if hops is None else hops
-        ranked, memories, diagnostics = self._pipeline(
+        ranked, _, diagnostics = self._pipeline(
             query, hops=hops, owner=owner, query_cues=query_cues
         )
         now = _now()
         template = access or AccessRecord(ts=now, channel="recalled")
         result: list[Memory] = []
         for rank, (mid, score) in enumerate(ranked[:k]):
-            m = memories.get(mid) or self.store.get(mid)
-            if m is None:
-                continue
-            if touch:
-                m.log_access(
-                    template.model_copy(
-                        update={
-                            "ts": now,
-                            "query": query[:200],
-                            "score": round(score, 4),
-                            "rank": rank,
-                            "components": diagnostics.get(mid),
-                        }
-                    ),
-                    cap=self.access_log_cap,
-                )
-                self.store.save(m)
-            result.append(m)
+            with self.store.edit(mid) if touch else nullcontext(self.store.get(mid)) as m:
+                if m is None or m.archived or not owner_matches(m.owner, owner):
+                    continue
+                if touch:
+                    m.log_access(
+                        template.model_copy(
+                            update={
+                                "ts": now,
+                                "query": query[:200],
+                                "score": round(score, 4),
+                                "rank": rank,
+                                "components": diagnostics.get(mid),
+                            }
+                        ),
+                        cap=self.access_log_cap,
+                    )
+                result.append(m)
         return result
 
     def explain(

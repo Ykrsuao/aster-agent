@@ -56,7 +56,7 @@ async def test_model_list_only_reads_saved_chat_models(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stdio_selects_an_existing_model_without_writing_configuration(tmp_path):
+async def test_stdio_remembers_an_existing_model_without_rewriting_its_connection(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     user = tmp_path / "user"
@@ -123,9 +123,16 @@ async def test_stdio_selects_an_existing_model_without_writing_configuration(tmp
         }
         selected = await call(3, "_aster/models/select", {"model": "stdio-test"})
         assert selected["model"] == "stdio-test"
+        settings = tmp_path / "project" / "settings.yaml"
+        assert not settings.exists()
         session = await call(4, "session/new", {"cwd": str(workspace), "mcpServers": []})
         assert session["sessionId"]
         await call(5, "session/close", {"sessionId": session["sessionId"]})
+        import yaml
+
+        assert yaml.safe_load(settings.read_text(encoding="utf-8"))["tui"] == {
+            "default_model": "stdio-test"
+        }
         assert (model_path.read_bytes(), secrets_path.read_bytes()) == before
     finally:
         if process.returncode is None:

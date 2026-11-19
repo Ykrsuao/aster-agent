@@ -20,8 +20,20 @@ pub enum Layout {
 }
 
 pub const ELEMENTS: &[&str] = &[
-    "project", "usage", "tokens", "cache", "cost", "tools", "tasks", "agents", "skills", "memory",
-    "limits", "session", "custom",
+    "project",
+    "usage",
+    "reasoning",
+    "tokens",
+    "cache",
+    "cost",
+    "tools",
+    "tasks",
+    "agents",
+    "skills",
+    "memory",
+    "limits",
+    "session",
+    "custom",
 ];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

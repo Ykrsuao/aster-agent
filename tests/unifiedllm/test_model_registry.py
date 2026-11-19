@@ -699,10 +699,8 @@ class TestReloadRegistry:
     def test_concurrent_get_llm_client_during_reload_is_safe(self, tmp_path):
         """A reader hitting ``get_llm_client()`` while another thread
         runs ``reload_registry()`` must never observe a half-cleared
-        registry. The reader either sees the pre-reload value (registry
-        miss → litellm passthrough) or the post-reload value
-        (registry hit), never a transient empty state that loses the
-        alias mid-mutation.
+        registry. The alias exists before and after every reload, so
+        every reader must resolve its configured model.
         """
         import threading
         import time
@@ -727,15 +725,9 @@ class TestReloadRegistry:
             try:
                 while not stop.is_set():
                     llm = get_llm_client("raceable")
-                    # Either we see the registry hit (model_name from
-                    # YAML) or the registry miss (alias passes through
-                    # to litellm as-is). The bad case the lock
-                    # prevents is: ``llm.model == "raceable"`` *and*
-                    # MODELS containing "raceable" — i.e. a transient
-                    # empty-dict observation. We can't directly observe
-                    # that, but we can record whether reads returned
-                    # consistent shapes.
-                    if llm.model not in {"raceable", "openai/raceable-model"}:
+                    # A passthrough alias would reveal an empty registry
+                    # observed between clear() and update().
+                    if llm.model != "openai/raceable-model":
                         bad_observations.append(f"unexpected model: {llm.model!r}")
             except BaseException as exc:  # noqa: BLE001 — surface in test
                 reader_errors.append(exc)
@@ -753,6 +745,7 @@ class TestReloadRegistry:
         stop.set()
         t.join(timeout=2.0)
 
+        assert not t.is_alive()
         assert not reader_errors, reader_errors
         assert not bad_observations, bad_observations
         # End state: registry holds the alias.

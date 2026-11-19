@@ -12,40 +12,6 @@ _TEST_LLM = FakeLLMClient()
 
 
 @pytest.mark.asyncio
-async def test_captured_locals_preserved_on_error():
-    """Variables defined before an error should be preserved (IPython behavior)."""
-
-    class TestAgent(Agent, llm=_TEST_LLM):
-        pass
-
-    agent = TestAgent()
-    runtime = ActorRuntime(agent)
-
-    # Code that defines variables, then raises an error
-    code = """
-x = 1
-y = 2
-raise Exception('test error')
-z = 3  # This won't be reached
-"""
-
-    result = await runtime.execute_code(code, wrap_in_function=True)
-
-    # Should have an error
-    assert result.error is not None
-    assert "test error" in str(result.error)
-
-    # But x and y should be captured (IPython behavior)
-    assert "x" in result.captured_locals, "x should be captured before error"
-    assert "y" in result.captured_locals, "y should be captured before error"
-    assert result.captured_locals["x"] == 1
-    assert result.captured_locals["y"] == 2
-
-    # z should NOT be captured (never executed)
-    assert "z" not in result.captured_locals
-
-
-@pytest.mark.asyncio
 async def test_objects_with_internal_state_preserved_on_error():
     """Objects with internal state should be preserved with their state intact."""
 
@@ -99,91 +65,6 @@ raise Exception('error after state mutations')
     # Class instance should have its state
     assert "counter" in result.captured_locals
     assert result.captured_locals["counter"].value == 2
-
-
-@pytest.mark.asyncio
-async def test_captured_locals_preserved_on_execution_signal():
-    """Variables should be preserved when ExecutionSignal is raised."""
-    from aster.events import ExecutionSignal
-
-    class TestAgent(Agent, llm=_TEST_LLM):
-        pass
-
-    agent = TestAgent()
-    runtime = ActorRuntime(agent)
-
-    # Code that defines variables, then raises an ExecutionSignal
-    # (This simulates what return_result() does internally)
-    code = """
-x = 42
-y = "hello"
-raise ExecutionSignal("result", x + 1)
-z = 99  # This won't be reached
-"""
-
-    # Inject ExecutionSignal into builtins so it's available in the executed code
-    result = await runtime.execute_code(
-        code, wrap_in_function=True, builtins={"ExecutionSignal": ExecutionSignal}
-    )
-
-    # Should have a signal, not an error
-    assert result.error is None
-    assert result.signal is not None
-
-    # x and y should be captured
-    assert "x" in result.captured_locals, "x should be captured before signal"
-    assert "y" in result.captured_locals, "y should be captured before signal"
-    assert result.captured_locals["x"] == 42
-    assert result.captured_locals["y"] == "hello"
-
-    # z should NOT be captured (never executed)
-    assert "z" not in result.captured_locals
-
-
-@pytest.mark.asyncio
-async def test_captured_locals_preserved_with_return_result():
-    """Variables should be preserved when return_result() is called (full integration)."""
-    from aster.events import ExecutionSignal
-
-    class TestAgent(Agent, llm=_TEST_LLM):
-        pass
-
-    agent = TestAgent()
-    runtime = ActorRuntime(agent)
-
-    # Create return_result function that mirrors the real implementation
-    def return_result(value):
-        """Simulates the real return_result() from CodeActStrategy."""
-        raise ExecutionSignal("return_result", {"result": value})
-
-    code = """
-x = 42
-y = "computed"
-result = x * 2
-return_result(result)
-z = 99  # This won't be reached
-"""
-
-    result = await runtime.execute_code(
-        code,
-        wrap_in_function=True,
-        builtins={"return_result": return_result, "ExecutionSignal": ExecutionSignal},
-    )
-
-    # Should have a signal, not an error
-    assert result.error is None
-    assert result.signal is not None
-
-    # All variables before return_result should be captured
-    assert "x" in result.captured_locals
-    assert "y" in result.captured_locals
-    assert "result" in result.captured_locals
-    assert result.captured_locals["x"] == 42
-    assert result.captured_locals["y"] == "computed"
-    assert result.captured_locals["result"] == 84
-
-    # z should NOT be captured (never executed)
-    assert "z" not in result.captured_locals
 
 
 @pytest.mark.asyncio

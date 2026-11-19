@@ -315,7 +315,7 @@ def variables(
         for name, value in sorted(obj.__dict__.items()):
             if cfg.should_hide(name):
                 continue
-            if _is_hidden_field(obj_type, name):
+            if _is_hidden_field(obj, name):
                 continue
 
             if callable(value):
@@ -345,7 +345,7 @@ def variables(
         for name in dir(obj_type):
             if name in seen_names or cfg.should_hide(name):
                 continue
-            if _is_hidden_field(obj_type, name):
+            if _is_hidden_field(obj, name):
                 continue
 
             try:

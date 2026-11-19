@@ -14,6 +14,7 @@ from acp.schema import (
     AgentMessageChunk,
     AvailableCommandsUpdate,
     ContentToolCallContent,
+    RequestPermissionResponse,
     TextContentBlock,
     ToolCallProgress,
     ToolCallStart,
@@ -62,6 +63,12 @@ async def test_provider_diagnostics_do_not_corrupt_protocol_stdout(
             line = await asyncio.wait_for(process.stdout.readline(), timeout=_HANG_TIMEOUT)
             assert line, (await diagnostics).decode("utf-8", errors="replace")
             message = json.loads(line)
+            if message.get("method") == "session/request_permission":
+                answer = {"outcome": {"outcome": "selected", "optionId": "allow_once"}}
+                reply = {"jsonrpc": "2.0", "id": message["id"], "result": answer}
+                process.stdin.write((json.dumps(reply) + "\n").encode())
+                await process.stdin.drain()
+                continue
             if message.get("id") == request_id:
                 assert "error" not in message, message
                 return message["result"]
@@ -150,6 +157,11 @@ class _RecordingClient:
         self.sandbox_ready = asyncio.Event()
         self.preparing = asyncio.Event()
         self.waiting_for_model = asyncio.Event()
+
+    async def request_permission(self, session_id, tool_call, options, **kwargs):
+        return RequestPermissionResponse.model_validate(
+            {"outcome": {"outcome": "selected", "optionId": "allow_once"}}
+        )
 
     async def session_update(self, session_id: str, update: object, **kwargs) -> None:
         self.updates.append((session_id, update))

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 import litellm
 import pytest
 
-from aster.unifiedllm import CompletionClient, ResponsesClient, get_llm_client
+from aster.unifiedllm import CompletionClient, ResponsesClient, get_llm_client, registry
 
 
 def _completion_response() -> litellm.ModelResponse:
@@ -18,6 +18,18 @@ def _completion_response() -> litellm.ModelResponse:
 
 def _responses_response() -> SimpleNamespace:
     return SimpleNamespace(output=[], usage=None, status="completed", incomplete_details=None)
+
+
+def _registry_client(**overrides):
+    return registry.client_from_config(
+        "context-window-alias",
+        {
+            "model_name": "unknown/context-window-model",
+            "context_window": 131072,
+            "media_inputs": [],
+        },
+        **overrides,
+    )
 
 
 def test_completion_client_context_window_config_is_honored():
@@ -35,38 +47,32 @@ def test_responses_client_context_window_config_is_honored():
 
 
 def test_context_window_config_overrides_registry_config():
-    client = CompletionClient(model="unknown/context-window-model", context_window=262144)
-    client._registry_config = {"context_window": 131072}
+    client = _registry_client(context_window=262144)
 
     assert client.context_window == 262144
 
 
 def test_zero_context_window_remains_an_explicit_override():
-    client = CompletionClient(model="unknown/context-window-model", context_window=0)
-    client._registry_config = {"context_window": 131072}
+    client = _registry_client(context_window=0)
 
     assert client.context_window == 0
     assert "context_window" not in client.config
 
 
 def test_none_context_window_falls_through_to_registry_config():
-    client = CompletionClient(model="unknown/context-window-model", context_window=None)
-    client._registry_config = {"context_window": 131072}
+    client = _registry_client(context_window=None)
 
     assert client.context_window == 131072
     assert "context_window" not in client.config
 
 
 def test_registry_only_context_window_still_resolves():
-    client = CompletionClient(model="unknown/context-window-model")
-    client._registry_config = {"context_window": 131072}
+    client = _registry_client()
 
     assert client.context_window == 131072
 
 
 def test_get_llm_client_override_is_metadata_not_request_config(monkeypatch):
-    from aster.unifiedllm import registry
-
     monkeypatch.setattr(registry, "_loaded", True)
     monkeypatch.setitem(
         registry.MODELS,

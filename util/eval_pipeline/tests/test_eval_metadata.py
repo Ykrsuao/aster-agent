@@ -30,7 +30,7 @@ from eval_pipeline.trace_eval_span import (
 
 def _read_eval_span_attrs(trace_file: Path) -> dict:
     """Read the eval span from a trace file and return flat attributes dict."""
-    from tests.otlp_helpers import _otlp_attrs_to_dict
+    from .otlp_helpers import _otlp_attrs_to_dict
 
     for line in trace_file.read_text().strip().splitlines():
         payload = json.loads(line)

@@ -58,7 +58,7 @@ def client(tmp_path, monkeypatch):
         del otlp_store._read_tls.conn
     if hasattr(otlp_store._write_tls, "conn"):
         del otlp_store._write_tls.conn
-    with TestClient(app) as c:
+    with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 54321)) as c:
         db = otlp_store._db
         otlp_store._read_tls.conn = db
         otlp_store._write_tls.conn = db

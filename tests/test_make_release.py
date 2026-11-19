@@ -666,6 +666,9 @@ def test_strict_capability_installs_same_wheel_in_both_fresh_arms(mr, tmp_path, 
     assert len(calls) == 2
     assert all(call[1:] == (wheel, True) for call in calls)
     assert calls[0][0] != calls[1][0]
+    assert (tmp_path / "artifacts" / "capability-report.md").read_text(
+        encoding="utf-8"
+    ) == diff.markdown
 
 
 def test_advisories_do_not_become_hard_gate_failures(mr):
@@ -941,13 +944,13 @@ def test_noninteractive_ci_drafts_when_only_advisories_exist(mr, tmp_path, monke
 
 
 def test_release_runner_contains_no_publish_operation(mr):
-    source = (REPO / "scripts/make_release.py").read_text()
+    source = (REPO / "scripts/make_release.py").read_text(encoding="utf-8")
     assert "--draft=false" not in source
     assert "def publish(" not in source
 
 
 def test_existing_publication_workflow_still_uses_published_release_trigger():
-    workflow = (REPO / ".github/workflows/publish.yml").read_text()
+    workflow = (REPO / ".github/workflows/publish.yml").read_text(encoding="utf-8")
     assert "release:" in workflow
     assert "types: [published]" in workflow
     assert "workflow_dispatch:" in workflow

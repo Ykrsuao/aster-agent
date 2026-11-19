@@ -98,6 +98,7 @@ pub enum Pending {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeRequest {
     Inspect,
+    EffortStatus,
     Configure,
     Tasks,
     StopTask,
@@ -177,6 +178,7 @@ struct Backup {
     title: String,
     usage: String,
     ratio: Option<f64>,
+    context_window: Option<u64>,
     context: Option<crate::context::ContextSnapshot>,
     hud: crate::hud::Telemetry,
     cost: String,
@@ -776,6 +778,7 @@ impl Controller {
         if self.state.overlay == Some(Overlay::Models) {
             self.state.overlay = None;
         }
+        self.state.model_effort_drafts.clear();
     }
 
     pub fn failure(&mut self, message: impl Into<String>) -> Vec<Action> {
@@ -1062,12 +1065,13 @@ impl Controller {
                 queued.push(steering.text.clone().into());
             }
         }
+        let tui_textarea::DataCursor(row, column) = editor.cursor();
         DraftSnapshot {
             composer: MessageDraft {
                 text: composer,
                 attachments: self.state.attachments.clone(),
             },
-            cursor: editor.cursor(),
+            cursor: (row, column),
             queued,
             queue_paused: self.state.queue_paused,
             in_flight: self
@@ -1407,6 +1411,7 @@ impl Controller {
         self.state.usage.clear();
         self.state.hud.reset_session();
         self.state.cost.clear();
+        self.state.context_window = None;
         self.state.context_ratio = None;
         self.state.context_snapshot = None;
         self.state.context_expanded = false;
@@ -1455,6 +1460,7 @@ impl Controller {
             title: self.state.title.clone(),
             usage: self.state.usage.clone(),
             ratio: self.state.context_ratio,
+            context_window: self.state.context_window,
             context: self.state.context_snapshot.clone(),
             hud: self.state.hud.telemetry.clone(),
             cost: self.state.cost.clone(),
@@ -1508,6 +1514,7 @@ impl Controller {
             self.state.title = backup.title;
             self.state.usage = backup.usage;
             self.state.context_ratio = backup.ratio;
+            self.state.context_window = backup.context_window;
             self.state.context_snapshot = backup.context;
             self.state.hud.telemetry = backup.hud;
             self.state.cost = backup.cost;
@@ -1585,6 +1592,27 @@ impl Controller {
                     self.configure(json!({"model":argument}))
                 };
             }
+            "/effort" | "/reasoning" => {
+                return if argument.is_empty() {
+                    self.open_runtime(Overlay::Reasoning)
+                } else if argument == "status" {
+                    if !self.state.runtime_supported {
+                        self.state.notice(
+                            "This backend does not expose reasoning controls. Update aster-acp.",
+                            false,
+                        );
+                        return vec![];
+                    }
+                    self.runtime_request(
+                        "_aster/session/runtime",
+                        json!({}),
+                        RuntimeRequest::EffortStatus,
+                    )
+                } else {
+                    let level = (!matches!(argument, "auto" | "default")).then_some(argument);
+                    self.configure(json!({"reasoningLevel":level}))
+                }
+            }
             "/mode" => {
                 return if argument.is_empty() {
                     self.open_runtime(Overlay::Modes)
@@ -1597,8 +1625,22 @@ impl Controller {
             "/permissions" => {
                 return if argument.is_empty() {
                     self.open_runtime(Overlay::Permissions)
-                } else {
+                } else if matches!(argument, "ask" | "session") {
                     self.configure(json!({"approval":argument}))
+                } else {
+                    self.configure(json!({"permissionMode":argument}))
+                }
+            }
+            "/sandbox" => {
+                return match argument {
+                    "" => self.open_runtime(Overlay::Sandbox),
+                    "on" => self.configure(json!({"executionBackend":"sandbox"})),
+                    "off" => self.configure(json!({"executionBackend":"native"})),
+                    _ => {
+                        self.state
+                            .notice("Use /sandbox, /sandbox on, or /sandbox off.", false);
+                        vec![]
+                    }
                 }
             }
             "/tasks" => return self.open_tasks(),
@@ -1687,16 +1729,16 @@ impl Controller {
             "/status" => {
                 self.state.notice(
                     format!(
-                        "Workspace: {}\nModel: {}\nExecution: {}\nMode: {}\nApproval: {}\nSession: {}",
+                        "Workspace: {}\nModel: {}\nExecution: {}\nMode: {}\nPermissions: {}\nSession: {}",
                         self.state.workspace,
                         self.state.model,
                         if self.state.sandbox {
-                            "sandbox"
+                            "Python sandbox · shell/file tools on host"
                         } else {
                             "native"
                         },
                         self.state.mode,
-                        self.state.approval_policy,
+                        self.state.permission_label(),
                         self.state
                             .session_id
                             .as_deref()
@@ -2185,19 +2227,7 @@ impl Controller {
             }
         }
         self.history.push(text.clone());
-        let mut shown = clean(text);
-        if !draft.attachments.is_empty() {
-            shown.push_str("\n\nAttached context:");
-            for attachment in &draft.attachments {
-                shown.push_str(&format!(
-                    "\n@{} · {} · {} bytes",
-                    clean(attachment.name()),
-                    attachment.mime_type(),
-                    attachment.byte_len()
-                ));
-            }
-        }
-        self.state.entries.push(Entry::User(shown));
+        self.state.entries.push(Entry::user(&draft));
         self.state.scroll = 0;
         self.state.focus_entry = None;
         self.state.started = Some(Instant::now());
@@ -2369,13 +2399,69 @@ impl Controller {
         }
         if self.state.busy() || self.state.phase == Phase::Failed {
             self.state.notice(
-                "Finish or stop the active task before changing its model, mode, or permissions.",
+                "Finish or stop the active task before changing session settings.",
+                false,
+            );
+            return vec![];
+        }
+        if !self.state.approvals.is_empty() {
+            self.state.notice(
+                "Resolve or cancel the pending approval before changing session settings.",
+                false,
+            );
+            return vec![];
+        }
+        if self.state.tasks["jobs"]
+            .as_array()
+            .is_some_and(|jobs| jobs.iter().any(|job| job["status"] == "running"))
+        {
+            self.state.notice(
+                "Stop or finish background jobs before changing session settings.",
+                false,
+            );
+            return vec![];
+        }
+        if let Some(backend) = params.get("executionBackend") {
+            let Some(backends) = self.state.runtime["executionBackends"].as_array() else {
+                self.state.notice("Python sandbox controls have not been reported. Use /sandbox to inspect them or update aster-acp.", false);
+                return vec![];
+            };
+            if !backends.contains(backend) {
+                self.state.notice("This execution environment is unavailable. Refresh /sandbox or update aster-acp.", false);
+                return vec![];
+            }
+            self.state.notice(crate::state::PYTHON_SANDBOX_SCOPE, false);
+        }
+        if params.get("reasoningLevel").is_some()
+            && self.state.runtime.get("reasoningLevels").is_none()
+        {
+            self.state.notice(
+                "Reasoning controls have not been reported. Use /effort to inspect them or update aster-acp.",
+                false,
+            );
+            return vec![];
+        }
+        if params.get("permissionMode").is_some()
+            && self.state.runtime.get("permissionMode").is_none()
+        {
+            self.state.notice(
+                "This backend has not reported permission-mode support. Permissions are unchanged; update aster-acp to use this control.",
                 false,
             );
             return vec![];
         }
         self.state.overlay = None;
         self.begin("configure", "Applying session settings…");
+        if let Some(backend) = params.get("executionBackend") {
+            self.operation = "sandbox";
+            self.state.status = if backend == "sandbox" {
+                "Preparing Python sandbox… Esc cancels"
+            } else {
+                "Switching to native Python… Esc cancels"
+            }
+            .into();
+            self.deadline = None;
+        }
         self.runtime_request(
             "_aster/session/configure",
             params,
@@ -2384,11 +2470,44 @@ impl Controller {
     }
 
     fn runtime_update(&mut self, value: &Value) {
+        let picker_open = matches!(
+            self.state.overlay,
+            Some(
+                Overlay::Models
+                    | Overlay::Reasoning
+                    | Overlay::Modes
+                    | Overlay::Permissions
+                    | Overlay::Sandbox
+            )
+        );
+        let highlighted = if picker_open {
+            self.state
+                .choices()
+                .get(self.state.selected)
+                .map(|choice| choice.value.clone())
+        } else {
+            None
+        };
+        let current = match self.state.overlay {
+            Some(Overlay::Models) => self.state.model.as_str(),
+            Some(Overlay::Modes) => self.state.mode.as_str(),
+            Some(Overlay::Permissions) => self.state.permission_mode(),
+            Some(Overlay::Sandbox) => self.state.runtime["executionBackend"]
+                .as_str()
+                .unwrap_or(""),
+            _ => self.state.runtime["reasoningSelection"]
+                .as_str()
+                .unwrap_or(""),
+        };
+        let focus_picker = picker_open
+            && self.state.query.is_empty()
+            && highlighted.as_deref().is_none_or(|value| value == current);
         if let Some(model) = value["model"].as_str() {
             let model = clean(model);
             if !model.is_empty() && model != self.state.model {
                 self.state.model = model;
                 self.state.usage.clear();
+                self.state.context_window = None;
                 self.state.context_ratio = None;
                 self.state.context_snapshot = None;
                 self.state.context_view = None;
@@ -2396,6 +2515,9 @@ impl Controller {
                 self.state.hud.telemetry.environment.effort.clear();
                 self.state.hud.telemetry.environment.provider.clear();
             }
+        }
+        if let Some(window) = value.get("contextWindow") {
+            self.state.context_window = window.as_u64().filter(|window| *window > 0);
         }
         if let Some(mode) = value["mode"].as_str() {
             self.state.mode = clean(mode);
@@ -2407,6 +2529,16 @@ impl Controller {
             self.state.sandbox = backend == "sandbox";
         }
         self.state.runtime = value.clone();
+        if focus_picker {
+            self.state.focus_runtime_choice();
+        } else if let Some(highlighted) = highlighted {
+            self.state.selected = self
+                .state
+                .choices()
+                .iter()
+                .position(|choice| choice.value == highlighted)
+                .unwrap_or(0);
+        }
     }
 
     fn runtime_response(&mut self, pending: Pending, value: &Value) -> Vec<Action> {
@@ -2479,13 +2611,16 @@ impl Controller {
             return vec![];
         }
         if let Some(error) = value.get("error") {
-            self.state.notice(
-                error["message"]
+            let reason = clean(
+                error["data"]["reason"]
                     .as_str()
+                    .or_else(|| error["message"].as_str())
                     .unwrap_or("Session control request failed."),
-                true,
             );
-            return if operation == RuntimeRequest::Configure && self.operation == "configure" {
+            self.state.notice(reason, true);
+            return if operation == RuntimeRequest::Configure
+                && matches!(self.operation, "configure" | "sandbox")
+            {
                 self.ready("Settings unchanged")
             } else {
                 vec![]
@@ -2493,7 +2628,33 @@ impl Controller {
         }
         let result = &value["result"];
         match operation {
-            RuntimeRequest::Inspect | RuntimeRequest::Configure => self.runtime_update(result),
+            RuntimeRequest::Inspect | RuntimeRequest::Configure | RuntimeRequest::EffortStatus => {
+                self.runtime_update(result);
+                if operation == RuntimeRequest::EffortStatus {
+                    let level = result["reasoningLevel"].as_str().map(clean);
+                    let selection = result["reasoningSelection"].as_str();
+                    let description = match (selection, level) {
+                        (Some(_), Some(level)) => level,
+                        (None, Some(level)) => format!("auto ({level})"),
+                        _ => "auto (model default is unknown)".into(),
+                    };
+                    let support = match result.get("reasoningLevels").and_then(Value::as_array) {
+                        Some(levels) if levels.is_empty() => "selection unsupported".into(),
+                        Some(levels) => format!(
+                            "available: {}",
+                            levels
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(clean)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        None => "selectable levels unknown".into(),
+                    };
+                    self.state
+                        .notice(format!("Effort: {description} · {support}"), false);
+                }
+            }
             RuntimeRequest::Tasks => self.tasks_update(result),
             RuntimeRequest::StopTask => {
                 if result["tasks"].is_object() {
@@ -2512,7 +2673,9 @@ impl Controller {
                 unreachable!("context content is handled independently")
             }
         }
-        if operation == RuntimeRequest::Configure && self.operation == "configure" {
+        if operation == RuntimeRequest::Configure
+            && matches!(self.operation, "configure" | "sandbox")
+        {
             let mut actions = self.ready("Session settings updated");
             if actions.is_empty() {
                 actions.extend(self.send_queued());
@@ -2741,6 +2904,20 @@ impl Controller {
                 result: json!({"outcome":{"outcome":"cancelled"}}),
             }];
         }
+        // The dialog shows filtered text while the backend runs the original. An
+        // escape sequence can swallow the lines after it, and Python reads a lone
+        // carriage return as a line break, so refuse anything the filter changes.
+        let shown = clean(&code);
+        if shown != code.replace("\r\n", "\n") {
+            self.state.notice(
+                "Approval request contained hidden control characters; execution was cancelled.",
+                true,
+            );
+            return vec![Action::Reply {
+                id,
+                result: json!({"outcome":{"outcome":"cancelled"}}),
+            }];
+        }
         let preview = approval_preview(&params["toolCall"]["_meta"]["aster"]["approvalPreview"]);
         let show_code = !preview.as_ref().is_some_and(|preview| preview.complete);
         self.state.approvals.push_back(ApprovalRequest {
@@ -2750,7 +2927,7 @@ impl Controller {
                     .as_str()
                     .unwrap_or("Execution approval"),
             ),
-            code: clean(&code),
+            code: shown,
             preview,
             show_code,
             options,
@@ -3112,7 +3289,7 @@ impl Controller {
         if self.cancelled {
             return vec![];
         }
-        if self.operation == "prompt" {
+        if matches!(self.operation, "prompt" | "sandbox") {
             self.cancelled = true;
             // Wait for the terminal response before permitting another prompt.
             // The deadline shows a notice; only an explicit exit closes the UI.
@@ -3283,15 +3460,9 @@ impl Controller {
                 self.state.overlay = None;
             }
             self.state.queue_paused = true;
-            let tree_reason =
-                if matches!(pending, Pending::Tree { .. } | Pending::NavigateTree { .. }) {
-                    error["data"]["reason"]
-                        .as_str()
-                        .filter(|reason| !reason.trim().is_empty())
-                } else {
-                    None
-                };
-            let text = tree_reason
+            let text = error["data"]["reason"]
+                .as_str()
+                .filter(|reason| !reason.trim().is_empty())
                 .or_else(|| error["message"].as_str())
                 .unwrap_or("The backend request failed.");
             if matches!(pending, Pending::Initialize) {
@@ -4019,6 +4190,7 @@ impl Controller {
                 let used = snapshot.used;
                 let size = snapshot.window;
                 let pending = update["_meta"]["aster"]["usagePending"] == true;
+                self.state.context_window = size;
                 self.state.context_ratio = used
                     .zip(size)
                     .map(|(used, size)| (used as f64 / size as f64).clamp(0.0, 1.0));
@@ -4412,7 +4584,7 @@ impl Controller {
         match key.code {
             KeyCode::Char('@')
                 if !ctrl && !alt && {
-                    let (row, column) = self.state.editor.cursor();
+                    let tui_textarea::DataCursor(row, column) = self.state.editor.cursor();
                     column == 0
                         || self.state.editor.lines()[row]
                             .chars()
@@ -4424,8 +4596,12 @@ impl Controller {
             }
             KeyCode::Char('a' | 'A') if alt && !ctrl => return self.open_files(),
             KeyCode::Char('t' | 'T') if alt && !ctrl => return self.open_tasks(),
-            KeyCode::Char('d') if ctrl && self.state.editor.lines().join("\n").is_empty() => {
-                return self.quit()
+            KeyCode::Char('p' | 'P') if alt && !ctrl => {
+                return if key.kind == KeyEventKind::Repeat {
+                    vec![]
+                } else {
+                    self.input("/model".into())
+                };
             }
             KeyCode::Char('k') if ctrl => self.state.open(Overlay::Commands),
             KeyCode::Char('x') if ctrl => self.state.open(Overlay::Help),
@@ -4628,8 +4804,11 @@ impl Controller {
                     | "/reconnect"
                     | "/retry"
                     | "/model"
+                    | "/effort"
+                    | "/reasoning"
                     | "/mode"
                     | "/permissions"
+                    | "/sandbox"
                     | "/tasks"
                     | "/stop"
             )
@@ -4727,6 +4906,31 @@ impl Controller {
         if overlay == Overlay::Approval {
             return self.approval_key(key);
         }
+        if matches!(overlay, Overlay::Models | Overlay::Reasoning)
+            && key.modifiers == KeyModifiers::NONE
+        {
+            match key.code {
+                KeyCode::Enter if key.kind == KeyEventKind::Repeat => return vec![],
+                KeyCode::Left | KeyCode::Right => {
+                    let increase = key.code == KeyCode::Right;
+                    if overlay == Overlay::Models {
+                        self.state.adjust_model_effort(increase);
+                    } else {
+                        self.state.selected = if increase {
+                            (self.state.selected + 1)
+                                .min(self.state.choices().len().saturating_sub(1))
+                        } else {
+                            self.state.selected.saturating_sub(1)
+                        };
+                    }
+                    return vec![];
+                }
+                KeyCode::Char(_) | KeyCode::Backspace if overlay == Overlay::Reasoning => {
+                    return vec![];
+                }
+                _ => {}
+            }
+        }
         let query_before = self.state.query.clone();
         match key.code {
             KeyCode::Char('u') if ctrl && overlay == Overlay::Changes => {
@@ -4762,6 +4966,9 @@ impl Controller {
             }
             KeyCode::Esc => {
                 self.state.overlay = None;
+                if overlay == Overlay::Models {
+                    self.state.model_effort_drafts.clear();
+                }
             }
             KeyCode::Char('s') if ctrl => return self.continue_queue(),
             KeyCode::Delete if overlay == Overlay::Queue => {
@@ -4858,10 +5065,34 @@ impl Controller {
                                 json!({"model":choice.value}),
                             );
                         }
-                        Overlay::Models => return self.configure(json!({"model":choice.value})),
+                        Overlay::Models => {
+                            let mut params = json!({"model":choice.value});
+                            if let Some(level) =
+                                self.state.model_effort_drafts.get(&choice.value).cloned()
+                            {
+                                let (levels, _) = self.state.model_effort_choices(&choice.value);
+                                if !levels
+                                    .iter()
+                                    .any(|choice| choice.value == level.as_deref().unwrap_or(""))
+                                {
+                                    self.state.model_effort_drafts.remove(&choice.value);
+                                    self.state.notice("Available effort levels changed. Choose the effort again before confirming.", false);
+                                    return vec![];
+                                }
+                                params["reasoningLevel"] = json!(level);
+                            }
+                            return self.configure(params);
+                        }
+                        Overlay::Reasoning => {
+                            let level = (!choice.value.is_empty()).then_some(choice.value);
+                            return self.configure(json!({"reasoningLevel":level}));
+                        }
                         Overlay::Modes => return self.configure(json!({"mode":choice.value})),
                         Overlay::Permissions => {
-                            return self.configure(json!({"approval":choice.value}))
+                            return self.configure(json!({"permissionMode":choice.value}))
+                        }
+                        Overlay::Sandbox => {
+                            return self.configure(json!({"executionBackend":choice.value}))
                         }
                         Overlay::Rewind => {
                             if let Ok(index) = choice.value.parse::<usize>() {
@@ -5116,6 +5347,23 @@ mod tests {
         };
         c.registered(90, pending);
         c
+    }
+
+    #[test]
+    fn sandbox_preparation_has_no_request_deadline_but_cancellation_does() {
+        let mut c = ready();
+        c.state.session_id = Some("s".into());
+        c.state.runtime_supported = true;
+        c.state.runtime = json!({"executionBackends":["native", "sandbox"]});
+        assert_eq!(c.input("/sandbox on".into()).len(), 1);
+        assert!(c.deadline.is_none());
+        assert_eq!(c.cancel().len(), 1);
+        assert!(c.deadline.is_some());
+        c.deadline = Some(Instant::now() - Duration::from_millis(1));
+        assert!(c.tick().is_empty());
+        assert_eq!(c.state.phase, Phase::Cancelling);
+        assert!(c.state.queue_paused);
+        assert!(c.fatal_error.is_none());
     }
 
     fn preview_permission(id: &str, preview: Value) -> Value {
@@ -6680,6 +6928,51 @@ mod tests {
 
     fn ctrl_c(c: &mut Controller) -> Vec<Action> {
         c.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+    }
+
+    #[test]
+    fn keymap_ctrl_d_keeps_empty_input_open_and_ctrl_q_still_quits() {
+        for working in [false, true] {
+            let mut c = ready();
+            c.state.session_id = Some("saved".into());
+            if working {
+                c.input("work".into());
+                c.input("queued".into());
+            }
+            assert_eq!(c.state.editor.lines(), &[""]);
+            assert!(c
+                .key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+                .is_empty());
+            assert!(!c.is_exiting());
+            assert!(!c.cancelled);
+            assert!(!c.state.queue_paused);
+            assert_eq!(
+                c.state.phase,
+                if working { Phase::Busy } else { Phase::Ready }
+            );
+            assert_eq!(c.state.queued.len(), usize::from(working));
+
+            let actions = c.key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+            assert!(c.is_exiting());
+            if working {
+                assert!(matches!(
+                    actions.as_slice(),
+                    [Action::Notify {
+                        method: "session/cancel",
+                        ..
+                    }]
+                ));
+            } else {
+                assert!(matches!(
+                    actions.as_slice(),
+                    [Action::Request {
+                        method: "session/close",
+                        pending: Pending::ExitClose,
+                        ..
+                    }]
+                ));
+            }
+        }
     }
 
     #[test]

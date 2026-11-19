@@ -63,13 +63,13 @@ def _make_headless_app():
                 _ingest_queue.task_done()
                 continue
             batch: list[bytes] = [item]
+            barrier: asyncio.Event | None = None
             while len(batch) < _INGEST_MAX_BATCH:
                 try:
                     next_item = _ingest_queue.get_nowait()
                     if isinstance(next_item, asyncio.Event):
-                        next_item.set()
-                        _ingest_queue.task_done()
-                        continue
+                        barrier = next_item
+                        break
                     batch.append(next_item)
                 except asyncio.QueueEmpty:
                     break
@@ -82,6 +82,9 @@ def _make_headless_app():
             finally:
                 for _ in batch:
                     _ingest_queue.task_done()
+                if barrier is not None:
+                    barrier.set()
+                    _ingest_queue.task_done()
 
     @asynccontextmanager
     async def lifespan(app: fastapi.FastAPI):
@@ -90,8 +93,7 @@ def _make_headless_app():
         try:
             yield
         finally:
-            if not _ingest_queue.empty():
-                await _ingest_queue.join()
+            await _ingest_queue.join()
             worker.cancel()
             try:
                 await worker
@@ -231,6 +233,8 @@ class HeadlessOtlpBackend:
         self._port: int | None = None
         self._server = None
         self._thread: threading.Thread | None = None
+        self._previous_db_path: Path | None = None
+        self._previous_db = None
 
     def start(self) -> str:
         """Start the backend. Returns base URL, e.g. 'http://127.0.0.1:54321'."""
@@ -243,7 +247,10 @@ class HeadlessOtlpBackend:
         # Redirect otlp_store to the temp DB before uvicorn opens any connections.
         # Thread-local connections in otlp_store are lazily opened using DB_PATH at
         # first access, so patching here (before the uvicorn thread starts) is safe.
+        self._previous_db_path = otlp_store.DB_PATH
+        self._previous_db = otlp_store._db
         otlp_store.DB_PATH = db_path
+        otlp_store._db = None
 
         import uvicorn
 
@@ -252,7 +259,11 @@ class HeadlessOtlpBackend:
         self._server = uvicorn.Server(config)
         self._thread = threading.Thread(target=self._server.run, daemon=True)
         self._thread.start()
-        self._wait_ready()
+        try:
+            self._wait_ready()
+        except BaseException:
+            self.stop()
+            raise
         return f"http://127.0.0.1:{self._port}"
 
     def _wait_ready(self, timeout: float = 5.0) -> None:
@@ -269,11 +280,19 @@ class HeadlessOtlpBackend:
 
     def stop(self) -> None:
         """Shut down the server and delete the temporary database."""
+        from aster.viewer import otlp_store
+
         if self._server is not None:
             self._server.should_exit = True
         if self._thread is not None:
             self._thread.join(timeout=5)
             if self._thread.is_alive():
-                log.warning("Headless backend thread did not terminate within timeout")
+                raise RuntimeError("Headless backend is still running; its database was preserved")
         if self._tmpdir is not None:
+            db_path = Path(self._tmpdir.name) / "eval_traces.db"
+            otlp_store.close_db(db_path)
+            if otlp_store.DB_PATH == db_path:
+                otlp_store.DB_PATH = self._previous_db_path
+                otlp_store._db = self._previous_db
             self._tmpdir.cleanup()
+            self._tmpdir = None

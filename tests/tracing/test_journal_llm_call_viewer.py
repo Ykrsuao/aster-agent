@@ -56,7 +56,7 @@ def viewer(tmp_path, monkeypatch):
     for tls in (otlp_store._read_tls, otlp_store._write_tls):
         if hasattr(tls, "conn"):
             del tls.conn
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 54321)) as client:
         otlp_store._read_tls.conn = otlp_store._db
         otlp_store._write_tls.conn = otlp_store._db
         yield client, otlp_store

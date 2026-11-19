@@ -27,7 +27,7 @@ def _inferred_root(path: metadata.PackagePath) -> str | None:
 
 
 def _record_matches(
-    distribution: metadata.PathDistribution, record: str, roots: set[str]
+    distribution: metadata.Distribution, record: str, roots: set[str]
 ) -> set[str] | None:
     """Find one existing recorded file per root, or request the stdlib fallback."""
     found: set[str] = set()
@@ -61,6 +61,11 @@ def packages_distributions(roots: set[str]) -> dict[str, list[str]]:
     result: dict[str, list[str]] = {}
     if not roots:
         return result
+    # The backport replaces the stdlib finder when a dependency imports it.
+    path_types = (
+        metadata.PathDistribution,
+        getattr(sys.modules.get("importlib_metadata"), "PathDistribution", None),
+    )
     for distribution in metadata.distributions():
         declared = (distribution.read_text("top_level.txt") or "").split()
         matches: list[str] | set[str] | None
@@ -70,7 +75,7 @@ def packages_distributions(roots: set[str]) -> dict[str, list[str]]:
             matches = [root for root in declared if root in roots]
         else:
             matches = None
-            if type(distribution) is metadata.PathDistribution:
+            if type(distribution) in path_types:
                 record = distribution.read_text("RECORD")
                 if record:
                     matches = _record_matches(distribution, record, roots)

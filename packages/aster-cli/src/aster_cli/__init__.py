@@ -70,6 +70,11 @@ def cli(ctx: click.Context, **terminal_options: object) -> None:
         )
     if ctx.invoked_subcommand in _SKIP_SECRETS_PRELOAD:
         return
+    # Opening a folder must not be enough to use the files inside it. The
+    # terminal command asks about its own workspace before it starts.
+    from aster import workspace_trust
+
+    workspace_trust.enforce()
     # Load secrets.yaml into the process env before any subcommand runs so
     # all commands (config show, eval, …) see the same API keys.
     # Non-clobbering (shell env wins) and best-effort: a broken or missing

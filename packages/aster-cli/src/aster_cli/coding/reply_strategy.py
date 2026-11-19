@@ -10,6 +10,7 @@ values and conditional/helper bodies retain normal CodeAct behavior.
 from __future__ import annotations
 
 import ast
+import copy
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -238,7 +239,9 @@ class CodingReplyStrategy(CodeActStrategy):
             "NeedInput may carry a Python answer_type. self.message remains available for "
             "standalone progress updates. Inspect tool results before writing your final answer.\n\n"
             "## Helpers and delegation\n\n"
-            "Define small helpers at cell level; locals persist across calls. Use agent methods "
+            "Define small helpers at cell level. Locals and imports persist across execute_python "
+            "calls and live steering within the current task. A new task starts a fresh REPL; "
+            "use self.vars or self.v to keep data across tasks. Use agent methods "
             "and bounded subagents when appropriate. For language tasks use model reasoning or "
             "a PredictStrategy helper, not keyword matching. Delegated tasks must be simpler "
             "than the current request.\n\n"
@@ -275,11 +278,26 @@ class CodingReplyStrategy(CodeActStrategy):
             return ExecutionResult(error=ValueError(_REPLY_GUIDANCE))
         control = getattr(runtime.agent, "_execution_control", None)
         if control is not None and not (output_metadata or {}).get("prefill"):
-            reason = await control.authorize(code, tool_call_id=tool_call_id)
-            if reason:
-                return ExecutionResult(error=PermissionError(reason))
+            prepare_file_edit = getattr(control, "file_edit_executor", None)
+            host_path = getattr(session.sandbox_executor, "host_path", None)
+            file_executor = (
+                prepare_file_edit(code, timeout=self.config.cell_timeout, host_path=host_path)
+                if callable(prepare_file_edit)
+                and (session.sandbox_executor is None or callable(host_path))
+                else None
+            )
+            if file_executor is None:
+                reason = await control.authorize(code, tool_call_id=tool_call_id)
+                if reason:
+                    return ExecutionResult(error=PermissionError(reason))
             if feedback := self._tool_boundary_feedback(runtime):
                 return ExecutionResult(error=RuntimeError(feedback))
+            if file_executor is not None:
+                # Keep the runtime's validation, middleware, hooks, and outputs.
+                # This executor handles parsed file operations without evaluating
+                # Python or reading the native/guest REPL's mutable bindings.
+                session = copy.copy(session)
+                session.sandbox_executor = file_executor
         return await super()._execute_code(
             runtime,
             code,

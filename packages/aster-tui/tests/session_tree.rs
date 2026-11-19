@@ -968,7 +968,7 @@ fn rejected_tree_load_restores_background_updates_and_hidden_input() {
     let saved = store.load(scope.as_deref()).unwrap().unwrap();
     assert_eq!(saved.snapshot.composer.text, "unsent 中文 question");
     assert_eq!(saved.snapshot.composer.attachments, vec![attachment]);
-    assert_eq!(saved.snapshot.cursor, cursor);
+    assert_eq!(cursor, saved.snapshot.cursor);
     assert!(store.load(Some("fork")).unwrap().is_none());
 }
 

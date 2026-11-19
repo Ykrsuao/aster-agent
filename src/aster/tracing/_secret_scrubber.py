@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Secret scrubbing for telemetry spans.
 
-Intercepts OpenTelemetry spans before export and redacts any detected
-secrets (API keys, tokens, private keys) from string attributes.
+Intercepts OpenTelemetry spans before export and redacts detected secrets
+from attributes, names, error statuses, and events.
 
 Uses high-precision regex patterns (not entropy-based) to minimize
 false positives on code and log output.
@@ -19,6 +19,8 @@ import json
 import logging
 import re
 import threading
+from collections.abc import Mapping
+from copy import copy
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -275,7 +277,7 @@ def _scrub_value(value: Any) -> tuple[Any, int]:
         if json_count:
             return json.dumps(decoded, separators=(",", ":"), ensure_ascii=False), json_count
         return value, 0
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         scrubbed_mapping: dict[Any, Any] = {}
         count = 0
         is_thinking = value.get("type") == "thinking"
@@ -288,8 +290,9 @@ def _scrub_value(value: Any) -> tuple[Any, int]:
                 reason = "opaque_provider_state"
             if reason is not None:
                 scrubbed_mapping[key] = REDACTED
-                stats.record(reason)
-                count += 1
+                if not (isinstance(item, str) and item == REDACTED):
+                    stats.record(reason)
+                    count += 1
             else:
                 scrubbed_mapping[key], n = _scrub_value(item)
                 count += n
@@ -309,10 +312,58 @@ def _scrub_value(value: Any) -> tuple[Any, int]:
 # OpenTelemetry SpanProcessor
 # ---------------------------------------------------------------------------
 try:
+    from opentelemetry.attributes import BoundedAttributes
     from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor
+    from opentelemetry.sdk.util import BoundedList
+    from opentelemetry.trace import Status
+
+    def _scrub_span(span: ReadableSpan) -> ReadableSpan:
+        attributes, redacted_count = scrub_value(dict(span.attributes or {}))
+        name, count = scrub_value(span.name)
+        redacted_count += count
+
+        status = span.status
+        if status.description:
+            description, count = scrub_value(status.description)
+            if count:
+                status = Status(status.status_code, description)
+                redacted_count += count
+
+        events = []
+        events_redacted = 0
+        for event in span.events:
+            event_name, name_count = scrub_value(event.name)
+            event_attributes, attribute_count = scrub_value(dict(event.attributes or {}))
+            if name_count or attribute_count:
+                scrubbed_event = copy(event)
+                scrubbed_event._name = event_name
+                if attribute_count:
+                    scrubbed_event._attributes = BoundedAttributes(attributes=event_attributes)
+                    scrubbed_event._attributes.dropped = event.dropped_attributes
+                event = scrubbed_event
+                events_redacted += name_count + attribute_count
+            events.append(event)
+        redacted_count += events_redacted
+
+        if not redacted_count:
+            return span
+
+        # Exporters can run concurrently; never mutate their shared ReadableSpan.
+        scrubbed = copy(span)
+        scrubbed._name = name
+        scrubbed._status = status
+        attributes["secrets.redacted_count"] = redacted_count
+        scrubbed._attributes = BoundedAttributes(attributes=attributes)
+        scrubbed._attributes.dropped = span.dropped_attributes
+        if events_redacted:
+            scrubbed._events = BoundedList.from_seq(None, events)
+            scrubbed._events.dropped = span.dropped_events
+        stats.record_span()
+        logger.debug("Scrubbed %d secrets from span %s", redacted_count, name)
+        return scrubbed
 
     class SecretScrubSpanProcessor(SpanProcessor):
-        """Wraps another SpanProcessor, scrubbing secrets from span attributes.
+        """Scrub span content before passing it to another SpanProcessor.
 
         Also adds ``secrets.redacted_count`` to each span that had secrets,
         for observability into how often scrubbing fires.
@@ -330,38 +381,13 @@ try:
             self._inner.on_start(span, parent_context)
 
         def on_end(self, span: ReadableSpan) -> None:
-            if span.attributes:
-                scrubbed: dict[str, Any] = {}
-                redacted_count = 0
-
-                for key, value in span.attributes.items():
-                    if reason := _redact_key(key):
-                        new_value, n = REDACTED, 1
-                        stats.record(reason)
-                    else:
-                        new_value, n = scrub_value(value)
-                    scrubbed[key] = new_value
-                    redacted_count += n
-
-                if redacted_count > 0:
-                    stats.record_span()
-                    scrubbed["secrets.redacted_count"] = redacted_count
-                    if hasattr(span, "_attributes"):
-                        span._attributes = scrubbed  # type: ignore[attr-defined]
-                        logger.debug(
-                            "Scrubbed %d secrets from span %s",
-                            redacted_count,
-                            span.name,
-                        )
-                    else:
-                        logger.warning(
-                            "SecretScrubSpanProcessor: span._attributes not found; "
-                            "%d secret(s) may be exported in span %s",
-                            redacted_count,
-                            span.name,
-                        )
-
-            self._inner.on_end(span)
+            try:
+                scrubbed = _scrub_span(span)
+            except Exception:
+                # Neither the raw span nor an exception containing it may leave this boundary.
+                logger.warning("Dropped telemetry span because secret scrubbing failed")
+                return
+            self._inner.on_end(scrubbed)
 
         def shutdown(self) -> None:
             self._inner.shutdown()

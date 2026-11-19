@@ -62,8 +62,9 @@ class TestEvaluatorCreation:
         assert evaluator.models == {}
         assert evaluator.tests == {}
 
-    def test_create_with_models(self):
+    def test_create_with_models(self, monkeypatch, tmp_path):
         """Can create evaluator with models dict."""
+        monkeypatch.chdir(tmp_path)
         client = MockClient()
         evaluator = Evaluator(
             models={"gpt-4": client},
@@ -72,7 +73,7 @@ class TestEvaluatorCreation:
         )
         assert "gpt-4" in evaluator.models
         assert evaluator.models["gpt-4"] is client
-        assert evaluator.output_dir == Path("experiments")
+        assert evaluator.output_dir == tmp_path / "experiments"
         assert evaluator.name == "test_eval"
 
     def test_create_with_multiple_models(self):

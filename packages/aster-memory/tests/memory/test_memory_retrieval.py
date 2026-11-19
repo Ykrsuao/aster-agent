@@ -52,6 +52,38 @@ def test_recall_touches_returned_memories(store, emb):
     assert store.get(m.id).access_count == 1
 
 
+@pytest.mark.parametrize("change", ["update", "archive", "delete"])
+def test_recall_does_not_overwrite_changes_after_ranking(store, emb, monkeypatch, change):
+    memory = _add(store, emb, "deployment uses old host")
+    engine = RetrievalEngine(store, emb, RetrievalConfig())
+    pipeline = engine._pipeline
+
+    def rank_then_change(*args, **kwargs):
+        result = pipeline(*args, **kwargs)
+        if change == "update":
+            current = store.get(memory.id)
+            current.content = "deployment uses NEW host"
+            current.add_edge("new-edge", EdgeType.RELATED)
+            store.add(current, emb.embed(current.embedding_text()))
+        elif change == "archive":
+            store.archive(memory.id)
+        else:
+            store.delete(memory.id)
+        return result
+
+    monkeypatch.setattr(engine, "_pipeline", rank_then_change)
+    result = engine.recall("deployment", k=1)
+    saved = store.get(memory.id)
+    if change == "update":
+        assert saved.content == "deployment uses NEW host"
+        assert saved.recalled_count == 1
+        assert saved.edges[0].target_id == "new-edge"
+        assert result[0].content == saved.content
+    else:
+        assert result == []
+        assert saved is None if change == "delete" else saved.archived
+
+
 def test_recall_no_touch_leaves_access_count(store, emb):
     m = _add(store, emb, "do not touch me")
     eng = RetrievalEngine(store, emb, RetrievalConfig())

@@ -16,6 +16,7 @@ never touch the real user config directory.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -145,7 +146,12 @@ class TestDedup:
         target = tmp_path / "target.yaml"
         _write_yaml(target)
         link = user_dir / "llm_config.yaml"
-        link.symlink_to(target)
+        try:
+            link.symlink_to(target)
+        except OSError as exc:
+            if os.name == "nt" and exc.winerror == 1314:
+                pytest.skip("This Windows process lacks symbolic-link creation permission")
+            raise
         monkeypatch.setenv("ASTER_LLM_CONFIG", str(target))
         chain = llm_config_chain()
         # Symlinked user-dir entry resolves to the same real path as

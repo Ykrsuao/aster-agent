@@ -25,7 +25,7 @@ from typing import Any, cast
 
 from aster.errors.formatting import _hard_bound_text
 from aster.events import ExecutionResult
-from aster.runtime.sandbox import wire
+from aster.runtime.sandbox import broker_policy, wire
 from aster.runtime.sandbox.bootstrap import describe_call, dumps_namespace
 from aster.runtime.sandbox.config import SandboxConfig
 from aster.runtime.sandbox.dependencies import packages_distributions
@@ -116,8 +116,18 @@ class SandboxedExecutor:
     ) -> None:
         self._agent = agent
         self._config = config
+        windows = sys.platform == "win32"
+        entries = []
+        self._guest_cwd = "/"
         if config.workspace:
             Path(config.workspace).mkdir(parents=True, exist_ok=True)
+            host = str(Path(config.workspace).absolute())
+            self._guest_cwd = "/workspace" if windows else host
+            entries.append((host, self._guest_cwd))
+        for index, rule in enumerate(config.allow):
+            host = str(Path(rule.path).absolute())
+            entries.append((host, f"/allowed/{index}" if windows else host))
+        self._paths = PathMap(entries, windows=windows)
         self._cell_timeout = cell_timeout
         self._framework_builtins = framework_builtins or {}
         self._restrictions = restrictions
@@ -126,7 +136,7 @@ class SandboxedExecutor:
         from aster.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
 
         self._truncation = truncation_config or DEFAULT_TRUNCATION_CONFIG
-        self._codec = wire.Codec(wire.agent_types(agent))
+        self._codec = wire.Codec(wire.agent_types(agent), path_transform=self.host_path)
         self._lock = asyncio.Lock()
         self._closed = self._disabled = False
         self._vm: Any = None
@@ -145,8 +155,15 @@ class SandboxedExecutor:
         self._watchdog: asyncio.Task[None] | None = None
         self._resource_error: Exception | None = None
         self._diagnostic = ""
-        self._guest_cwd = "/"
         self._degraded: list[str] = []
+
+    def host_path(self, path: str) -> str:
+        """Translate a guest file path for host tools without starting the VM.
+
+        Relative paths and paths outside the configured guest mounts are kept
+        unchanged. The same mapping is used by the guest's tool-call broker.
+        """
+        return self._paths.to_host(path)
 
     @property
     def degraded_guards(self) -> list[str]:
@@ -297,36 +314,36 @@ class SandboxedExecutor:
 
     def _mounts(self, sdk: Any) -> dict[str, Any]:
         self._guest_allow = []
-        entries = []
+        entries = iter(self._paths.entries)
         mounts = {
             "/opt/aster-src/aster": sdk.Volume.bind(
                 str(Path(__file__).resolve().parents[2]), readonly=True
             )
         }
+        framework_paths = list(mounts)
         if self._config.workspace:
-            host = Path(self._config.workspace).absolute()
-            host.mkdir(parents=True, exist_ok=True)
-            self._guest_cwd = str(host) if sys.platform != "win32" else "/workspace"
-            mounts[self._guest_cwd] = sdk.Volume.bind(str(host), uid=1000, gid=1000)
-            entries.append((str(host), self._guest_cwd))
-        for index, rule in enumerate(self._config.allow):
-            host = Path(rule.path).absolute()
-            if not host.exists():
+            host, guest = next(entries)
+            Path(host).mkdir(parents=True, exist_ok=True)
+            mounts[guest] = sdk.Volume.bind(host, uid=1000, gid=1000)
+        for (host, guest), rule in zip(entries, self._config.allow, strict=True):
+            if not Path(host).exists():
                 raise SandboxUnavailable(f"sandbox allow path does not exist: {host}")
-            guest = str(host) if sys.platform != "win32" else f"/allowed/{index}"
             mounts[guest] = sdk.Volume.bind(
-                str(host), readonly=rule.access == "read", uid=1000, gid=1000
+                host, readonly=rule.access == "read", uid=1000, gid=1000
             )
             self._guest_allow.append({"path": guest, "access": rule.access})
-            entries.append((str(host), guest))
         for package in ("aster_memory", "aster_acp", "aster_cli", "aster_bench"):
             spec = importlib.util.find_spec(package)
             if spec and spec.submodule_search_locations:
-                mounts[f"/opt/aster-src/{package}"] = sdk.Volume.bind(
+                guest = f"/opt/aster-src/{package}"
+                mounts[guest] = sdk.Volume.bind(
                     str(next(iter(spec.submodule_search_locations))), readonly=True
                 )
-        self._paths = PathMap(entries, windows=sys.platform == "win32")
-        self._codec.path_transform = self._paths.to_host
+                framework_paths.append(guest)
+        if self._config.system_paths:
+            # The jail's /opt bind does not carry nested mounts. Retain each
+            # framework source mount explicitly so lazy imports remain readable.
+            self._guest_allow.extend({"path": guest, "access": "read"} for guest in framework_paths)
         return mounts
 
     def _modules(self) -> list[Any]:
@@ -363,6 +380,13 @@ class SandboxedExecutor:
             *type(self._agent).__mro__,
             *self._codec.types.values(),
             *filter_mro_module_globals(type(self._agent)).values(),
+            # CodeAct exposes dynamically loaded tool classes through builtins,
+            # without adding them to the agent's defining module.
+            *(
+                value
+                for name, value in self._framework_builtins.items()
+                if name not in {"return_result", "_call", "python_cell_state"}
+            ),
         ]
         while values:
             value = values.pop()
@@ -734,7 +758,12 @@ class SandboxedExecutor:
 
         functions: dict[str, Any] = {"doc": doc, "methods": methods, "variables": variables}
         path = message.get("path")
-        if not isinstance(path, list) or len(path) != 1 or path[0] not in functions:
+        if (
+            not isinstance(path, list)
+            or not path
+            or not all(isinstance(part, str) for part in path)
+            or path[0] not in functions
+        ):
             raise CellSerializationError("invalid sandbox introspection request")
         payload = message.get("payload")
         if not isinstance(payload, bytes):
@@ -748,7 +777,15 @@ class SandboxedExecutor:
         ):
             raise CellSerializationError("malformed sandbox introspection arguments")
         args, kwargs = value
-        return {"ok": True, "result": functions[path[0]](self._agent, *args, **kwargs)}
+        try:
+            target = self._walk_path(path[1:])
+            return {"ok": True, "result": functions[path[0]](target, *args, **kwargs)}
+        except Exception as exc:  # A stale target or invalid option must not retire the guest.
+            return {
+                "ok": False,
+                "error_type": _bounded_text(type(exc).__name__, "Exception", limit=self._max_error),
+                "error": _bounded_text(exc, type(exc).__name__, limit=self._max_error),
+            }
 
     @staticmethod
     def _signal_factory(payload: Any) -> Any:
@@ -836,7 +873,7 @@ class SandboxedExecutor:
         did not declare) or a malformed request.
         """
         kind, path = msg.get("kind"), msg.get("path") or []
-        if kind not in ("call", "attr", "setattr", "iter"):
+        if kind not in ("call", "attr", "setattr", "iter", "bool"):
             raise CellSerializationError(f"malformed sandbox broker request: kind {kind!r}")
         if not isinstance(path, list) or not all(isinstance(p, str) for p in path):
             raise CellSerializationError("malformed sandbox broker request: bad path")
@@ -866,18 +903,23 @@ class SandboxedExecutor:
             raise CellSerializationError(f"malformed sandbox broker request for {what}")
         return call
 
-    def _walk_path(self, path: list[str]) -> Any:
-        """Resolve a dotted attribute path (``["memory", "remember"]``) on the agent."""
-        obj: Any = self._agent
-        for part in path:
-            obj = getattr(obj, part)
-        return obj
+    def _walk_path(self, path: list[str], *, operator: bool = False) -> Any:
+        """Resolve a dotted attribute path (``["memory", "remember"]``) on the agent.
+
+        The path comes from the guest, so every segment is checked against what
+        the agent publishes to generated code (see :mod:`broker_policy`).
+        """
+        return broker_policy.resolve(self._agent, path, operator=operator)
 
     async def _dispatch_tool_call(
         self, msg: dict[str, Any], *, parent_error_key: bytes | None = None
     ) -> dict[str, Any]:
         """Run a brokered ``self.<path>`` access against the parent's live agent."""
         from aster.events import ExecutionSignal
+        from aster.interactive import AgentVars
+        from aster.skill import Skill
+        from aster.storage.persistent_vars import PersistentVars
+        from aster.storage.snapshot_vars import SnapshotVars
 
         path = msg.get("path") or []
         display = ".".join(path)
@@ -886,7 +928,10 @@ class SandboxedExecutor:
         try:
             if kind == "setattr":
                 # self.<path> = value on the parent's live agent.
+                if not path:
+                    raise CellSerializationError("malformed sandbox broker request: empty path")
                 obj = self._walk_path(path[:-1])
+                broker_policy.check_member(obj, path[-1], path)
                 setattr(obj, path[-1], msg.get("value"))
                 return {"ok": True, "result": None}
             if kind == "iter":
@@ -902,7 +947,9 @@ class SandboxedExecutor:
                         ),
                     }
                 return {"ok": True, "result": items}
-            target = self._walk_path(path)
+            target = self._walk_path(path, operator=kind == "call")
+            if kind == "bool":
+                return {"ok": True, "result": bool(target)}
             if kind == "attr":
                 if callable(target) and not isinstance(target, type):
                     return {
@@ -913,11 +960,17 @@ class SandboxedExecutor:
                         "is_async": inspect.iscoroutinefunction(target)
                         or inspect.iscoroutinefunction(getattr(target, "__call__", None)),  # noqa: B004 - target is already known callable
                     }
-                # Picklable state crosses; a live object becomes a nested proxy.
+                # These APIs own host state even when their current contents are
+                # picklable. Copying them would silently discard guest writes.
+                if isinstance(target, SnapshotVars | AgentVars | PersistentVars | Skill):
+                    return {"ok": True, "result": None, "proxy": True}
+                # Ordinary data crosses by value; other live objects use a proxy.
                 if is_picklable(target):
                     return {"ok": True, "result": target}
                 return {"ok": True, "result": None, "proxy": True}
-            value = target(*msg.get("args", ()), **msg.get("kwargs", {}))
+            args, kwargs = msg.get("args", ()), msg.get("kwargs", {})
+            broker_policy.check_call(target, path, args, kwargs)
+            value = target(*args, **kwargs)
             # Record whether the call was async so the worker can re-wrap the
             # (already-resolved) result in an awaitable — otherwise a cell doing
             # ``await proxy(...)`` on an async callable reached via a nested proxy

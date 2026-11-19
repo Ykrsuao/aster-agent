@@ -17,9 +17,10 @@ def stubbed_serve(monkeypatch):
     """Capture the llm_factory the command builds instead of serving."""
     captured = {}
 
-    def fake_serve(llm_factory, *, model_factory=None, **options):
+    def fake_serve(llm_factory, *, model_factory=None, model=None, **options):
         captured["llm_factory"] = llm_factory
         captured["model_factory"] = model_factory
+        captured["model"] = model
         captured["options"] = options
         return "coroutine-placeholder"
 
@@ -43,6 +44,7 @@ def test_model_selection_mode_serves_before_a_model_is_selected(monkeypatch, stu
     monkeypatch.delenv("ASTER_MODEL", raising=False)
     result = click.testing.CliRunner().invoke(command, ["--select-model"])
     assert result.exit_code == 0, result.output
+    assert stubbed_serve["model"] is None
     with pytest.raises(ValueError, match="Choose a model"):
         stubbed_serve["llm_factory"]()
 
@@ -60,6 +62,7 @@ def test_model_is_read_from_the_environment(monkeypatch, stubbed_serve):
     assert result.exit_code == 0, result.output
     stubbed_serve["llm_factory"]()
     assert requested["name"] == "openai/gpt-4o-mini"
+    assert stubbed_serve["model"] == "openai/gpt-4o-mini"
 
 
 def test_explicit_flag_overrides_the_environment(monkeypatch, stubbed_serve):
@@ -75,6 +78,7 @@ def test_explicit_flag_overrides_the_environment(monkeypatch, stubbed_serve):
     assert result.exit_code == 0, result.output
     stubbed_serve["llm_factory"]()
     assert requested["name"] == "anthropic/claude-sonnet-4-5"
+    assert stubbed_serve["model"] == "anthropic/claude-sonnet-4-5"
 
 
 def test_sandbox_flag_reaches_server(monkeypatch, stubbed_serve):

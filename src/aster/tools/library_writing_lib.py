@@ -158,14 +158,11 @@ class SkillWriting(Skill):
         self._agent = agent
         self._path = path
         self._path.mkdir(parents=True, exist_ok=True)
-        libs_str = str(self._path)
-        if libs_str not in sys.path:
-            sys.path.insert(0, libs_str)
-        # Discover and register libs via SkillRegistry if available
-        if hasattr(agent, "skills"):
-            agent.skills.discover_libs(self._path)
-            agent.skills.activate(["local.*"])
-        else:
+        # Registry hosts discover libraries after registering their own tools.
+        if not hasattr(agent, "skills"):
+            libs_str = str(self._path)
+            if libs_str not in sys.path:
+                sys.path.insert(0, libs_str)
             LibraryManager.install(self._agent, libs_dir=self._path)
         super().__init__()
 
@@ -278,10 +275,9 @@ class SkillWriting(Skill):
             try:
                 return await self._agent.skills.reload(f"local.{lib_name}")
             except KeyError:
-                # First lint+reload of a brand-new library: it isn't registered
-                # yet, so skills.reload() raises. Fall through to the manager,
-                # which imports and attaches it from disk.
-                pass
+                self._agent.skills.discover_libs(self._path)
+                self._agent.skills.activate([f"local.{lib_name}"])
+                return await self._agent.skills.reload(f"local.{lib_name}")
         mgr = LibraryManager(self._agent, self._path)
         mgr._reload(lib_name)
         return f"Reloaded local.{lib_name}"
@@ -319,11 +315,25 @@ class SkillWriting(Skill):
 
         shell = self._agent.shell
         tests_dir = self._path / lib_name / "tests"
-        result = await shell.run(
-            f"PYTHONPATH={shlex.quote(str(self._path))}${{PYTHONPATH:+:$PYTHONPATH}} "
-            f"{shlex.quote(_sys.executable)} -m pytest {shlex.quote(str(tests_dir))} -v",
-            timeout=60,
-        )
+        if _sys.platform == "win32":
+            libraries, python, tests = (
+                "'" + str(path).replace("'", "''") + "'"
+                for path in (self._path, _sys.executable, tests_dir)
+            )
+            # The shell persists, so restore its environment even when pytest fails.
+            command = (
+                "& { $asterTestPythonPath = [Environment]::GetEnvironmentVariable('PYTHONPATH'); "
+                f"try {{ $env:PYTHONPATH = {libraries}; "
+                "if ($asterTestPythonPath) { $env:PYTHONPATH += ';' + $asterTestPythonPath }; "
+                f"& {python} -m pytest {tests} -v "
+                "} finally { $env:PYTHONPATH = $asterTestPythonPath } }"
+            )
+        else:
+            command = (
+                f"PYTHONPATH={shlex.quote(str(self._path))}${{PYTHONPATH:+:$PYTHONPATH}} "
+                f"{shlex.quote(_sys.executable)} -m pytest {shlex.quote(str(tests_dir))} -v"
+            )
+        result = await shell.run(command, timeout=60)
         return str(result)
 
     # ------------------------------------------------------------------
