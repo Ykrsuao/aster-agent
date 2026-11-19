@@ -212,7 +212,7 @@ async def test_custom_formatter_receives_worker_rendered_diagnostic():
 
             assert isinstance(error, SandboxExecutionError)
             assert isinstance(error.original_error, ValueError)
-            assert line_offset > 0
+            assert line_offset == 0  # AST wrapping retains the cell's source coordinates.
             assert max_error is not None
             return "CUSTOM\n" + error.diagnostic
 
