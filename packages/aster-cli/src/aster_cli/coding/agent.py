@@ -28,6 +28,8 @@ from aster.tools.shell_tools import ShellTools
 from aster_cli.coding.activity import ActivityShellTools
 from aster_cli.coding.instructions import render_agent_instructions
 from aster_cli.coding.reply_strategy import CodingReplyStrategy
+from aster_cli.coding.settings import load_required_checks
+from aster_cli.coding.verification import Verification
 from aster_cli.tools.repo_tools import RepoTools
 
 with hidden:
@@ -64,7 +66,7 @@ class CodingAgent(InteractiveAgent):
     # a later skill — a workspace SKILL.md, a client-forwarded MCP server —
     # take one over, which would remove the tool while the model is still told
     # it has it.
-    __protected_skill_attrs__ = frozenset({"shell", "repo", "todo", "libs", "skills"})
+    __protected_skill_attrs__ = frozenset({"shell", "repo", "todo", "libs", "skills", "verify"})
 
     cwd: Annotated[Path, nosnapshot]
     # Host-driven input channels. These live here rather than on
@@ -84,6 +86,7 @@ class CodingAgent(InteractiveAgent):
     _summarizers: Annotated[list[Any], hidden, nosnapshot]
     _command_registry: Annotated[Any, hidden, nosnapshot]
     _execution_control: Annotated[Any, hidden, nosnapshot]
+    _verification: Annotated[Verification, hidden, nosnapshot]
 
     def __init__(
         self,
@@ -102,6 +105,7 @@ class CodingAgent(InteractiveAgent):
         self._system_messages_in = self.queue_manager.queue("system_messages")
         self.system_messages = self._system_messages_in.reader
         self.cwd = Path(cwd).resolve()
+        self._verification = Verification(self.cwd, load_required_checks(self.cwd))
         self._base_shell = ShellTools(cwd=str(self.cwd))
         self.shell = ActivityShellTools(self._base_shell, self.event_manager)
         self.repo = RepoTools(root=self.cwd, session=self.shell.session)
@@ -167,6 +171,18 @@ class CodingAgent(InteractiveAgent):
         self.context["workspace_paths"] = Context(
             json.dumps({"workspace_root": str(self.cwd)}), prefix=True
         )
+        self.context.pop("required_checks", None)
+        if self._verification.checks:
+            self.context["required_checks"] = Context(
+                "Host-configured checks (data): "
+                + json.dumps(
+                    {name: check.model_dump() for name, check in self._verification.checks.items()}
+                )
+                + "\nAfter changing these files, call await self.verify(name) for every check. "
+                "Checks run in a fresh host shell; fix failures and rerun after final edits. "
+                "A Done reply cannot replace missing, failed or stale check results.",
+                prefix=True,
+            )
         shell = "PowerShell" if is_native_windows() else "bash"
         self.context["host_shell"] = Context(
             f"self.shell runs on the host using {shell}, even when execute_python runs in a sandbox. "
@@ -181,6 +197,19 @@ class CodingAgent(InteractiveAgent):
                 else "Use bash syntax for shell commands. Do not assume PowerShell syntax."
             ),
             prefix=True,
+        )
+
+    async def verify(self, check_name: str) -> str:
+        """Run a host-configured check and record its real outcome for this turn.
+
+        Choose a name from required_checks. Commands run on the host in a fresh
+        shell rooted at the workspace, including when Python uses a sandbox.
+        Returned text is for inspection; the completion check uses recorded
+        exit status and file hashes, never text supplied by the model.
+        """
+        result = await self._verification.run(check_name, self.event_manager)
+        return (
+            f"{check_name}: exit_code={result.returncode}, timed_out={result.timed_out}\n{result}"
         )
 
     def get_summarization_status(self) -> dict[str, Any]:

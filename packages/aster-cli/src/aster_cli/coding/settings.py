@@ -85,6 +85,28 @@ def load_coding_skills_dirs(
     return result
 
 
+def load_required_checks(workspace: str | Path) -> dict[str, Any]:
+    """Load coding checks through existing settings layers; reject invalid declarations."""
+    from aster_cli.coding.verification import RequiredCheck
+
+    root = Path(workspace).expanduser().resolve()
+    settings = load_layered_yaml(_SETTINGS_FILENAME, _SETTINGS_ENV_VAR, project_dir=root / ".aster")
+    coding = settings.get("coding")
+    if coding is None:
+        return {}
+    if not isinstance(coding, Mapping):
+        raise ValueError("coding settings must be a mapping")
+    checks = coding.get("required_checks", {})
+    if not isinstance(checks, Mapping):
+        raise ValueError("coding.required_checks must be a mapping")
+    result = {}
+    for name, value in checks.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("required check names must be nonblank strings")
+        result[name] = RequiredCheck.model_validate(value)
+    return result
+
+
 def _setting_paths(settings: Mapping[str, Any], section: str) -> list[str | Path]:
     value = settings.get(section)
     if not isinstance(value, Mapping):
@@ -137,4 +159,4 @@ def _legacy_project_paths(path: Path) -> list[str | Path]:
     return [item for item in value if isinstance(item, str)]
 
 
-__all__ = ["load_coding_skills_dirs"]
+__all__ = ["load_coding_skills_dirs", "load_required_checks"]

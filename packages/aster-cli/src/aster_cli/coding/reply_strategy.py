@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from aster.events import ExecutionResult
 from aster.strategies.codeact import CodeActStrategy
 from aster_cli.coding.steering import current_steering
+from aster_cli.coding.verification import begin_verification, require_verification
 
 if TYPE_CHECKING:
     from aster.strategies.base import RuntimeServices
@@ -166,6 +167,26 @@ def _has_plain_final_reply(code: str) -> bool:
 
 class CodingReplyStrategy(CodeActStrategy):
     """CodeAct with a dedicated route for newly written final-answer prose."""
+
+    def __init__(self, config=None, **kwargs):
+        from aster.config import CodeActConfig
+
+        config = config or CodeActConfig()
+        config = config.model_copy(
+            update={
+                "preconditions": (
+                    config.preconditions
+                    if any(item is begin_verification for item in config.preconditions)
+                    else (*config.preconditions, begin_verification)
+                ),
+                "postconditions": (
+                    config.postconditions
+                    if any(item is require_verification for item in config.postconditions)
+                    else (*config.postconditions, require_verification)
+                ),
+            }
+        )
+        super().__init__(config=config, **kwargs)
 
     def _tool_boundary_feedback(self, runtime: RuntimeServices) -> str | None:
         control = current_steering(runtime)

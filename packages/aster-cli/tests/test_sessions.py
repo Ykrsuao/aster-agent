@@ -456,3 +456,271 @@ def test_reads_legacy_tui_session_events(tmp_path):
         ("user", "old user"),
         ("agent", "old agent"),
     ]
+
+
+def _append_raw_session_events(path, events):
+    """Insert raw SQLite values without going through the event serializer."""
+    connection = sqlite3.connect(path)
+    try:
+        with connection:
+            order = connection.execute("SELECT MAX(insertion_order) FROM events").fetchone()[0]
+            for offset, (event_type, data) in enumerate(events, start=1):
+                tag = f"raw-{order + offset}"
+                connection.execute(
+                    "INSERT INTO events (tag, event_id, event_type, data, insertion_order) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (tag, tag, event_type, data, order + offset),
+                )
+    finally:
+        connection.close()
+
+
+def _session_files_snapshot(root):
+    return {path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in root.glob("*.db")}
+
+
+@pytest.mark.parametrize("payload", [b"\xff", b'{"model":"\xff"}', b"{", "{", "[]"])
+def test_undecodable_start_is_invalid_without_hiding_healthy_sessions(tmp_path, payload):
+    store = SessionStore(tmp_path)
+    with store.create(session_id="healthy", model="test/model"):
+        pass
+    with store.create(session_id="bad-start"):
+        pass
+    connection = sqlite3.connect(store.path_for("bad-start"))
+    try:
+        with connection:
+            connection.execute(
+                "UPDATE events SET data = ? WHERE event_type = 'SessionStarted'", (payload,)
+            )
+    finally:
+        connection.close()
+    before = _session_files_snapshot(tmp_path)
+
+    assert [info.id for info in store.list()] == ["healthy"]
+    assert store.get("healthy").model == "test/model"
+    for operation in (store.get, store.open):
+        with pytest.raises(SessionNotFoundError):
+            operation("bad-start")
+    assert _session_files_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("payload", [b"\xff", b'{"content":"\xff"}', b"{", "{", "[]"])
+def test_corrupt_events_only_skip_the_affected_metadata_and_history(tmp_path, payload):
+    store = SessionStore(tmp_path)
+    with store.create(session_id="mixed", model="模型/café") as session:
+        session.set_title("保留的标题 🌟", user_set=True)
+        session.record_user_message("有效问题")
+    _append_raw_session_events(
+        store.path_for("mixed"),
+        [
+            ("SessionTitleUpdated", payload),
+            ("SessionUserMessage", payload),
+            ("AgentMessage", payload),
+            ("SessionActivity", payload),
+            ("AgentMessage", json.dumps({"content": "有效回答 🌟"}, ensure_ascii=False)),
+            (
+                "SessionActivity",
+                json.dumps(
+                    {"activity": {"event_type": "FileEdit", "path": "文件.py"}}, ensure_ascii=False
+                ),
+            ),
+            # Exercise the last-event metadata decoder as well.
+            ("SessionTitleUpdated", payload),
+        ],
+    )
+    before = _session_files_snapshot(tmp_path)
+
+    info = store.get("mixed")
+    assert info.model == "模型/café"
+    assert info.title == "保留的标题 🌟"
+    assert info.title_is_user_set is True
+    # Summary counts remain SQL-based, including unreadable user event payloads.
+    assert info.turn_count == 2
+    assert store.list() == [info]
+    assert [(turn.role, turn.content) for turn in store.load_turns("mixed")] == [
+        ("user", "有效问题"),
+        ("agent", "有效回答 🌟"),
+    ]
+    transcript = store.load_transcript("mixed")
+    assert [event.event_type for event in transcript] == [
+        "SessionUserMessage",
+        "AgentMessage",
+        "FileEdit",
+    ]
+    assert transcript[0].data["content"] == "有效问题"
+    assert transcript[1].data == {"content": "有效回答 🌟"}
+    assert transcript[2].data == {"event_type": "FileEdit", "path": "文件.py"}
+    assert _session_files_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "encoding",
+    [
+        None,
+        "utf-8",
+        "utf-8-sig",
+        "utf-16",
+        "utf-16-le",
+        "utf-16-be",
+        "utf-32",
+        "utf-32-le",
+        "utf-32-be",
+    ],
+)
+def test_sqlite_readers_preserve_supported_json_encodings(tmp_path, encoding):
+    store = SessionStore(tmp_path)
+    with store.create(session_id="encoded"):
+        pass
+
+    def encode(data):
+        text = json.dumps(data, ensure_ascii=False)
+        return text if encoding is None else text.encode(encoding)
+
+    connection = sqlite3.connect(store.path_for("encoded"))
+    try:
+        with connection:
+            connection.execute(
+                "UPDATE events SET data = ? WHERE event_type = 'SessionStarted'",
+                (
+                    encode(
+                        {
+                            "model": "模型/café",
+                            "agent": "助手",
+                            "working_directory": "工作区",
+                            "timestamp": 123.0,
+                        }
+                    ),
+                ),
+            )
+    finally:
+        connection.close()
+    _append_raw_session_events(
+        store.path_for("encoded"),
+        [
+            ("SessionTitleUpdated", encode({"title": "会话 🌟", "user_set": True})),
+            ("SessionUserMessage", encode({"content": "你好 🌟", "timestamp": 124.0})),
+            ("AgentMessage", encode({"content": "réponse", "timestamp": 125.0})),
+        ],
+    )
+    before = _session_files_snapshot(tmp_path)
+
+    info = store.get("encoded")
+    assert info.model == "模型/café"
+    assert info.agent == "助手"
+    assert info.working_directory == "工作区"
+    assert info.started_at == 123.0
+    assert info.title == "会话 🌟"
+    assert info.title_is_user_set is True
+    assert info.turn_count == 1
+    assert store.list() == [info]
+    assert [(turn.content, turn.timestamp) for turn in store.load_turns("encoded")] == [
+        ("你好 🌟", 124.0),
+        ("réponse", 125.0),
+    ]
+    assert [event.data["content"] for event in store.load_transcript("encoded")] == [
+        "你好 🌟",
+        "réponse",
+    ]
+    assert _session_files_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {},
+        *(
+            {"timestamp": value}
+            for value in (
+                None,
+                "not-a-date",
+                "1e100",
+                True,
+                False,
+                [],
+                {},
+                float("nan"),
+                float("inf"),
+                float("-inf"),
+                1e100,
+                -1e100,
+                10**400,
+                -(10**400),
+                253402300800,
+                -62135596801,
+                "0001-01-01T00:00:00+01:00",
+                "9999-12-31T23:59:59-01:00",
+            )
+        ),
+    ],
+)
+def test_unusable_saved_timestamps_fall_back_without_dropping_records(
+    tmp_path, monkeypatch, fields
+):
+    store = SessionStore(tmp_path)
+    with store.create(session_id="healthy"):
+        pass
+    with store.create(session_id="imported"):
+        pass
+    connection = sqlite3.connect(store.path_for("imported"))
+    try:
+        with connection:
+            connection.execute(
+                "UPDATE events SET data = ? WHERE event_type = 'SessionStarted'",
+                (json.dumps({"model": "saved/model", **fields}),),
+            )
+    finally:
+        connection.close()
+    _append_raw_session_events(
+        store.path_for("imported"),
+        [
+            ("SessionUserMessage", json.dumps({"content": "kept input", **fields})),
+            ("AgentMessage", json.dumps({"content": "kept reply", **fields})),
+        ],
+    )
+    fallback = store.path_for("imported").stat().st_mtime
+    monkeypatch.setattr(store_module.time, "time", lambda: 1700000000.25)
+    before = _session_files_snapshot(tmp_path)
+
+    info = store.get("imported")
+    assert info.started_at == info.last_active == fallback
+    assert info.model == "saved/model" and info.turn_count == 1
+    assert {session.id for session in store.list()} == {"healthy", "imported"}
+    assert [(turn.role, turn.content, turn.timestamp) for turn in store.load_turns("imported")] == [
+        ("user", "kept input", 1700000000.25),
+        ("agent", "kept reply", 1700000000.25),
+    ]
+    assert _session_files_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (1700000000, 1700000000.0),
+        (1700000000.125, 1700000000.125),
+        ("2023-11-15T03:43:20.125+05:30", 1700000000.125),
+        ("2023-11-14T22:13:20Z", 1700000000.0),
+    ],
+)
+def test_saved_valid_timestamps_keep_original_epoch(tmp_path, value, expected):
+    store = SessionStore(tmp_path)
+    with store.create(session_id="dated"):
+        pass
+    connection = sqlite3.connect(store.path_for("dated"))
+    try:
+        with connection:
+            connection.execute(
+                "UPDATE events SET data = ? WHERE event_type = 'SessionStarted'",
+                (json.dumps({"timestamp": value}),),
+            )
+    finally:
+        connection.close()
+    _append_raw_session_events(
+        store.path_for("dated"),
+        [("SessionUserMessage", json.dumps({"content": "historical input", "timestamp": value}))],
+    )
+    before = _session_files_snapshot(tmp_path)
+    info = store.get("dated")
+    assert info.started_at == expected
+    assert info.last_active == max(store.path_for("dated").stat().st_mtime, expected)
+    assert store.load_turns("dated")[0].timestamp == expected
+    assert _session_files_snapshot(tmp_path) == before

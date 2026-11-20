@@ -6,11 +6,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING, Literal
@@ -572,7 +573,7 @@ class SessionStore:
             return None
         try:
             raw = json.loads(data)
-        except (TypeError, json.JSONDecodeError):
+        except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
             logger.debug("Skipping corrupt session event in %s", path, exc_info=True)
             return None
         return raw if isinstance(raw, dict) else None
@@ -615,14 +616,23 @@ class SessionStore:
     @staticmethod
     def _timestamp(raw: dict[str, object], *, fallback: float) -> float:
         value = raw.get("timestamp")
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            try:
-                return datetime.fromisoformat(value).timestamp()
-            except ValueError:
-                pass
-        return fallback
+        if isinstance(value, bool):
+            return fallback
+        try:
+            if isinstance(value, (int, float)):
+                timestamp = float(value)
+            elif isinstance(value, str):
+                timestamp = datetime.fromisoformat(value).timestamp()
+            else:
+                return fallback
+            if not math.isfinite(timestamp):
+                return fallback
+            # ACP renders these seconds as UTC datetimes. Validate here so all
+            # readers share the same fallback, including oversized JSON ints.
+            datetime.fromtimestamp(timestamp, UTC)
+        except (ValueError, OverflowError, OSError):
+            return fallback
+        return timestamp
 
     @staticmethod
     def _validate_id(session_id: str) -> str:

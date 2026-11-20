@@ -194,6 +194,54 @@ see [sandbox execution](../aster-acp/README.md#sandbox-execution) for its scope.
 
 ## Interactive coding sessions
 
+Trusted hosts can require explicit checks after a coding turn changes specified
+files. Configure them in the existing `.aster/settings.yaml` (or user settings
+and `ASTER_SETTINGS` layers):
+
+```yaml
+coding:
+  required_checks:
+    tests:
+      command: uv run pytest tests/test_example.py
+      files: [src/example.py, tests/test_example.py, pyproject.toml, uv.lock]
+      timeout: 120
+    format:
+      command: uv run ruff format --check src/example.py tests/test_example.py
+      files: [src/example.py, tests/test_example.py, pyproject.toml, uv.lock]
+      timeout: 60
+```
+
+Use commands appropriate to the repository and host shell. `files` is an explicit
+list of workspace-relative regular files, including relevant test and config
+dependencies; a missing file is tracked so additions and deletions invalidate a
+result. Directories, globs and paths outside the workspace are not accepted.
+Settings use the host's existing configuration precedence and trust policy;
+invalid check declarations fail instead of silently disabling verification.
+
+The agent calls `await self.verify("tests")` to run the configured command in a
+fresh host shell at the workspace root. It uses the normal execution approval
+flow, timeout handling and activity events. These are host commands even when
+generated Python runs in a sandbox. Commands should be read-only checks and must
+return a nonzero exit code on failure; use formatter `--check`, not an auto-fix
+command. Check results record actual exit/timeout status and file hashes. A
+failed, skipped or outdated result cannot be replaced by a `Done.evidence` claim.
+
+The existing completion validator requires every configured check to pass on
+the final file contents if the turn changed a listed file or explicitly invoked
+verification. Changes during a check invalidate that result. A pure conversation
+with no listed file changes does not run commands or require checks. No checks
+are enabled by default, and the framework does not guess test tools or file
+dependencies.
+
+Definitions stay fixed for the session; results are not restored from snapshots
+or reused across turns. This first version checks the declared files in the
+current turn, not every historical edit: after reopening or continuing a failed
+turn without further edits, explicitly request `verify` before claiming those
+earlier changes are validated. Background changes after completion and files
+omitted from the configured list are outside this guarantee. This prevents
+accidental completion claims; it is not a security boundary against arbitrary
+agent-generated Python.
+
 `aster_cli.sessions` owns durable coding-agent session identity, metadata, and
 conversation replay shared by CLI hosts such as the native TUI and ACP. The
 process running an agent owns the writable session handle; other hosts attach

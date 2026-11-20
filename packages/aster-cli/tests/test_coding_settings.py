@@ -227,3 +227,101 @@ def test_an_env_override_suppresses_a_legacy_only_workspace(tmp_path, monkeypatc
     (config_dir / "config.toml").write_text(f'[tui]\nlibs_dirs = ["{legacy}"]\n')
 
     assert load_coding_skills_dirs(workspace) == []
+
+
+@pytest.fixture
+def check_settings(tmp_path, monkeypatch):
+    import json
+
+    from aster_cli.coding.settings import load_required_checks
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    project = workspace / ".aster"
+    project.mkdir()
+    monkeypatch.setenv("ASTER_USER_DIR", str(tmp_path / "user-config"))
+    monkeypatch.setenv("ASTER_TRUST_ALL_WORKSPACES", "1")
+    for name in ("ASTER_PROJECT_DIR", "ASTER_SETTINGS"):
+        monkeypatch.delenv(name, raising=False)
+
+    def load(coding):
+        (project / "settings.yaml").write_text(json.dumps({"coding": coding}), encoding="utf-8")
+        return load_required_checks(workspace)
+
+    return workspace, load
+
+
+def test_required_checks_empty_configuration_is_unchanged(check_settings):
+    from aster_cli.coding.settings import load_required_checks
+
+    workspace, load = check_settings
+    assert load_required_checks(workspace) == {}
+    assert load({}) == {}
+    assert load({"required_checks": {}}) == {}
+
+
+def test_required_checks_explicit_settings_keep_layer_precedence(
+    check_settings, tmp_path, monkeypatch
+):
+    import json
+
+    from aster_cli.coding.settings import load_required_checks
+
+    workspace, load = check_settings
+    user = tmp_path / "user-config"
+    user.mkdir()
+    user_checks = {"unit": {"command": "user command", "files": ["user.py"], "timeout": 10}}
+    (user / "settings.yaml").write_text(
+        json.dumps({"coding": {"required_checks": user_checks}}), encoding="utf-8"
+    )
+    load({"required_checks": {"unit": {"command": "workspace command", "files": ["app.py"]}}})
+    assert load_required_checks(workspace)["unit"].command == "workspace command"
+    override = tmp_path / "override.yaml"
+    override.write_text(
+        json.dumps({"coding": {"required_checks": {"unit": {"command": "operator command"}}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ASTER_SETTINGS", str(override))
+    check = load_required_checks(workspace)["unit"]
+    assert (check.command, check.files, check.timeout) == ("operator command", ("app.py",), 10)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"command": ""},
+        {"command": "  "},
+        {"command": "echo\x00invalid"},
+        {"command": 42},
+        {"timeout": 0},
+        {"timeout": -1},
+        {"timeout": True},
+        {"timeout": "10"},
+        {"timeout": float("inf")},
+        {"timeout": float("nan")},
+        {"files": []},
+        {"files": "app.py"},
+        {"files": [""]},
+        {"files": ["../outside.py"]},
+        {"files": ["..\\outside.py"]},
+        {"files": ["/outside.py"]},
+        {"files": ["C:outside.py"]},
+        {"files": ["C:\\outside.py"]},
+        {"files": ["src/*.py"]},
+        {"unexpected": True},
+    ],
+)
+def test_required_checks_reject_invalid_declarations(check_settings, changes):
+    _, load = check_settings
+    check = {"command": "test command", "files": ["app.py"], **changes}
+    with pytest.raises(ValueError):
+        load({"required_checks": {"unit": check}})
+
+
+@pytest.mark.parametrize(
+    "coding", [[], "bad", {"required_checks": []}, {"required_checks": {"": {}}}]
+)
+def test_required_checks_reject_invalid_containers_and_names(check_settings, coding):
+    _, load = check_settings
+    with pytest.raises(ValueError):
+        load(coding)
