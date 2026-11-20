@@ -27,6 +27,7 @@ from aster.runtime.event_manager import EventManager
 from aster.skill import Skill
 from aster.strategy_validation import InvariantError
 from aster.tools import ShellTools
+from aster.tools.shell_tools import ShellResult
 from aster.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
 
@@ -194,6 +195,103 @@ async def test_cancelled_check_clears_previous_pass(tmp_path, monkeypatch):
         await task
     with pytest.raises(InvariantError):
         checks.require_passes()
+
+
+@pytest.fixture
+async def controlled_check_runs(monkeypatch):
+    started = [asyncio.Event(), asyncio.Event()]
+    results = [asyncio.get_running_loop().create_future() for _ in started]
+    pending = iter(zip(started, results, strict=True))
+    tasks = []
+
+    async def controlled_run(*args, **kwargs):
+        entered, result = next(pending)
+        entered.set()
+        return await result
+
+    monkeypatch.setattr("aster_cli.coding.verification.ActivityShellTools.run", controlled_run)
+
+    async def start(checks):
+        index = len(tasks)
+        task = asyncio.create_task(checks.run("tests", EventManager()))
+        tasks.append(task)
+        await asyncio.wait_for(started[index].wait(), timeout=2)
+        return task, results[index]
+
+    try:
+        yield start
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.parametrize("outcome", ["failed", "cancelled"])
+async def test_older_success_cannot_replace_newer_failed_or_cancelled_check(
+    tmp_path, controlled_check_runs, outcome
+):
+    checks = verification(tmp_path)
+    older, older_result = await controlled_check_runs(checks)
+    newer, newer_result = await controlled_check_runs(checks)
+
+    if outcome == "failed":
+        newer_result.set_result(ShellResult("", returncode=7))
+        assert (await newer).returncode == 7
+    else:
+        newer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await newer
+    with pytest.raises(InvariantError, match="tests"):
+        checks.require_passes()
+
+    # The older success arrives only after the newer attempt has finished.
+    assert not older.done()
+    older_result.set_result(ShellResult("", returncode=0))
+    assert (await older).returncode == 0
+    with pytest.raises(InvariantError, match="tests"):
+        checks.require_passes()
+
+
+@pytest.mark.parametrize("older_returncode", [0, 7])
+async def test_newer_success_survives_older_late_result(
+    tmp_path, controlled_check_runs, older_returncode
+):
+    checks = verification(tmp_path)
+    older, older_result = await controlled_check_runs(checks)
+    newer, newer_result = await controlled_check_runs(checks)
+
+    newer_result.set_result(ShellResult("", returncode=0))
+    assert (await newer).returncode == 0
+    checks.require_passes()
+
+    assert not older.done()
+    older_result.set_result(ShellResult("", returncode=older_returncode))
+    assert (await older).returncode == older_returncode
+    checks.require_passes()
+
+
+async def test_previous_turn_pending_check_cannot_satisfy_current_turn(
+    tmp_path, controlled_check_runs
+):
+    checks = verification(tmp_path)
+    older, older_result = await controlled_check_runs(checks)
+    checks.begin("next-turn")
+
+    # Explicitly request verification: an unedited ordinary turn needs no checks.
+    current, current_result = await controlled_check_runs(checks)
+    with pytest.raises(InvariantError, match="tests"):
+        checks.require_passes()
+
+    older_result.set_result(ShellResult("", returncode=0))
+    assert (await older).returncode == 0
+    assert not current.done()
+    with pytest.raises(InvariantError, match="tests"):
+        checks.require_passes()
+
+    current_result.set_result(ShellResult("", returncode=0))
+    assert (await current).returncode == 0
+    checks.require_passes()
 
 
 @pytest.mark.parametrize("checks", [False, True])
