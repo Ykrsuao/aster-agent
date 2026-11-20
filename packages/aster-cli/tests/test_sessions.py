@@ -301,6 +301,42 @@ def test_open_missing_or_invalid_session(tmp_path):
             store.path_for(unsafe)
 
 
+@pytest.mark.parametrize("session_id", ["D:outside", "name:stream", ":leading", "trailing:"])
+@pytest.mark.parametrize("operation", ["path_for", "create", "open", "get", "delete"])
+def test_colon_ids_rejected_before_storage_access(tmp_path, monkeypatch, session_id, operation):
+    store = SessionStore(tmp_path / "not-created")
+
+    def unexpected_access(*args, **kwargs):
+        pytest.fail("Invalid session ID reached filesystem or database access")
+
+    with monkeypatch.context() as guard:
+        guard.setattr(type(store.root), "mkdir", unexpected_access)
+        guard.setattr(type(store.root), "exists", unexpected_access)
+        guard.setattr(store, "_read_info", unexpected_access)
+        guard.setattr(store_module, "SQLiteStorageManager", unexpected_access)
+        guard.setattr(store_module, "delete_sqlite_database", unexpected_access)
+        guard.setattr(store_module.sqlite3, "connect", unexpected_access)
+        with pytest.raises(InvalidSessionIdError):
+            if operation == "create":
+                store.create(session_id=session_id)
+            else:
+                getattr(store, operation)(session_id)
+
+    assert not store.root.exists()
+
+
+@pytest.mark.parametrize("session_id", ["550e8400-e29b-41d4-a716-446655440000", "会话-café"])
+def test_portable_valid_ids_round_trip(tmp_path, session_id):
+    store = SessionStore(tmp_path)
+    assert store.path_for(session_id) == tmp_path / f"{session_id}.db"
+    with store.create(session_id=session_id) as session:
+        assert session.id == session_id
+    assert store.get(session_id).id == session_id
+    with store.open(session_id) as session:
+        assert session.id == session_id
+    assert store.delete(session_id) is True
+
+
 def test_delete_refuses_live_session_then_removes_database_and_sidecars(tmp_path):
     store = SessionStore(tmp_path)
     session = store.create(session_id="delete-me")

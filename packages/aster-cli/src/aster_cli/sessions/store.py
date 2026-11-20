@@ -629,7 +629,7 @@ class SessionStore:
         if (
             not session_id
             or session_id in {".", ".."}
-            or any(separator in session_id for separator in ("/", "\\", "\x00"))
+            or any(separator in session_id for separator in ("/", "\\", "\x00", ":"))
         ):
             raise InvalidSessionIdError(f"Invalid session ID {session_id!r}")
         return session_id

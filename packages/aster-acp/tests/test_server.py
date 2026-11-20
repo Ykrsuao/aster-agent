@@ -1424,6 +1424,26 @@ async def test_adapter_loads_durable_session_when_forwarded_mcp_is_unavailable(t
     await load_adapter.close()
 
 
+@pytest.mark.parametrize("session_id", ["D:outside", "name:stream", ":leading", "trailing:"])
+async def test_adapter_rejects_colon_session_ids_before_read_or_model(tmp_path, session_id):
+    from aster_cli.sessions import SessionStore
+
+    adapter = CodingACPAdapter(_completed_llm)
+    store = SessionStore(tmp_path / "sessions")
+    with (
+        patch.object(adapter, "_store", return_value=store),
+        patch.object(store, "_read_info") as read_info,
+        patch.object(adapter, "_llm_factory") as llm_factory,
+    ):
+        with pytest.raises(RequestError) as error:
+            await adapter.load_session(str(tmp_path), session_id)
+        assert error.value.code == _RESOURCE_NOT_FOUND
+        read_info.assert_not_called()
+        llm_factory.assert_not_called()
+    assert not store.root.exists()
+    await adapter.close()
+
+
 async def test_adapter_reports_unknown_session_on_load(tmp_path):
     client = _RecordingClient()
     adapter = CodingACPAdapter(_completed_llm)
