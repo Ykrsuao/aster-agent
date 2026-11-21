@@ -6,12 +6,16 @@ This module provides tools to replay HTTP requests that were captured
 by enable_http_request_logging() with errors_only=True.
 
 Usage:
-    python -m unifiedllm.replay_requests eval_errors/llm_errors.jsonl
+    uv run python -m aster.unifiedllm.replay_requests eval_errors/llm_errors.jsonl
+
+Custom gateways require an explicit HTTPS origin and credential environment variable:
+    --credential https://gateway.example=GATEWAY_API_KEY
 """
 
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -27,12 +31,16 @@ except ImportError:
 async def replay_request(
     error_entry: dict[str, Any],
     verbose: bool = True,
+    *,
+    credentials: dict[str, str] | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Replay a single request from error log.
 
     Args:
         error_entry: Dictionary with 'request' and 'response' keys from JSONL
         verbose: Print details about each replay
+        credentials: Exact HTTPS origin → API-key environment variable for bearer
+            authentication. Never reuse a gateway key for another origin.
 
     Returns:
         Tuple of (success: bool, response: dict)
@@ -49,40 +57,34 @@ async def replay_request(
     request_data = error_entry["request"]
     original_response = error_entry["response"]
 
-    # Extract API key from environment (don't use the redacted one from the log)
-    headers = dict(request_data["headers"])
+    headers = httpx.Headers(request_data["headers"])
     if "authorization" in headers:
-        # Detect which API key to use based on URL
-        url = request_data["url"]
-        api_key = None
-
-        if "inference-api.nvidia.com" in url:
-            api_key = os.getenv("NVIDIA_INFERENCE_API_KEY") or os.getenv("NVIDIA_INTERNAL_API_KEY")
-        elif "integrate.api.nvidia.com" in url or "nvidia" in url:
-            api_key = os.getenv("NVIDIA_API_KEY")
-        elif "openai.com" in url or "api.openai.com" in url:
-            api_key = os.getenv("OPENAI_API_KEY")
-        elif "anthropic.com" in url:
-            api_key = os.getenv("ANTHROPIC_API_KEY")
+        try:
+            url = httpx.URL(request_data["url"])
+        except httpx.InvalidURL:
+            return False, {"error": "Invalid replay URL"}
+        if url.scheme != "https" or url.userinfo:
+            return False, {"error": "Replay credentials require HTTPS without URL user information"}
+        origin = str(url.copy_with(path="", query=None, fragment=None))
+        if credentials and origin in credentials:
+            env_names = (credentials[origin],)
         else:
-            # Fallback: try common keys
-            api_key = (
-                os.getenv("OPENAI_API_KEY")
-                or os.getenv("NVIDIA_API_KEY")
-                or os.getenv("NVIDIA_INFERENCE_API_KEY")
-                or os.getenv("NVIDIA_INTERNAL_API_KEY")
-                or os.getenv("ANTHROPIC_API_KEY")
-            )
-
-        if api_key:
-            headers["authorization"] = f"Bearer {api_key}"
-        else:
+            env_names = {
+                "https://api.openai.com": ("OPENAI_API_KEY",),
+                "https://api.anthropic.com": ("ANTHROPIC_API_KEY",),
+                "https://integrate.api.nvidia.com": ("NVIDIA_API_KEY",),
+                "https://inference-api.nvidia.com": (
+                    "NVIDIA_INFERENCE_API_KEY",
+                    "NVIDIA_INTERNAL_API_KEY",
+                ),
+            }.get(origin, ())
+        api_key = next((os.environ[name] for name in env_names if os.environ.get(name)), None)
+        if not api_key:
+            error = "No replay credential for this HTTPS origin; use --credential ORIGIN=ENV"
             if verbose:
-                print(f"⚠️  Warning: No API key found for {url}. Replay may fail.")
-                print(
-                    "   Tried: NVIDIA_INFERENCE_API_KEY, NVIDIA_INTERNAL_API_KEY, "
-                    "NVIDIA_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY"
-                )
+                print(f"⚠️  {error}")
+            return False, {"error": error}
+        headers["authorization"] = f"Bearer {api_key}"
 
     if verbose:
         model = error_entry.get("model", "unknown")
@@ -116,8 +118,8 @@ async def replay_request(
 
         except Exception as e:
             if verbose:
-                print(f"   ❌ Exception: {type(e).__name__}: {e}")
-            return False, {"error": str(e)}
+                print(f"   ❌ Exception: {type(e).__name__}")
+            return False, {"error": type(e).__name__}
 
 
 async def replay_from_file(
@@ -125,6 +127,8 @@ async def replay_from_file(
     max_requests: int | None = None,
     delay_seconds: float = 1.0,
     verbose: bool = True,
+    *,
+    credentials: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Replay multiple requests from error log.
 
@@ -133,6 +137,7 @@ async def replay_from_file(
         max_requests: Maximum number of requests to replay (None = all)
         delay_seconds: Delay between requests to avoid rate limits
         verbose: Print details about each replay
+        credentials: Exact HTTPS origin → bearer-key environment variable.
 
     Returns:
         Summary statistics dictionary with keys:
@@ -169,7 +174,7 @@ async def replay_from_file(
         if i > 0 and delay_seconds > 0:
             await asyncio.sleep(delay_seconds)
 
-        success, response = await replay_request(entry, verbose=verbose)
+        success, response = await replay_request(entry, verbose=verbose, credentials=credentials)
 
         if success:
             succeeded += 1
@@ -227,14 +232,45 @@ async def main():
         action="store_true",
         help="Suppress detailed output",
     )
+    parser.add_argument(
+        "--credential",
+        action="append",
+        default=[],
+        metavar="ORIGIN=ENV",
+        help="Bearer-key environment variable for an exact HTTPS origin (repeatable)",
+    )
 
     args = parser.parse_args()
+    import httpx
+
+    credentials = {}
+    for value in args.credential:
+        origin, separator, env_name = value.partition("=")
+        try:
+            url = httpx.URL(origin)
+        except httpx.InvalidURL:
+            parser.error("--credential requires a valid HTTPS origin")
+        if (
+            not separator
+            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env_name)
+            or url.scheme != "https"
+            or not url.host
+            or url.userinfo
+            or url.path not in ("", "/")
+            or url.query
+            or url.fragment
+        ):
+            parser.error(
+                "--credential must be HTTPS_ORIGIN=ENV_NAME, without a path or user information"
+            )
+        credentials[str(url.copy_with(path=""))] = env_name
 
     stats = await replay_from_file(
         error_file=args.error_file,
         max_requests=args.max_requests,
         delay_seconds=args.delay,
         verbose=not args.quiet,
+        credentials=credentials,
     )
 
     # Exit with non-zero if all requests still fail

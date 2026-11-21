@@ -37,8 +37,9 @@ def isolated(monkeypatch, tmp_path):
 
 
 def native_model(manual=False, structured=True, cap=8192, context=32768):
+    # Claude 4.6 accepts both manual and adaptive thinking used by these scenarios.
     return {
-        "id": "claude-opus-4-7",
+        "id": "claude-opus-4-6",
         "max_input_tokens": context,
         "max_tokens": cap,
         "capabilities": {
@@ -58,7 +59,7 @@ def native_model(manual=False, structured=True, cap=8192, context=32768):
 
 def args(path, style="anthropic", reply=4096):
     return [
-        "claude-opus-4-7",
+        "claude-opus-4-6",
         "--as",
         "local",
         "--endpoint",

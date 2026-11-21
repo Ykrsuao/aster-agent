@@ -600,6 +600,45 @@ async def test_python_cell_state_lists_user_created_locals():
 
 
 @pytest.mark.asyncio
+async def test_persistent_locals_keep_user_helpers_without_reusing_call_builtins():
+    fake_llm = FakeLLMClient(
+        scripted_responses=[
+            _response(
+                "import math as cell_math\n"
+                "first_only = 21\n"
+                "def double(value):\n"
+                "    return value * 2\n"
+                "return_result(python_cell_state())",
+                "first",
+            ),
+            _response("second_only = double(cell_math.floor(first_only))", "second"),
+            _response("return_result(python_cell_state())", "inspect"),
+        ],
+        strict_exhaustion=True,
+    )
+
+    class TestAgent(Agent, llm=fake_llm):
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
+        async def answer(self) -> dict:
+            """Inspect the current call's Python state."""
+            ...
+
+    agent = TestAgent()
+    saved = {}
+    try:
+        await agent.answer(_session_locals=saved)
+        result = await agent.answer(_session_locals=saved)
+        assert saved["second_only"] == 42
+        assert result["cell_locals"]["second_only"] == "int"
+        assert result["cell_imports"]["cell_math"] == "math"
+        assert saved["double"](21) == 42
+        assert "python_cell_state" not in saved
+        assert "return_result" not in saved
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
 async def test_python_cell_state_context_bounds_many_values():
     strategy_instance = CodeActV2(config=CodeActConfig(prefill=None))
     call = type(

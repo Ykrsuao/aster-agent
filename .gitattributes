@@ -1,0 +1,3 @@
+# Keep Vite's HTML input and output reproducible on Windows.
+src/aster/viewer/frontend-react/index.html text eol=lf
+src/aster/viewer/frontend-react/dist/index.html text eol=lf

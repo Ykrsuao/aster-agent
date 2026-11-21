@@ -34,6 +34,8 @@ from aster.runtime.sandbox.serialization import (
     dto_to_result,
     dto_to_wire,
 )
+from aster.storage.snapshot_vars import SnapshotVars
+from aster.tools.todo import Todo
 from aster.unifiedllm.fake import FakeLLMClient
 
 CODEC = wire.Codec()
@@ -122,6 +124,43 @@ def test_value_types_round_trip(value):
     assert CODEC.loads(CODEC.dumps(value)) == value
 
 
+@pytest.mark.parametrize("data", [{}, {"stage": "alpha", "nested": {"items": [1, 2]}}])
+def test_snapshot_vars_cross_as_plain_dict(data):
+    result = CODEC.loads(CODEC.dumps(SnapshotVars(data)))
+    assert type(result) is dict
+    assert result == data
+
+
+@pytest.mark.parametrize("data", [{}, {"nested": {"items": [1, 2]}}])
+def test_todo_argument_round_trips_with_state(data):
+    todo = Todo(title="Verify state", vars=data)
+    codec = wire.Codec({wire.type_key(Todo): Todo})
+    restored = codec.loads(CODEC.dumps(todo))
+    assert restored == todo
+    assert type(restored.vars) is SnapshotVars
+    restored.vars["local_only"] = True
+    assert "local_only" not in todo.vars
+
+
+def test_todo_argument_still_requires_a_declared_type():
+    with pytest.raises(CellSerializationError, match="not a data type declared by the agent"):
+        CODEC.loads(CODEC.dumps(Todo(title="Undeclared")))
+
+
+@pytest.mark.parametrize("body", [{"status": "invalid"}, {"vars": [1, 2]}])
+def test_todo_argument_validation_rejects_malformed_fields(body):
+    codec = wire.Codec({wire.type_key(Todo): Todo})
+    with pytest.raises(CellSerializationError, match="malformed"):
+        codec.loads(_forged(wire._MODEL, [wire.type_key(Todo), body]))
+
+
+def test_snapshot_vars_with_unsupported_mutated_data_fails_encoding():
+    data = SnapshotVars({"items": []})
+    data["items"].append(object())
+    with pytest.raises(TypeError):
+        CODEC.dumps(data)
+
+
 def test_path_mapping_preserves_nested_namedtuple_types():
     from aster.runtime.sandbox.paths import PathMap
 
@@ -156,8 +195,26 @@ def test_numpy_round_trips():
 
 @pytest.mark.parametrize(
     "value",
-    [lambda: 1, object(), types.SimpleNamespace(a=1), Plain(), collections.deque([1]), 2**70],
-    ids=["function", "object", "SimpleNamespace", "user-class", "deque", "bigint"],
+    [
+        lambda: 1,
+        object(),
+        types.SimpleNamespace(a=1),
+        Plain(),
+        collections.deque([1]),
+        collections.UserDict(a=1),
+        types.MappingProxyType({"a": 1}),
+        2**70,
+    ],
+    ids=[
+        "function",
+        "object",
+        "SimpleNamespace",
+        "user-class",
+        "deque",
+        "UserDict",
+        "MappingProxyType",
+        "bigint",
+    ],
 )
 def test_unsupported_values_fail_at_encode(value):
     with pytest.raises((TypeError, OverflowError)):

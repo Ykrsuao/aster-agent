@@ -53,7 +53,7 @@ async def http_client(mock_store, tmp_path):
         patch("aster.viewer.main.otlp_store", mock_store),
         patch("aster.viewer.main._ingest_queue", fresh_queue),
     ):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
             yield c
 
 
@@ -238,7 +238,7 @@ class TestEventLoopIsolation:
         with patch("aster.viewer.main.otlp_store", mock_store):
             with patch("aster.viewer.eval_routes.otlp_store", mock_store):
                 async with AsyncClient(
-                    transport=ASGITransport(app=app), base_url="http://test"
+                    transport=ASGITransport(app=app), base_url="http://localhost"
                 ) as client:
                     t0 = asyncio.get_event_loop().time()
 

@@ -58,9 +58,10 @@ DummyAgent = None  # imported from _test_fixtures by subprocess workers, not nee
 class TestSubprocessWorker:
     """Test the subprocess_worker.py script via Popen."""
 
-    def test_basic_execution(self, tmp_path):
+    @pytest.mark.parametrize("memory_limit_mb", [None, 4096])
+    def test_basic_execution(self, tmp_path, memory_limit_mb):
         """Worker executes a task and returns valid EvalTestResult JSON."""
-        task_input = _build_task_input(trace_dir=str(tmp_path))
+        task_input = _build_task_input(trace_dir=str(tmp_path), memory_limit_mb=memory_limit_mb)
         proc = subprocess.run(
             [sys.executable, "-m", "eval_pipeline.subprocess_worker"],
             input=json.dumps(task_input).encode(),

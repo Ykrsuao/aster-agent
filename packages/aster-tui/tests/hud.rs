@@ -3,7 +3,7 @@
 //! Exercise the HUD through its public configuration, accounting and rendering interfaces.
 
 use aster_tui::{
-    controller::Controller,
+    controller::{Action, Controller, Pending},
     hud::{self, Hud, Layout},
     state::{Entry, Overlay, Phase, State, Tool},
     ui,
@@ -41,6 +41,233 @@ fn lines(state: &State, width: usize, budget: usize) -> Vec<String> {
         .into_iter()
         .map(|row| row.line.to_string())
         .collect()
+}
+
+#[test]
+fn skills_hud_links_to_the_browser_and_marks_additional_active_skills() {
+    let mut state = state();
+    state.hud.config.elements = vec!["skills".into()];
+    state.hud.telemetry.environment.skills = ["aster.libwriting", "aster.repo", "aster.shell", "aster.todo"]
+        .map(str::to_owned).into();
+    let rows = hud::rows(&state, 160, 1);
+    assert_eq!(rows[0].command, "/skills");
+    assert!(rows[0].line.to_string().contains("+1"));
+}
+
+#[test]
+fn project_hud_shows_the_confirmed_permission_mode_in_plain_language() {
+    for (mode, approval, permission, label) in [
+        ("code", "session", "auto", "Auto"),
+        ("code", "ask", "manual", "Manual"),
+        ("code", "accept_edits", "accept_edits", "Accept edits"),
+        ("plan", "ask", "plan", "Plan"),
+    ] {
+        let mut state = state();
+        state.runtime_supported = true;
+        state.mode = mode.into();
+        state.approval_policy = approval.into();
+        state.hud.config.layout = Layout::Expanded;
+        state.hud.config.elements = vec!["project".into()];
+        for metadata in [Value::Null, json!({"permissionMode":permission})] {
+            state.runtime = metadata;
+            let rendered = lines(&state, 160, 1).join("\n");
+            assert!(
+                rendered.contains(&format!("permissions: {label}")),
+                "{rendered}"
+            );
+            assert!(!rendered.contains("approval: ask"), "{rendered}");
+            assert!(!rendered.contains("approval: session"), "{rendered}");
+        }
+    }
+}
+
+#[test]
+fn compact_hud_keeps_permissions_and_effort_before_long_project_details() {
+    for (permission, label) in [
+        ("auto", "Auto"),
+        ("manual", "Manual"),
+        ("accept_edits", "Accept edits"),
+        ("plan", "Plan"),
+    ] {
+        let mut state = state();
+        state.model = "magpie:linxi/gpt-6.1-sol-with-a-long-route-name".into();
+        state.workspace = "E:/项目/long-workspace-directory-name".into();
+        state.runtime_supported = true;
+        state.runtime = json!({"permissionMode": permission, "reasoningLevel": "high"});
+        state.hud.host.git = Some(aster_tui::workspace_changes::GitSummary {
+            branch: "feature/long-branch-name-with-more-details".into(),
+            dirty: true,
+            ahead: 12,
+            behind: 3,
+            ..Default::default()
+        });
+        for columns in [48, 80, 120] {
+            let rows = hud::rows(&state, columns, 3);
+            let rendered = rows.iter().map(|row| row.line.to_string()).collect::<Vec<_>>();
+            let project = &rendered[0];
+            assert!(project.contains(label), "{columns}: {rendered:?}");
+            assert!(project.contains("high"), "{columns}: {rendered:?}");
+            assert!(project.starts_with("[magpie:"), "{columns}: {rendered:?}");
+            assert!(rows.iter().all(|row| row.line.width() <= columns));
+            assert!(rendered.iter().any(|line| line.contains("86%") && line.contains("$0.1234")));
+            if columns <= 80 {
+                assert_eq!(rows[0].command, "/status");
+                assert_eq!(rows[1].command, "/context");
+            }
+            let single = hud::rows(&state, columns, 1);
+            assert_eq!(single.len(), 1);
+            assert_eq!(single[0].command, "/context");
+            assert!(single[0].line.to_string().contains("86%"));
+        }
+    }
+}
+
+#[test]
+fn project_keeps_effort_when_the_configured_reasoning_row_does_not_fit() {
+    let mut state = state();
+    state.model = "magpie:linxi/gpt-6.1-sol-with-a-long-route-name".into();
+    state.runtime_supported = true;
+    state.runtime = json!({"permissionMode": "manual", "reasoningLevel": "high"});
+    state.hud.config.elements = ["project", "usage", "tools", "reasoning"]
+        .map(str::to_owned)
+        .into();
+    state.entries.push(Entry::Tool(Tool {
+        id: "active".into(),
+        title: "Read source".into(),
+        status: "in_progress".into(),
+        content: String::new(),
+        diff: String::new(),
+        expanded: false,
+        started: None,
+        elapsed: None,
+    }));
+    for columns in [48, 80, 120, 160] {
+        for budget in [2, 3, 4] {
+            state.hud.config.max_rows = budget;
+            for problem in [None, Some("Collection unavailable".into())] {
+                state.hud.problem = problem;
+                let rows = hud::rows(&state, columns, budget);
+                let rendered = rows.iter().map(|row| row.line.to_string()).collect::<Vec<_>>();
+                assert_eq!(
+                    rendered.iter().map(|line| line.matches("high").count()).sum::<usize>(),
+                    1,
+                    "{columns} columns, {budget} rows: {rendered:?}"
+                );
+                assert!(rows.iter().all(|row| row.line.width() <= columns));
+                assert!(rows.len() <= budget);
+            }
+        }
+    }
+}
+
+#[test]
+fn changing_permissions_keeps_the_compact_hud_row_layout_stable() {
+    let mut state = state();
+    state.model = "linxi/gpt-6.1-sol".into();
+    state.runtime_supported = true;
+    for columns in 48..=140 {
+        let mut expected = None;
+        for permission in ["manual", "accept_edits", "plan", "auto"] {
+            state.runtime = json!({"permissionMode": permission, "reasoningLevel": "high"});
+            let layout = hud::rows(&state, columns, 3)
+                .into_iter()
+                .map(|row| (row.element, row.command))
+                .collect::<Vec<_>>();
+            if let Some(expected) = &expected {
+                assert_eq!(&layout, expected, "{columns} columns, permission {permission}");
+            } else {
+                expected = Some(layout);
+            }
+        }
+    }
+}
+
+#[test]
+fn startup_context_shows_zero_and_known_capacity_while_measurement_stays_pending() {
+    let mut state = State::new("workspace".into(), "model".into(), false);
+    state.session_id = Some("session".into());
+    state.phase = Phase::Ready;
+    state.hud.config.layout = Layout::Expanded;
+    state.hud.config.elements = vec!["usage".into()];
+    state.hud.config.context_value = "tokens".into();
+    let mut controller = Controller::new(state, None, false);
+    assert!(lines(&controller.state, 80, 1)[0].contains("context    —"));
+    let update = |value| {
+        json!({"method":"session/update", "params":{
+            "sessionId":"session", "update":value
+        }})
+    };
+    controller.message(update(json!({
+        "sessionUpdate":"usage_update", "used":0, "size":1_048_576,
+        "_meta":{"aster":{"usagePending":true, "usageAvailable":false}}
+    })));
+    assert_eq!(controller.state.context_window, Some(1_048_576));
+    assert!(controller.state.context_snapshot.is_none());
+    assert!(controller.state.context_ratio.is_none());
+    for width in [24, 48, 80, 120] {
+        let rendered = lines(&controller.state, width, 1)[0].clone();
+        assert!(rendered.contains("0k / 1.0m"), "{rendered}");
+        assert_eq!(rendered.contains('░'), width >= 40, "{rendered}");
+        assert!(!rendered.contains('█'), "{rendered}");
+    }
+    controller.state.hud.config.context_bar = false;
+    assert!(!lines(&controller.state, 80, 1)[0].contains('░'));
+    controller.state.hud.config.context_bar = true;
+    controller.state.hud.config.language = "zh".into();
+    assert!(lines(&controller.state, 80, 1)[0].contains("上下文    ░░░░░░ 0k / 1.0m"));
+    controller.message(update(json!({
+        "sessionUpdate":"usage_update", "used":1234, "size":1_048_576,
+        "cost":{"amount":0.25, "currency":"USD"}
+    })));
+    assert_eq!(
+        controller.state.context_snapshot.as_ref().unwrap().used,
+        Some(1234)
+    );
+    assert!(lines(&controller.state, 80, 1)[0].contains("1.2k / 1.0m"));
+    controller.message(update(json!({
+        "sessionUpdate":"usage_update", "used":0, "size":0,
+        "_meta":{"aster":{"usageAvailable":false}}
+    })));
+    let rendered = lines(&controller.state, 80, 1)[0].clone();
+    assert!(rendered.contains("上下文    n/a"), "{rendered}");
+    assert!(!rendered.contains("0k /"));
+    assert!(!rendered.contains('░'));
+}
+
+#[test]
+fn model_switch_uses_new_capacity_before_its_first_reply_and_keeps_cost() {
+    let mut state = state();
+    state.session_id = Some("session".into());
+    state.hud.config.layout = Layout::Expanded;
+    state.hud.config.elements = vec!["usage".into()];
+    let mut controller = Controller::new(state, None, false);
+    controller.message(json!({"method":"session/update", "params":{
+        "sessionId":"session", "update":{
+            "sessionUpdate":"current_mode_update", "currentModeId":"code",
+            "_meta":{"aster":{"runtime":{
+                "model":"new-model", "contextWindow":2_000_000,
+                "reasoningLevel":null, "reasoningLevels":null
+            }}}
+        }
+    }}));
+    assert_eq!(controller.state.context_window, Some(2_000_000));
+    assert!(controller.state.context_snapshot.is_none());
+    assert!(controller.state.context_ratio.is_none());
+    let rendered = lines(&controller.state, 80, 1)[0].clone();
+    assert!(rendered.contains("0k / 2.0m"), "{rendered}");
+    assert!(rendered.contains("░░░░░░"), "{rendered}");
+    assert!(rendered.contains("$0.1234"), "{rendered}");
+}
+
+#[test]
+fn clearing_reasoning_does_not_reuse_stale_effort_telemetry() {
+    let mut state = state();
+    state.hud.config.elements = vec!["reasoning".into()];
+    state.runtime = json!({"reasoningLevel":"low"});
+    assert!(lines(&state, 80, 1)[0].contains("Reasoning  low"));
+    state.runtime["reasoningLevel"] = Value::Null;
+    assert!(lines(&state, 80, 1)[0].contains("Reasoning  model default"));
+    assert_eq!(hud::rows(&state, 80, 1)[0].command, "/effort");
 }
 
 #[test]
@@ -223,6 +450,113 @@ fn responsive_hud_keeps_usage_and_cost_below_composer_and_preserves_the_title() 
 }
 
 #[test]
+fn full_hud_shows_all_available_rows_after_sending_message() {
+    let mut state = State::new("workspace".into(), "model".into(), false);
+    state.phase = Phase::Ready;
+    state.session_id = Some("session".into());
+    state.hud.configure("full").unwrap();
+    let mut controller = Controller::new(state, None, false);
+    controller.paste("检查布局".into());
+    let actions = controller.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(
+        actions.as_slice(),
+        [Action::Request {
+            method: "session/prompt",
+            ..
+        }]
+    ));
+    assert!(matches!(controller.state.entries[0], Entry::User(_)));
+    assert_eq!(controller.state.hud.config.layout, Layout::Expanded);
+    assert_eq!(controller.state.hud.config.max_rows, 16);
+    let expected = hud::rows(&controller.state, 76, 16);
+    for height in [96, 24, 18] {
+        let mut terminal = Terminal::new(TestBackend::new(80, height)).unwrap();
+        let mut hits = ui::HitAreas::default();
+        terminal
+            .draw(|frame| hits = ui::draw(frame, &mut controller.state))
+            .unwrap();
+        assert_eq!(
+            hits.hud_rows.len(),
+            expected.len(),
+            "sending a message reduced the full HUD to {} rows in 80x{height}",
+            hits.hud_rows.len(),
+        );
+    }
+}
+
+#[test]
+fn full_hud_stays_expanded_through_input_and_response() {
+    for (columns, height) in [(80, 24), (120, 36)] {
+        let mut state = State::new("workspace".into(), "model".into(), false);
+        state.phase = Phase::Ready;
+        state.session_id = Some("session".into());
+        state.hud.configure("full").unwrap();
+        let mut controller = Controller::new(state, None, false);
+        let check = |controller: &mut Controller, stage: &str| {
+            let expected = hud::rows(&controller.state, columns as usize - 4, 16);
+            let mut terminal = Terminal::new(TestBackend::new(columns, height)).unwrap();
+            let mut hits = ui::HitAreas::default();
+            terminal
+                .draw(|frame| hits = ui::draw(frame, &mut controller.state))
+                .unwrap();
+            assert_eq!(controller.state.hud.config.layout, Layout::Expanded);
+            assert_eq!(controller.state.hud.config.max_rows, 16);
+            assert_eq!(
+                hits.hud_rows.len(),
+                expected.len(),
+                "full HUD collapsed during {stage} in {columns}x{height}",
+            );
+            for ((_, command), row) in hits.hud_rows.iter().zip(expected) {
+                assert_eq!(*command, row.command);
+            }
+            assert!(hits.transcript.height >= 6);
+            assert!(hits.transcript.bottom() <= hits.composer.y);
+            assert!(hits
+                .hud_rows
+                .iter()
+                .all(|(area, _)| { area.y >= hits.composer.bottom() && area.bottom() < height }));
+        };
+        check(&mut controller, "welcome");
+        controller.paste("检查布局".into());
+        check(&mut controller, "typing");
+        let actions = controller.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::Request {
+                method: "session/prompt",
+                ..
+            }]
+        ));
+        controller.registered(1, Pending::Prompt);
+        check(&mut controller, "sending");
+        for (stage, update) in [
+            (
+                "running a tool",
+                json!({"sessionUpdate":"tool_call", "toolCallId":"tool",
+                    "title":"Check layout", "status":"in_progress"}),
+            ),
+            (
+                "finishing a tool",
+                json!({"sessionUpdate":"tool_call_update", "toolCallId":"tool",
+                    "status":"completed"}),
+            ),
+            (
+                "receiving a response",
+                json!({"sessionUpdate":"agent_message_chunk",
+                    "content":{"type":"text", "text":"布局检查完成。"}}),
+            ),
+        ] {
+            controller.message(json!({"method":"session/update",
+                "params":{"sessionId":"session", "update":update}}));
+            check(&mut controller, stage);
+        }
+        controller.message(json!({"id":1, "result":{"stopReason":"end_turn"}}));
+        assert_eq!(controller.state.phase, Phase::Ready);
+        check(&mut controller, "response complete");
+    }
+}
+
+#[test]
 fn full_hud_preserves_conversation_space_in_short_windows() {
     let mut state = state();
     state.hud.configure("full").unwrap();
@@ -240,13 +574,27 @@ fn full_hud_preserves_conversation_space_in_short_windows() {
                 terminal
                     .draw(|frame| hits = ui::draw(frame, &mut state))
                     .unwrap();
+                let body_reserve = if layout == Layout::Compact {
+                    height / 2
+                } else if height >= 24 {
+                    6
+                } else {
+                    2
+                };
                 assert!(
-                    hits.transcript.height >= height / 2,
+                    hits.transcript.height >= body_reserve,
                     "only {} conversation rows remain with {} HUD rows in {columns}x{height}",
                     hits.transcript.height,
                     hits.hud_rows.len(),
                 );
-                assert!(hits.hud_rows.len() <= max_hud_rows);
+                if layout == Layout::Compact {
+                    assert!(hits.hud_rows.len() <= max_hud_rows);
+                } else if height >= 18 {
+                    assert_eq!(
+                        hits.hud_rows.len(),
+                        hud::rows(&state, hits.transcript.width as usize, 16).len(),
+                    );
+                }
                 assert!(hits
                     .hud_rows
                     .iter()
@@ -255,6 +603,118 @@ fn full_hud_preserves_conversation_space_in_short_windows() {
                 assert_eq!(hits.hud_rows.last().unwrap().0.bottom(), height - 1);
             }
         }
+    }
+}
+
+#[test]
+fn welcome_with_full_hud_keeps_the_complete_wordmark_visible() {
+    let mut state = State::new("workspace".into(), "model".into(), false);
+    state.phase = Phase::Ready;
+    state.hud.configure("full").unwrap();
+    let logo = [
+        " █████╗  ███████╗ ████████╗ ███████╗ ██████╗ ",
+        "██╔══██╗ ██╔════╝ ╚══██╔══╝ ██╔════╝ ██╔══██╗",
+        "███████║ ███████╗    ██║    █████╗   ██████╔╝",
+        "██╔══██║ ╚════██║    ██║    ██╔══╝   ██╔══██╗",
+        "██║  ██║ ███████║    ██║    ███████╗ ██║  ██║",
+        "╚═╝  ╚═╝ ╚══════╝    ╚═╝    ╚══════╝ ╚═╝  ╚═╝",
+    ];
+    for layout in [Layout::Compact, Layout::Expanded] {
+        state.hud.config.layout = layout;
+        for monochrome in [false, true] {
+            state.monochrome = monochrome;
+            for (columns, height) in [(80, 24), (48, 26), (80, 26), (120, 32), (160, 48)] {
+                let mut terminal = Terminal::new(TestBackend::new(columns, height)).unwrap();
+                let mut hits = ui::HitAreas::default();
+                terminal
+                    .draw(|frame| hits = ui::draw(frame, &mut state))
+                    .unwrap();
+                let text: Vec<String> = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .chunks(columns as usize)
+                    .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+                    .collect();
+                let welcome = &text[hits.transcript.y as usize..hits.transcript.bottom() as usize];
+                for logo_line in logo {
+                    assert!(
+                        welcome.iter().any(|line| line.trim() == logo_line.trim()),
+                        "missing logo row with full HUD in {columns}x{height}:\n{}",
+                        text.join("\n"),
+                    );
+                }
+                assert_eq!(hits.welcome_rows.len(), 4);
+                assert!(hits
+                    .welcome_rows
+                    .iter()
+                    .all(|(area, _)| area.x >= hits.transcript.x
+                        && area.y >= hits.transcript.y
+                        && area.right() <= hits.transcript.right()
+                        && area.bottom() <= hits.transcript.bottom()));
+                assert!(hits
+                    .hud_rows
+                    .iter()
+                    .all(|(area, _)| area.y >= hits.composer.bottom()));
+                assert_eq!(state.hud.config.elements.len(), hud::config::ELEMENTS.len());
+                assert_eq!(state.hud.config.max_rows, 16);
+                assert_eq!(state.hud.config.layout, layout);
+            }
+        }
+    }
+}
+
+#[test]
+fn welcome_with_full_hud_shows_every_available_status_row() {
+    let mut state = State::new("workspace".into(), "model".into(), false);
+    state.phase = Phase::Ready;
+    state.hud.configure("full").unwrap();
+    let expected = hud::rows(&state, 76, 16);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let mut hits = ui::HitAreas::default();
+    terminal
+        .draw(|frame| hits = ui::draw(frame, &mut state))
+        .unwrap();
+    assert_eq!(hits.hud_rows.len(), expected.len());
+    for ((area, command), row) in hits.hud_rows.iter().zip(expected) {
+        let text: String = (area.x..area.right())
+            .map(|x| terminal.backend().buffer()[(x, area.y)].symbol())
+            .collect();
+        assert!(text.starts_with(&row.line.to_string()));
+        assert_eq!(*command, row.command);
+    }
+    assert_eq!(hits.welcome_rows.len(), 4);
+    assert_eq!(hits.welcome_rows[0].0.y, hits.welcome_rows[1].0.y);
+    assert_eq!(hits.welcome_rows[2].0.y, hits.welcome_rows[3].0.y);
+    assert!(hits.welcome_rows[0].0.right() <= hits.welcome_rows[1].0.x);
+    assert!(hits.welcome_rows[2].0.right() <= hits.welcome_rows[3].0.x);
+}
+
+#[test]
+fn small_welcome_keeps_a_compact_wordmark_and_all_menu_actions() {
+    let mut state = State::new("workspace".into(), "model".into(), false);
+    state.phase = Phase::Ready;
+    state.hud.configure("full").unwrap();
+    for (columns, height) in [(24, 12), (32, 18), (44, 24), (80, 12), (80, 16), (80, 18)] {
+        let mut terminal = Terminal::new(TestBackend::new(columns, height)).unwrap();
+        let mut hits = ui::HitAreas::default();
+        terminal
+            .draw(|frame| hits = ui::draw(frame, &mut state))
+            .unwrap();
+        let text: Vec<String> = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(columns as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+            .collect();
+        let welcome = &text[hits.transcript.y as usize..hits.transcript.bottom() as usize];
+        assert!(welcome.iter().any(|line| line.trim() == "ASTER"));
+        assert_eq!(hits.welcome_rows.len(), 4);
+        assert!(hits
+            .welcome_rows
+            .iter()
+            .all(|(area, _)| area.bottom() <= hits.transcript.bottom()));
     }
 }
 
@@ -329,7 +789,7 @@ fn full_details_use_real_values_cancelled_jobs_and_unknown_fields() {
         "MCP 1",
         "1 AGENTS.md",
         "4.0/16.0 GiB",
-        "Limits  n/a",
+        "Limits     n/a",
     ] {
         assert!(full.contains(value), "{value}: {full}");
     }
@@ -369,6 +829,7 @@ fn task_waiting_and_live_job_time_survive_without_a_plan_or_new_snapshot() {
 #[test]
 fn color_overrides_respect_monochrome_and_untrusted_text_cannot_inject_controls() {
     let mut state = state();
+    state.hud.configure("full").unwrap();
     state.monochrome = false;
     state
         .hud
@@ -379,7 +840,7 @@ fn color_overrides_respect_monochrome_and_untrusted_text_cannot_inject_controls(
         .configure("set custom_text \"中文 👩‍💻 \\u001b[31m injected\\n next\"")
         .unwrap();
     state.hud.configure("show custom").unwrap();
-    let rows = hud::rows(&state, 80, 8);
+    let rows = hud::rows(&state, 80, 16);
     assert!(rows
         .iter()
         .flat_map(|row| &row.line.spans)
@@ -388,7 +849,7 @@ fn color_overrides_respect_monochrome_and_untrusted_text_cannot_inject_controls(
         .iter()
         .any(|row| row.line.to_string().contains(['\x1b', '\n'])));
     state.monochrome = true;
-    for row in hud::rows(&state, 80, 8) {
+    for row in hud::rows(&state, 80, 16) {
         assert!(row.line.style.fg.is_none());
         assert!(row.line.spans.iter().all(|span| span.style.fg.is_none()));
     }

@@ -9,6 +9,7 @@ from contextvars import ContextVar
 from typing import Any
 
 from aster_cli.coding import CodingAgent, CodingSlashCommandRegistry
+from aster_cli.coding.reply_strategy import CodingReplyStrategy
 from aster_cli.coding.steering import SteeringControl, steering_scope
 from pydantic import BaseModel
 
@@ -28,14 +29,17 @@ class InteractiveSessionDispatcher:
         self._strategy = strategy
         self._active_task: asyncio.Task[Any] | None = None
         self._cancel_requested = False
-        self._cancelling = False
+        self._cancel_complete = asyncio.Event()
+        self._cancel_complete.set()
         self.steering: SteeringControl | None = None
         self.on_result: Callable[[TurnResult], None] | None = None
         self.on_turn_completed: Callable[[str | None], None] | None = None
 
     @property
     def active(self) -> bool:
-        return self._cancelling or (self._active_task is not None and not self._active_task.done())
+        return not self._cancel_complete.is_set() or (
+            self._active_task is not None and not self._active_task.done()
+        )
 
     async def submit(self, text: str) -> TurnResult | None:
         self._ensure_idle()
@@ -62,6 +66,49 @@ class InteractiveSessionDispatcher:
     def _ensure_idle(self) -> None:
         if self.active:
             raise RuntimeError("A prompt is already running")
+
+    async def set_execution_backend(self, backend: str) -> None:
+        """Prepare and commit one session's Python backend while the host owns its turn."""
+        if backend not in {"native", "sandbox"}:
+            raise ValueError("Execution backend must be 'native' or 'sandbox'.")
+        if not isinstance(self._strategy, CodingReplyStrategy):
+            raise ValueError("This session does not support changing its Python backend.")
+        config = self._strategy.config.model_copy(
+            update={
+                "execution_backend": "sandbox" if backend == "sandbox" else "inprocess",
+                "sandbox": self._strategy.config.sandbox.model_copy(update={"require": True}),
+            }
+        )
+
+        async def change() -> CodingReplyStrategy:
+            candidate = CodingReplyStrategy(config=config)
+            if backend == "sandbox":
+                from aster.runtime.sandbox.executor import SandboxedExecutor
+
+                try:
+                    probe = SandboxedExecutor(
+                        self.agent,
+                        config.sandbox,
+                        cell_timeout=10.0,
+                        restrictions=config.restrictions,
+                        truncation_config=self.agent.runtime.truncation_config,
+                    )
+                    try:
+                        result = await probe.run_cell("pass")
+                        if result.error is not None:
+                            raise result.error
+                    finally:
+                        await probe.aclose()
+                except Exception as exc:
+                    raise ValueError(f"Python sandbox could not start: {exc}") from exc
+            return candidate
+
+        candidate = await self._run_active(change())
+        if candidate is None:
+            # Keep the host's turn claim until cancellation has finished cleaning up.
+            await self._cancel_complete.wait()
+            raise ValueError("Execution environment change cancelled; previous setting retained.")
+        self._strategy = candidate
 
     async def _run_active(self, operation: Coroutine[Any, Any, Any]) -> Any:
         if self.active:
@@ -195,7 +242,7 @@ class InteractiveSessionDispatcher:
         if task is None or task.done():
             return False
 
-        self._cancelling = True
+        self._cancel_complete.clear()
         self._cancel_requested = True
         try:
             task.cancel()
@@ -206,7 +253,7 @@ class InteractiveSessionDispatcher:
             await self.agent.queue_manager.shutdown()
             return True
         finally:
-            self._cancelling = False
+            self._cancel_complete.set()
 
     async def close(self) -> None:
         await self.cancel()

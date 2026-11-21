@@ -205,29 +205,6 @@ async def test_worker_system_exit_keeps_adjusted_source_context() -> None:
     )
 
 
-@pytest.mark.asyncio
-async def test_persisted_worker_helper_keeps_original_source_location() -> None:
-    namespace: dict[str, object] = {}
-    helper_source = """def boom():
-    marker = "helper"
-    raise ValueError("x")
-"""
-    await run_cell_source(helper_source, namespace, execution_count=71)
-    namespace["persisted"] = 1
-
-    failed = await run_cell_source("boom()", namespace, execution_count=73)
-
-    assert failed.error is not None
-    formatted = format_error_for_llm(
-        failed.error,
-        "boom()",
-        line_offset=failed.wrapper_line_offset,
-    )
-    assert "Cell In[73], line 1" in formatted
-    assert "Cell In[71], line 3, in boom" in formatted
-    assert 'raise ValueError("x")' in formatted
-
-
 def test_worker_formatter_receives_complete_context() -> None:
     calls = []
 

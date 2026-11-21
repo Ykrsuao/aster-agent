@@ -9,7 +9,36 @@ its changes, and return to the same conversation later.
 Aster combines a Rust / Ratatui interface, a Python agent framework, and an ACP
 runtime shared by the terminal and editor integrations.
 
-**[Run Aster](#run-aster-from-a-source-checkout)** · **[Terminal guide](packages/aster-tui/README.md)** · **[Framework docs](docs/README.md)** · **[Framework quick start](#quick-start)** · **[Notebook tutorials](notebook_tutorials/README.md)** · **[Examples](examples/README.md)**
+**[Install on Windows](#install-a-windows-terminal-bundle)** · **[Run from source](#run-aster-from-a-source-checkout)** · **[Terminal guide](packages/aster-tui/README.md)** · **[Framework docs](docs/README.md)** · **[Framework quick start](#quick-start)** · **[Examples](examples/README.md)**
+
+## Install a Windows terminal bundle
+
+The Windows x64 bundle includes the native terminal and matching Aster Python
+packages. With [uv](https://docs.astral.sh/uv/getting-started/installation/)
+installed, extract a maintainer-provided `aster-terminal-*-windows-x64.zip`, then
+run in PowerShell from the extracted folder:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+aster connect               # skip if you already have a configured model
+aster -w C:\path\to\project
+```
+
+The installer checks bundle hashes, installs an isolated `aster-cli` tool, and
+prints the command location. If that directory is not on PATH, run
+`uv tool update-shell` and open a new terminal. It can download Python 3.12 and
+the pinned third-party dependencies; the bundle does not contain them. Rust is
+not needed. `-Offline` works only when the requested Python and dependencies
+are already cached.
+
+Run only a bundle from a trusted source. The execution-policy option applies to
+this PowerShell process and does not change your machine's saved policy.
+
+Close Aster and run the new bundle's installer to replace the installed tool.
+Your workspace files, model configuration, conversations and drafts stay outside
+the tool environment. No public download channel is configured in this checkout;
+maintainers can [build the bundle](RELEASING.md#windows-terminal-bundle), and the
+Windows CI job uploads it as an artifact.
 
 ## Run Aster from a source checkout
 

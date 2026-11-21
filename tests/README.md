@@ -5,7 +5,7 @@
 ### Root-level tests
 Broad framework tests: metaclass behavior, event system, sandbox, error formatting, actor, decorator/strategy wiring, method definition, media handling, storage compatibility, skill registry, visibility, and module imports.
 
-`test_windows_platform.py` covers the native-Windows policy: the import-time refusal and `ASTER_SKIP_PLATFORM_CHECK`, and the `PosixOnlyFeatureError` guards. Its subprocess tests run `scripts/windows_smoke.py` under `scripts/winsim.py`, which hides POSIX-only modules, signals and os functions on Linux and sets `sys.platform = "win32"`. It is a simulation; real Windows runs in CI (`windows-core-smoke`, `.github/workflows/wsl.yml`).
+`test_native_windows.py` covers host imports and CLI startup without a platform override, scripted agent execution, file-backed storage locking, and native PowerShell behavior. PowerShell-specific tests run only on Windows. The `windows-core-smoke` job in `.github/workflows/ci.yml` installs built wheels into a clean environment and runs `scripts/windows_smoke.py` plus targeted regressions. The separate `.github/workflows/wsl.yml` workflow provides additional Linux coverage inside WSL 2.
 
 ### `agentdoc/` - Agent documentation and visibility
 `doc(self)` rendering, visibility rules, referenced types, annotated parameters and fields, truncating `pformat`/`pprint`, metadata, protocols, and fixture modules under `agentdoc/fixtures/`.

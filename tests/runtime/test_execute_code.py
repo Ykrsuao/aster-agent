@@ -173,6 +173,23 @@ class TestExecuteCodeErrors:
         assert isinstance(result.error, ZeroDivisionError)
 
     @pytest.mark.asyncio
+    async def test_cell_preparation_error_captured(self, test_agent):
+        class UnavailableState(dict):
+            def __iter__(self):
+                raise RuntimeError("state unavailable")
+
+        result = await test_agent.runtime.execute_code(
+            "answer + 1",
+            builtins=UnavailableState(answer=41),
+            validate=False,
+            wrap_in_function=True,
+        )
+
+        assert isinstance(result.error, RuntimeError)
+        assert str(result.error) == "state unavailable"
+        assert not result.has_return
+
+    @pytest.mark.asyncio
     async def test_partial_stdout_on_error(self, test_agent):
         """Stdout before error should still be captured."""
         code = """

@@ -52,13 +52,19 @@ def command(model: str | None, client_type: str | None, sandbox: bool, select_mo
             from aster_acp.server import serve
 
         with phase("configuration"):
+            # Opening a folder must not be enough to use the files inside it.
+            from aster import workspace_trust
+
+            workspace_trust.enforce()
             load_secrets_into_env()
             # Session startup must not wait for the SDK's remote pricing catalogue.
             os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
-        with phase("provider_code_cache"):
-            from aster_acp._provider_code import activate_provider_code_cache
 
-            activate_provider_code_cache()
+    async def prepare_model() -> None:
+        from aster_acp._provider_code import activate_provider_code_cache
+
+        with phase("provider_code_cache"):
+            await asyncio.to_thread(activate_provider_code_cache)
 
     nvidia_api_key = os.getenv("NVIDIA_API_KEY")
 
@@ -75,7 +81,13 @@ def command(model: str | None, client_type: str | None, sandbox: bool, select_mo
             raise ValueError("Choose a model in Aster before starting a conversation.")
         return model_factory(model)
 
-    operation = serve(llm_factory, model_factory=model_factory, sandbox=sandbox)
+    operation = serve(
+        llm_factory,
+        model_factory=model_factory,
+        model=model,
+        sandbox=sandbox,
+        prepare_model=prepare_model,
+    )
     mark("server_start")
     asyncio.run(operation)
 

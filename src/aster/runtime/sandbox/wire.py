@@ -28,9 +28,11 @@ import msgpack
 from pydantic import BaseModel
 
 from aster.runtime.sandbox.errors import CellSerializationError
+from aster.storage.snapshot_vars import SnapshotVars
 
 HINT = (
     "Only JSON-like values (numbers, str, bytes, bool, None, list, tuple, set, dict), "
+    "SnapshotVars (as dict), "
     "datetime/date/timedelta, Decimal, Path, UUID, numpy arrays, and the agent's declared "
     "data types (pydantic models, dataclasses, enums) can cross the sandbox boundary."
 )
@@ -107,6 +109,9 @@ class Codec:
             return self._ext(_SET, list(obj))
         if isinstance(obj, dict | list):  # subclasses such as OrderedDict, Counter
             return type(obj).__mro__[-2](obj)
+        if type(obj) is SnapshotVars:
+            # Carry data only; a declared model's validator restores its field type.
+            return dict(obj)
         if isinstance(obj, enum.Enum):
             return self._ext(_ENUM, [type_key(type(obj)), obj.value])
         if isinstance(obj, BaseModel):

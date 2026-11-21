@@ -4,7 +4,7 @@
 
 use chrono::{Local, TimeZone};
 use ratatui::{
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -22,6 +22,7 @@ pub struct Row {
 struct Theme<'a> {
     config: &'a Config,
     monochrome: bool,
+    columns: usize,
 }
 
 impl Theme<'_> {
@@ -74,6 +75,56 @@ impl Theme<'_> {
             en
         }
     }
+
+    fn token_label(&self) -> &'static str {
+        if self.config.token_scope == "request" {
+            self.label("Tokens (last)", "Token（本次）")
+        } else {
+            self.label("Tokens", "Token")
+        }
+    }
+
+    fn label_width(&self) -> usize {
+        if self.config.layout != Layout::Expanded || self.columns < 60 {
+            return 0;
+        }
+        let width = self.label("Reasoning", "思考强度").width();
+        if self.config.elements.iter().any(|name| name == "tokens") {
+            width.max(self.token_label().width())
+        } else {
+            width
+        }
+    }
+
+    fn metric_label(&self, label: &str) -> Span<'static> {
+        let padding = self.label_width().saturating_sub(label.width()) + 2;
+        Span::styled(
+            format!("{label}{}", " ".repeat(padding)),
+            self.style("muted"),
+        )
+    }
+
+    fn value(&self, value: impl Into<String>) -> Span<'static> {
+        let value = value.into();
+        let style = self.style(if matches!(value.as_str(), "n/a" | "—") {
+            "muted"
+        } else {
+            "text"
+        });
+        Span::styled(value, style)
+    }
+
+    fn separate(&self, spans: &mut Vec<Span<'static>>) {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ", self.style("muted")));
+        }
+    }
+
+    fn field(&self, spans: &mut Vec<Span<'static>>, label: &str, value: impl Into<String>) {
+        self.separate(spans);
+        spans.push(Span::styled(format!("{label} "), self.style("muted")));
+        spans.push(self.value(value));
+    }
 }
 
 fn fit(text: &str, columns: usize) -> String {
@@ -110,11 +161,19 @@ fn clip(line: Line<'static>, columns: usize) -> Line<'static> {
     Line::from(spans).style(style)
 }
 
-fn text_row(element: &'static str, command: &'static str, text: String, theme: &Theme<'_>) -> Row {
+fn metric_row(
+    element: &'static str,
+    command: &'static str,
+    label: &str,
+    details: Vec<Span<'static>>,
+    theme: &Theme<'_>,
+) -> Row {
+    let mut spans = vec![theme.metric_label(label)];
+    spans.extend(details);
     Row {
         element,
         command,
-        line: Line::styled(text, theme.style("muted")),
+        line: Line::from(spans),
     }
 }
 
@@ -128,6 +187,14 @@ fn count(value: Option<u64>) -> String {
             value.to_string()
         }
     })
+}
+
+fn count_k(value: Option<u64>) -> String {
+    match value {
+        None => "n/a".into(),
+        Some(0) => "0k".into(),
+        Some(value) => format!("{:.1}k", value as f64 / 1000.0),
+    }
 }
 
 fn money(value: Option<f64>, partial: bool) -> String {
@@ -162,28 +229,63 @@ fn path_name(path: &str, levels: usize) -> String {
         .to_string()
 }
 
-fn project(state: &State, columns: usize, theme: &Theme<'_>) -> Row {
+fn project_model(state: &State) -> &str {
     let cfg = &state.hud.config;
-    let raw_model = if cfg.model_override.is_empty() {
+    let model = if cfg.model_override.is_empty() {
         &state.model
     } else {
         &cfg.model_override
     };
-    let raw_model = if cfg.model_format == "short" {
-        raw_model.rsplit(':').next().unwrap_or(raw_model)
+    if cfg.model_format == "short" {
+        model.rsplit(':').next().unwrap_or(model)
     } else {
-        raw_model
-    };
-    let model = fit(raw_model, columns.saturating_sub(8).min(columns * 2 / 3));
-    let workspace = fit(
-        &path_name(&state.workspace, cfg.path_levels),
-        columns.saturating_sub(model.width() + 5),
-    );
+        model
+    }
+}
+
+fn project_controls(
+    state: &State,
+    columns: usize,
+    theme: &Theme<'_>,
+    inline_effort: bool,
+) -> Line<'static> {
+    let mut spans = Vec::new();
+    if state.runtime_supported {
+        spans.push(Span::styled(
+            format!(
+                " · {}{}",
+                if columns >= 60 { "permissions: " } else { "" },
+                clean(state.permission_label())
+            ),
+            theme.style("muted"),
+        ));
+    }
+    if inline_effort {
+        if let Some(effort) = reasoning_level(state) {
+            spans.push(Span::styled(" · ", theme.style("muted")));
+            spans.push(Span::styled(
+                clean(effort),
+                theme.style("model").add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+    Line::from(spans)
+}
+
+fn project(state: &State, columns: usize, theme: &Theme<'_>, inline_effort: bool) -> Row {
+    let cfg = &state.hud.config;
+    let controls = project_controls(state, columns, theme, inline_effort);
+    let model = fit(project_model(state), columns.saturating_sub(controls.width() + 2));
     let mut spans = vec![
-        Span::styled(format!("[{model}]"), theme.style("model")),
-        Span::styled(" │ ", theme.style("muted")),
-        Span::styled(workspace, theme.style("project")),
+        Span::styled("[", theme.style("muted")),
+        Span::styled(model, theme.style("model").add_modifier(Modifier::BOLD)),
+        Span::styled("]", theme.style("muted")),
     ];
+    spans.extend(controls.spans);
+    let mut details = vec![Span::styled(
+        clean(&path_name(&state.workspace, cfg.path_levels)),
+        theme.style("project"),
+    )];
     if let Some(git) = state.hud.host.git.as_ref().filter(|_| cfg.git) {
         let mut label = format!(
             "  {}{}",
@@ -213,7 +315,7 @@ fn project(state: &State, columns: usize, theme: &Theme<'_>) -> Row {
         if git.conflicts > 0 {
             label.push_str(&format!(" · {} conflicts", git.conflicts));
         }
-        spans.push(Span::styled(
+        details.push(Span::styled(
             label,
             theme.style(if git.conflicts > 0 {
                 "critical"
@@ -228,32 +330,18 @@ fn project(state: &State, columns: usize, theme: &Theme<'_>) -> Row {
         &cfg.provider
     };
     if !provider.is_empty() {
-        spans.push(Span::styled(
+        details.push(Span::styled(
             format!(" · {}", clean(provider)),
             theme.style("muted"),
         ));
     }
-    let effort = state.runtime["reasoningLevel"]
-        .as_str()
-        .unwrap_or(&state.hud.telemetry.environment.effort);
-    if !effort.is_empty() {
-        spans.push(Span::styled(
-            format!(" · {}", clean(effort)),
-            theme.style("muted"),
-        ));
-    }
-    if state.runtime_supported {
-        spans.push(Span::styled(
-            format!(
-                " · {} · approval: {}",
-                clean(&state.mode),
-                clean(&state.approval_policy)
-            ),
-            theme.style("muted"),
-        ));
-    }
     if state.sandbox {
-        spans.push(Span::styled(" · sandbox", theme.style("muted")));
+        details.push(Span::styled(" · Python sandbox", theme.style("muted")));
+    }
+    let remaining = columns.saturating_sub(spans.iter().map(Span::width).sum::<usize>());
+    if remaining > 3 {
+        spans.push(Span::styled(" │ ", theme.style("muted")));
+        spans.extend(clip(Line::from(details), remaining - 3).spans);
     }
     Row {
         element: "project",
@@ -262,8 +350,23 @@ fn project(state: &State, columns: usize, theme: &Theme<'_>) -> Row {
     }
 }
 
+fn reasoning_level(state: &State) -> Option<&str> {
+    match state.runtime.get("reasoningLevel") {
+        Some(level) => level.as_str().filter(|level| !level.trim().is_empty()),
+        None => {
+            let level = &state.hud.telemetry.environment.effort;
+            (!level.trim().is_empty()).then_some(level.as_str())
+        }
+    }
+}
+
 fn usage(state: &State, columns: usize, theme: &Theme<'_>) -> Row {
     let label = theme.label(if columns < 60 { "ctx" } else { "context" }, "上下文");
+    let label = if theme.label_width() > 0 {
+        theme.metric_label(label)
+    } else {
+        Span::styled(format!("{label} "), theme.style("muted"))
+    };
     let cost = if state.cost.is_empty() {
         "cost —"
     } else {
@@ -271,31 +374,40 @@ fn usage(state: &State, columns: usize, theme: &Theme<'_>) -> Row {
     };
     let context_width = columns.saturating_sub(cost.width().min(columns / 2) + 3);
     let mut spans = Vec::new();
-    if let Some(ratio) = state.context_ratio.filter(|ratio| ratio.is_finite()) {
+    let ratio = state.context_ratio.filter(|ratio| ratio.is_finite());
+    let pending_window = state
+        .context_window
+        .filter(|_| ratio.is_none() && state.usage.is_empty());
+    // A known capacity can show an empty track while usage is pending. Keep
+    // this placeholder local to rendering; the measured ratio stays unknown.
+    if let Some(ratio) = ratio.or(pending_window.map(|_| 0.0)) {
         let snapshot = state.context_snapshot.as_ref();
-        let value = match state.hud.config.context_value.as_str() {
-            "tokens" => {
-                snapshot.map(|value| format!("{} / {}", count(value.used), count(value.window)))
-            }
-            "remaining" => snapshot
-                .and_then(|value| value.used.zip(value.window))
-                .map(|(used, total)| format!("{} left", count(Some(total.saturating_sub(used))))),
-            "both" => snapshot.map(|value| {
-                format!(
-                    "{:.0}% · {} / {}",
-                    ratio * 100.0,
-                    count(value.used),
-                    count(value.window)
-                )
-            }),
-            _ => None,
-        }
-        .unwrap_or_else(|| format!("{:.0}%", ratio * 100.0));
+        let value =
+            pending_window
+                .map(|window| format!("0k / {}", count(Some(window))))
+                .or_else(|| match state.hud.config.context_value.as_str() {
+                    "tokens" => snapshot
+                        .map(|value| format!("{} / {}", count_k(value.used), count(value.window))),
+                    "remaining" => snapshot.and_then(|value| value.used.zip(value.window)).map(
+                        |(used, total)| format!("{} left", count(Some(total.saturating_sub(used)))),
+                    ),
+                    "both" => snapshot.map(|value| {
+                        format!(
+                            "{:.0}% · {} / {}",
+                            ratio * 100.0,
+                            count_k(value.used),
+                            count(value.window)
+                        )
+                    }),
+                    _ => None,
+                })
+                .unwrap_or_else(|| format!("{:.0}%", ratio * 100.0));
         let bar_width = if columns >= 100 { 10 } else { 6 };
-        spans.push(Span::styled(format!("{label} "), theme.style("muted")));
+        let label_width = label.width();
+        spans.push(label);
         if state.hud.config.context_bar
             && columns >= 40
-            && label.width() + bar_width + value.width() + 2 <= context_width
+            && label_width + bar_width + value.width() < context_width
         {
             let filled = (ratio.clamp(0.0, 1.0) * bar_width as f64).round() as usize;
             spans.push(Span::styled("█".repeat(filled), theme.usage(ratio)));
@@ -305,23 +417,35 @@ fn usage(state: &State, columns: usize, theme: &Theme<'_>) -> Row {
             ));
             spans.push(Span::raw(" "));
         }
-        spans.push(Span::styled(value, theme.usage(ratio)));
+        spans.push(Span::styled(
+            value,
+            if pending_window.is_some() {
+                theme.style("muted")
+            } else {
+                theme.usage(ratio).add_modifier(Modifier::BOLD)
+            },
+        ));
     } else {
-        let value = if state.usage.is_empty() {
-            format!("{label} —")
-        } else if state.usage == "context n/a" {
-            format!("{label} n/a")
+        if state.usage.is_empty() || state.usage == "context n/a" {
+            spans.push(label);
+            spans.push(theme.value(if state.usage.is_empty() { "—" } else { "n/a" }));
         } else {
-            state
-                .usage
-                .replace(" tokens", if columns < 60 { " tok" } else { " tokens" })
-        };
-        spans.push(Span::styled(value, theme.style("muted")));
+            spans.push(Span::styled(
+                state
+                    .usage
+                    .replace(" tokens", if columns < 60 { " tok" } else { " tokens" }),
+                theme.style("muted"),
+            ));
+        }
     }
     let mut line = clip(Line::from(spans), context_width);
     line.spans.push(Span::styled(" │ ", theme.style("muted")));
-    line.spans
-        .push(Span::styled(cost.to_owned(), theme.style("muted")));
+    if let Some(value) = cost.strip_prefix("cost ") {
+        line.spans.push(Span::styled("cost ", theme.style("muted")));
+        line.spans.push(theme.value(value));
+    } else {
+        line.spans.push(theme.value(cost));
+    }
     if let Some(speed) = state
         .hud
         .telemetry
@@ -329,10 +453,10 @@ fn usage(state: &State, columns: usize, theme: &Theme<'_>) -> Row {
         .speed
         .filter(|value| value.is_finite() && *value >= 0.0)
     {
-        line.spans.push(Span::styled(
-            format!(" · {speed:.1} tok/s"),
-            theme.style("muted"),
-        ));
+        theme.separate(&mut line.spans);
+        line.spans.push(theme.value(format!("{speed:.1}")));
+        line.spans
+            .push(Span::styled(" tok/s", theme.style("muted")));
     }
     Row {
         element: "usage",
@@ -357,35 +481,51 @@ fn element(state: &State, name: &str, columns: usize, theme: &Theme<'_>, now: f6
         &metrics.tokens
     };
     let row = match name {
-        "project" => project(state, columns, theme),
+        "project" => project(state, columns, theme, false),
         "usage" => usage(state, columns, theme),
-        "tokens" => text_row(
-            "tokens",
-            "/hud info",
-            format!(
-                "{}{}  in {} · out {} · reasoning {}{}",
-                theme.label("Tokens", "Token"),
-                if hud.config.token_scope == "request" {
-                    theme.label(" (last)", "（本次）")
-                } else {
-                    ""
-                },
-                count(tokens.input),
-                count(tokens.output),
-                count(tokens.reasoning),
-                if hud.config.token_scope == "request" {
-                    String::new()
-                } else if metrics.failed_calls > 0 {
-                    format!(
-                        " · {} completed · {} failed",
-                        metrics.calls, metrics.failed_calls
-                    )
-                } else {
-                    format!(" · {} calls", metrics.calls)
+        "reasoning" => {
+            let level = reasoning_level(state);
+            metric_row(
+                "reasoning",
+                "/effort",
+                theme.label("Reasoning", "思考强度"),
+                vec![Span::styled(
+                    clean(level.unwrap_or(theme.label("model default", "模型默认"))),
+                    if level.is_some() {
+                        theme.style("model").add_modifier(Modifier::BOLD)
+                    } else {
+                        theme.style("muted")
+                    },
+                )],
+                theme,
+            )
+        }
+        "tokens" => {
+            let mut details = Vec::new();
+            theme.field(&mut details, "in", count(tokens.input));
+            theme.field(&mut details, "out", count(tokens.output));
+            theme.field(&mut details, "reasoning", count(tokens.reasoning));
+            if hud.config.token_scope != "request" {
+                theme.separate(&mut details);
+                details.push(theme.value(metrics.calls.to_string()));
+                details.push(Span::styled(
+                    if metrics.failed_calls > 0 {
+                        " completed"
+                    } else {
+                        " calls"
+                    },
+                    theme.style("muted"),
+                ));
+                if metrics.failed_calls > 0 {
+                    theme.separate(&mut details);
+                    details.push(Span::styled(
+                        format!("{} failed", metrics.failed_calls),
+                        theme.style("critical"),
+                    ));
                 }
-            ),
-            theme,
-        ),
+            }
+            metric_row("tokens", "/hud info", theme.token_label(), details, theme)
+        }
         "cache" => {
             let hit = tokens
                 .cache_read
@@ -420,48 +560,52 @@ fn element(state: &State, name: &str, columns: usize, theme: &Theme<'_>, now: f6
                     }
                 })
                 .unwrap_or_default();
-            text_row(
+            let mut details = Vec::new();
+            theme.field(&mut details, "read", count(tokens.cache_read));
+            theme.field(&mut details, "write", count(tokens.cache_write));
+            theme.field(&mut details, "hit", hit);
+            details.push(Span::styled(expiry, theme.style("muted")));
+            metric_row(
                 "cache",
                 "/hud info",
-                format!(
-                    "{}  read {} · write {} · hit {hit}{expiry}",
-                    theme.label("Cache", "缓存"),
-                    count(tokens.cache_read),
-                    count(tokens.cache_write)
-                ),
+                theme.label("Cache", "缓存"),
+                details,
                 theme,
             )
         }
-        "cost" => text_row(
-            "cost",
-            "/hud info",
-            format!(
-                "{}  session {}{}{}",
-                theme.label("Cost", "费用"),
+        "cost" => {
+            let mut details = Vec::new();
+            theme.field(
+                &mut details,
+                "session",
                 if state.cost.is_empty() {
                     "—"
                 } else {
                     state.cost.strip_prefix("cost ").unwrap_or(&state.cost)
                 },
-                if hud.config.daily_cost {
-                    format!(
-                        " · today {}",
-                        money(hud.host.daily_cost, hud.host.daily_cost_partial)
-                    )
-                } else {
-                    String::new()
-                },
-                if hud.config.weekly_cost {
-                    format!(
-                        " · week {}",
-                        money(hud.host.weekly_cost, hud.host.weekly_cost_partial)
-                    )
-                } else {
-                    String::new()
-                }
-            ),
-            theme,
-        ),
+            );
+            if hud.config.daily_cost {
+                theme.field(
+                    &mut details,
+                    "today",
+                    money(hud.host.daily_cost, hud.host.daily_cost_partial),
+                );
+            }
+            if hud.config.weekly_cost {
+                theme.field(
+                    &mut details,
+                    "week",
+                    money(hud.host.weekly_cost, hud.host.weekly_cost_partial),
+                );
+            }
+            metric_row(
+                "cost",
+                "/hud info",
+                theme.label("Cost", "费用"),
+                details,
+                theme,
+            )
+        }
         "tools" => {
             let tools: Vec<_> = state
                 .entries
@@ -489,33 +633,30 @@ fn element(state: &State, name: &str, columns: usize, theme: &Theme<'_>, now: f6
                 .iter()
                 .filter(|tool| matches!(tool.status.as_str(), "failed" | "cancelled"))
                 .count();
-            let labels = active
-                .iter()
-                .take(hud.config.activity_limit)
-                .map(|tool| {
-                    format!(
-                        "◐ {}{}",
-                        fit(&tool.title, 32),
-                        tool.elapsed_seconds()
-                            .map_or(String::new(), |seconds| format!(" ({})", elapsed(seconds)))
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(" · ");
-            text_row(
+            let mut details = Vec::new();
+            for tool in active.iter().take(hud.config.activity_limit) {
+                theme.separate(&mut details);
+                details.push(Span::styled("◐ ", theme.style("model")));
+                details.push(theme.value(fit(&tool.title, 32)));
+                if let Some(seconds) = tool.elapsed_seconds() {
+                    details.push(Span::styled(
+                        format!(" ({})", elapsed(seconds)),
+                        theme.style("muted"),
+                    ));
+                }
+            }
+            theme.separate(&mut details);
+            details.push(Span::styled("✓ ", theme.style("context")));
+            details.push(theme.value(completed.to_string()));
+            if failed > 0 {
+                theme.separate(&mut details);
+                details.push(Span::styled(format!("! {failed}"), theme.style("critical")));
+            }
+            metric_row(
                 "tools",
                 "/tools",
-                format!(
-                    "{}  {}{}✓ {completed}{}",
-                    theme.label("Tools", "工具"),
-                    labels,
-                    if labels.is_empty() { "" } else { " · " },
-                    if failed > 0 {
-                        format!(" · ! {failed}")
-                    } else {
-                        String::new()
-                    }
-                ),
+                theme.label("Tools", "工具"),
+                details,
                 theme,
             )
         }
@@ -547,46 +688,46 @@ fn element(state: &State, name: &str, columns: usize, theme: &Theme<'_>, now: f6
                 .count();
             let mut details = Vec::new();
             if !steps.is_empty() {
-                details.push(format!("{done}/{}", steps.len()));
+                details.push(theme.value(format!("{done}/{}", steps.len())));
             }
             if let Some(reason) = waiting {
-                details.push(clean(reason));
+                theme.separate(&mut details);
+                details.push(Span::styled(clean(reason), theme.style("warning")));
             }
             if let Some(current) = current {
-                details.push(clean(current));
+                theme.separate(&mut details);
+                details.push(theme.value(clean(current)));
             } else if waiting.is_none() {
-                details.push(
-                    theme
-                        .label(
-                            if done == steps.len() {
-                                "complete"
-                            } else {
-                                "pending"
-                            },
-                            if done == steps.len() {
-                                "已完成"
-                            } else {
-                                "待处理"
-                            },
-                        )
-                        .into(),
-                );
+                theme.separate(&mut details);
+                details.push(theme.value(theme.label(
+                    if done == steps.len() {
+                        "complete"
+                    } else {
+                        "pending"
+                    },
+                    if done == steps.len() {
+                        "已完成"
+                    } else {
+                        "待处理"
+                    },
+                )));
             }
             if blocked > 0 {
-                details.push(format!("{blocked} blocked"));
+                theme.separate(&mut details);
+                details.push(Span::styled(
+                    format!("{blocked} blocked"),
+                    theme.style("warning"),
+                ));
             }
-            text_row(
+            metric_row(
                 "tasks",
                 "/tasks",
-                format!(
-                    "{}  {}",
-                    if steps.is_empty() {
-                        theme.label("Status", "状态")
-                    } else {
-                        theme.label("Plan", "计划")
-                    },
-                    details.join(" · ")
-                ),
+                if steps.is_empty() {
+                    theme.label("Status", "状态")
+                } else {
+                    theme.label("Plan", "计划")
+                },
+                details,
                 theme,
             )
         }
@@ -595,95 +736,108 @@ fn element(state: &State, name: &str, columns: usize, theme: &Theme<'_>, now: f6
                 .as_array()
                 .filter(|jobs| !jobs.is_empty())?;
             let active = jobs.iter().filter(|job| job["status"] == "running").count();
-            let labels = jobs
-                .iter()
-                .take(hud.config.activity_limit)
-                .map(|job| {
-                    let live_elapsed = (job["status"] == "running")
-                        .then(|| job["startedAt"].as_f64())
-                        .flatten()
-                        .filter(|started| started.is_finite() && *started >= 0.0 && *started <= now)
-                        .map(|started| now - started);
-                    let seconds = live_elapsed
-                        .or_else(|| job["elapsedSeconds"].as_f64())
-                        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0);
-                    format!(
-                        "{} {}{}",
-                        if job["status"] == "running" {
-                            "◐"
-                        } else if job["status"] == "failed" {
-                            "!"
-                        } else if job["status"] == "cancelled" {
-                            "×"
-                        } else if matches!(job["status"].as_str(), Some("done" | "completed")) {
-                            "✓"
-                        } else {
-                            "?"
-                        },
-                        fit(job["title"].as_str().unwrap_or("job"), 32),
-                        seconds.map_or(String::new(), |seconds| format!(" ({})", elapsed(seconds)))
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(" · ");
-            text_row(
+            let mut details = vec![
+                theme.value(format!("{active}/{}", jobs.len())),
+                Span::styled(" running", theme.style("muted")),
+            ];
+            for job in jobs.iter().take(hud.config.activity_limit) {
+                let live_elapsed = (job["status"] == "running")
+                    .then(|| job["startedAt"].as_f64())
+                    .flatten()
+                    .filter(|started| started.is_finite() && *started >= 0.0 && *started <= now)
+                    .map(|started| now - started);
+                let seconds = live_elapsed
+                    .or_else(|| job["elapsedSeconds"].as_f64())
+                    .filter(|seconds| seconds.is_finite() && *seconds >= 0.0);
+                let (marker, role) = match job["status"].as_str() {
+                    Some("running") => ("◐ ", "model"),
+                    Some("failed") => ("! ", "critical"),
+                    Some("cancelled") => ("× ", "muted"),
+                    Some("done" | "completed") => ("✓ ", "context"),
+                    _ => ("? ", "muted"),
+                };
+                theme.separate(&mut details);
+                details.push(Span::styled(marker, theme.style(role)));
+                details.push(theme.value(fit(job["title"].as_str().unwrap_or("job"), 32)));
+                if let Some(seconds) = seconds {
+                    details.push(Span::styled(
+                        format!(" ({})", elapsed(seconds)),
+                        theme.style("muted"),
+                    ));
+                }
+            }
+            metric_row(
                 "agents",
                 "/tasks",
-                format!(
-                    "{}  {active}/{} running · {labels}",
-                    theme.label("Jobs", "后台作业"),
-                    jobs.len()
-                ),
+                theme.label("Jobs", "后台作业"),
+                details,
                 theme,
             )
         }
         "skills" => {
             let environment = &metrics.environment;
             let details = if metrics.stream_id.is_empty() {
-                "n/a".into()
+                vec![theme.value("n/a")]
             } else {
-                format!(
-                    "{}/{} active · MCP {} · {} AGENTS.md{}",
-                    environment.skills.len(),
-                    environment.available_skills,
-                    environment.mcp_servers.len(),
-                    hud.host.instruction_files.len(),
-                    if environment.skills.is_empty() {
-                        String::new()
-                    } else {
-                        format!(
-                            " · {}",
-                            environment
-                                .skills
-                                .iter()
-                                .take(hud.config.activity_limit)
-                                .map(|name| clean(name))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
+                let mut details = vec![
+                    theme.value(format!(
+                        "{}/{}",
+                        environment.skills.len(),
+                        environment.available_skills,
+                    )),
+                    Span::styled(" active", theme.style("muted")),
+                ];
+                theme.field(
+                    &mut details,
+                    "MCP",
+                    environment.mcp_servers.len().to_string(),
+                );
+                theme.separate(&mut details);
+                details.push(theme.value(hud.host.instruction_files.len().to_string()));
+                details.push(Span::styled(" AGENTS.md", theme.style("muted")));
+                if !environment.skills.is_empty() {
+                    theme.separate(&mut details);
+                    details.push(Span::styled(
+                        environment
+                            .skills
+                            .iter()
+                            .take(hud.config.activity_limit)
+                            .map(|name| clean(name))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        theme.style("muted"),
+                    ));
+                    let hidden = environment.skills.len().saturating_sub(hud.config.activity_limit);
+                    if hidden > 0 {
+                        details.push(Span::styled(format!(" +{hidden}"), theme.style("muted")));
                     }
-                )
+                }
+                details
             };
-            text_row(
+            metric_row(
                 "skills",
-                "/hud info",
-                format!("{}  {details}", theme.label("Skills", "技能")),
+                "/skills",
+                theme.label("Skills", "技能"),
+                details,
                 theme,
             )
         }
-        "memory" => text_row(
+        "memory" => metric_row(
             "memory",
             "/hud info",
+            theme.label("Host RAM", "主机内存"),
             hud.host.memory.map_or_else(
-                || format!("{}  n/a", theme.label("Host RAM", "主机内存")),
+                || vec![theme.value("n/a")],
                 |(used, total)| {
-                    format!(
-                        "{}  {:.1}/{:.1} GiB · {:.0}%",
-                        theme.label("Host RAM", "主机内存"),
-                        used as f64 / 1073741824.0,
-                        total as f64 / 1073741824.0,
-                        used as f64 / total.max(1) as f64 * 100.0
-                    )
+                    vec![
+                        theme.value(format!(
+                            "{:.1}/{:.1}",
+                            used as f64 / 1073741824.0,
+                            total as f64 / 1073741824.0,
+                        )),
+                        Span::styled(" GiB · ", theme.style("muted")),
+                        theme.value(format!("{:.0}%", used as f64 / total.max(1) as f64 * 100.0)),
+                    ]
                 },
             ),
             theme,
@@ -738,50 +892,61 @@ fn element(state: &State, name: &str, columns: usize, theme: &Theme<'_>, now: f6
                     )
                 })
                 .collect();
-            text_row(
+            let details = if parts.is_empty() {
+                vec![theme.value("n/a")]
+            } else if let Some(observed) = last_known {
+                vec![Span::styled(
+                    format!(
+                        "{} {}{} · {}",
+                        theme.label("last known", "上次数据"),
+                        elapsed(now - observed),
+                        theme.label(" ago", "前"),
+                        parts.join(" │ ")
+                    ),
+                    theme.style("muted"),
+                )]
+            } else {
+                vec![theme.value(parts.join(" │ "))]
+            };
+            metric_row(
                 "limits",
                 "/hud info",
-                format!(
-                    "{}  {}",
-                    theme.label("Limits", "额度"),
-                    if parts.is_empty() {
-                        "n/a".into()
-                    } else if let Some(observed) = last_known {
-                        format!(
-                            "{} {}{} · {}",
-                            theme.label("last known", "上次数据"),
-                            elapsed(now - observed),
-                            theme.label(" ago", "前"),
-                            parts.join(" │ ")
-                        )
-                    } else {
-                        parts.join(" │ ")
-                    }
-                ),
+                theme.label("Limits", "额度"),
+                details,
                 theme,
             )
         }
-        "session" => text_row(
-            "session",
-            "/hud info",
-            format!(
-                "{}  {} · last reply {}",
-                theme.label("Session", "会话"),
+        "session" => {
+            let mut details = vec![theme.value(
                 metrics
                     .started_at
                     .map_or("—".into(), |time| elapsed(now - time)),
+            )];
+            theme.field(
+                &mut details,
+                "last reply",
                 metrics
                     .latest
                     .responded_at
-                    .map_or("—".into(), |time| format!("{} ago", elapsed(now - time)))
-            ),
-            theme,
-        ),
+                    .map_or("—".into(), |time| format!("{} ago", elapsed(now - time))),
+            );
+            metric_row(
+                "session",
+                "/hud info",
+                theme.label("Session", "会话"),
+                details,
+                theme,
+            )
+        }
         "custom" => {
             if hud.config.custom_text.is_empty() {
                 return None;
             }
-            text_row("custom", "/hud", clean(&hud.config.custom_text), theme)
+            Row {
+                element: "custom",
+                command: "/hud",
+                line: Line::styled(clean(&hud.config.custom_text), theme.style("muted")),
+            }
         }
         _ => return None,
     };
@@ -797,6 +962,7 @@ pub fn rows(state: &State, columns: usize, max_rows: usize) -> Vec<Row> {
     let theme = Theme {
         config: cfg,
         monochrome: state.monochrome,
+        columns,
     };
     let now = Local::now().timestamp() as f64;
     let mut rows: Vec<_> = cfg
@@ -804,17 +970,45 @@ pub fn rows(state: &State, columns: usize, max_rows: usize) -> Vec<Row> {
         .iter()
         .filter_map(|name| element(state, name, columns, &theme, now))
         .collect();
+    let budget = max_rows.min(cfg.max_rows);
+    let reasoning_visible = |merged: bool| {
+        if budget == 1 && rows.iter().any(|row| row.element == "usage") {
+            return false;
+        }
+        let visible = rows.len().saturating_sub(usize::from(merged)).min(budget)
+            .saturating_sub(usize::from(state.hud.problem.is_some()));
+        rows.iter()
+            .filter(|row| !merged || row.element != "usage")
+            .take(visible)
+            .any(|row| row.element == "reasoning")
+    };
+    let inline_effort = !reasoning_visible(false);
+    let merged_inline_effort = !reasoning_visible(true);
+    if let Some(index) = rows.iter().position(|row| row.element == "project") {
+        rows[index] = project(state, columns, &theme, inline_effort);
+    }
     if cfg.layout == Layout::Compact {
         if let (Some(project_index), Some(usage_index)) = (
             rows.iter().position(|row| row.element == "project"),
             rows.iter().position(|row| row.element == "usage"),
         ) {
             let project_width = columns.saturating_sub(rows[usage_index].line.width() + 3);
-            if project_width >= 18 {
+            let permission_reserve = if state.runtime_supported {
+                "Accept edits".width().saturating_sub(clean(state.permission_label()).width())
+            } else {
+                0
+            };
+            let core_width = clean(project_model(state)).width()
+                + project_controls(state, project_width, &theme, merged_inline_effort).width()
+                + permission_reserve
+                + 2;
+            if project_width >= core_width.max(18) {
                 let usage_row = rows.remove(usage_index);
                 let project_index = project_index - usize::from(usage_index < project_index);
-                rows[project_index].line =
-                    clip(project(state, project_width, &theme).line, project_width);
+                rows[project_index].line = clip(
+                    project(state, project_width, &theme, merged_inline_effort).line,
+                    project_width,
+                );
                 rows[project_index]
                     .line
                     .spans
@@ -825,7 +1019,6 @@ pub fn rows(state: &State, columns: usize, max_rows: usize) -> Vec<Row> {
             }
         }
     }
-    let budget = max_rows.min(cfg.max_rows);
     if budget == 1 {
         if let Some(index) = rows.iter().position(|row| row.element == "usage") {
             let usage = rows.remove(index);

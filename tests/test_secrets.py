@@ -50,6 +50,16 @@ def test_invalid_secret_yaml_is_not_disclosed_or_replaced(tmp_path):
     assert path.read_text() == original
 
 
+def test_loading_invalid_secret_yaml_does_not_log_values(user_dir, project_dir, caplog):
+    path = user_dir / "secrets.yaml"
+    path.write_text("env: [SYNTHETIC-PRIVATE-KEY", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="aster.layered_config"):
+        assert load_secrets_into_env() == []
+    assert str(path) in caplog.text
+    assert "ParserError" in caplog.text
+    assert "SYNTHETIC-PRIVATE-KEY" not in caplog.text
+
+
 @pytest.fixture
 def user_dir(tmp_path, monkeypatch):
     d = tmp_path / "user"

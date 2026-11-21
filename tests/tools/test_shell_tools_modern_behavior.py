@@ -7,9 +7,22 @@ its primary file/run surface. Search-anchor behavior is covered separately in
 test_shell_tools_modern.py.
 """
 
+import shlex
+import sys
+
 import pytest
 
 from aster.tools.shell_tools import Match, ShellResult, ShellTools
+
+_IS_WINDOWS = sys.platform == "win32"
+_PWD_COMMAND = "(Get-Location).Path" if _IS_WINDOWS else "pwd"
+
+
+def _python_command(code: str) -> str:
+    arguments = [sys.executable, "-c", code]
+    if _IS_WINDOWS:
+        return "& " + " ".join("'" + argument.replace("'", "''") + "'" for argument in arguments)
+    return shlex.join(arguments)
 
 
 def test_shell_tools_directs_agents_to_its_file_and_command_methods():
@@ -41,33 +54,39 @@ def test_run_and_run_stream_have_matching_arguments():
 async def test_run_stream_accepts_stdin_verbatim_and_keeps_exit_status(tmp_path, payload):
     shell = ShellTools(cwd=str(tmp_path))
     try:
-        buffered = await shell.run(
-            "cat; printf 'problem\\n' >&2; (exit 7)", stdin=payload, timeout=5.0
-        )
-        events = [
-            event
-            async for event in shell.run_stream(
-                "cat; printf 'problem\\n' >&2; (exit 7)", stdin=payload, timeout=5.0
+        command = (
+            _python_command(
+                "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read()); "
+                "sys.stderr.buffer.write(b'problem\\n'); sys.exit(7)"
             )
-        ]
+            if _IS_WINDOWS
+            else "cat; printf 'problem\\n' >&2; (exit 7)"
+        )
+        buffered = await shell.run(command, stdin=payload, timeout=5.0)
+        events = [event async for event in shell.run_stream(command, stdin=payload, timeout=5.0)]
         assert "".join(event.text for event in events if event.kind == "stdout") == payload
         assert "".join(event.text for event in events if event.kind == "stderr") == "problem\n"
         assert events[-1].kind == "done"
         assert events[-1].returncode == 7
-        # Buffered run has always stripped trailing newlines; streaming does not.
-        assert buffered.stdout == payload.rstrip("\n")
-        assert buffered.stderr == "problem"
+        # PowerShell preserves trailing newlines; Bash buffered results strip them.
+        assert buffered.stdout == (payload if _IS_WINDOWS else payload.rstrip("\n"))
+        assert buffered.stderr == ("problem\n" if _IS_WINDOWS else "problem")
         assert buffered.returncode == events[-1].returncode
         assert not events[-1].timed_out
         assert sum(event.kind == "done" for event in events) == 1
-        assert (await shell.run("printf ready")).stdout == "ready"
+        ready = "[Console]::Write('ready')" if _IS_WINDOWS else "printf ready"
+        assert (await shell.run(ready)).stdout == "ready"
     finally:
         await shell.close()
 
 
 @pytest.fixture
-def sh(tmp_path):
-    return ShellTools(cwd=str(tmp_path))
+async def sh(tmp_path):
+    shell = ShellTools(cwd=str(tmp_path))
+    try:
+        yield shell
+    finally:
+        await shell.close()
 
 
 @pytest.mark.asyncio
@@ -78,15 +97,15 @@ async def test_run_persists_state(sh, tmp_path):
     # cd persists across calls in the same session.
     (tmp_path / "sub").mkdir()
     await sh.run("cd sub")
-    r2 = await sh.run("pwd")
+    r2 = await sh.run(_PWD_COMMAND)
     assert r2.stdout.strip().endswith("sub")
 
 
 @pytest.mark.asyncio
 async def test_run_reports_failure(sh):
-    r = await sh.run("false")
+    r = await sh.run(_python_command("import sys; sys.exit(1)"))
     assert not r.success
-    assert r.returncode != 0
+    assert r.returncode == 1
     assert r.timed_out is False
 
 
@@ -95,8 +114,8 @@ def test_match_requires_resolved_path():
         Match("example.py", 1, 1, "value\n")  # type: ignore[call-arg]
 
 
-def test_shell_result_timeout_flag_preserves_positional_matches_argument():
-    match = Match("example.py", 1, 1, "value\n", resolved_path="/tmp/example.py")
+def test_shell_result_timeout_flag_preserves_positional_matches_argument(tmp_path):
+    match = Match("example.py", 1, 1, "value\n", resolved_path=tmp_path / "example.py")
     result = ShellResult("value", "", 0, [match], timed_out=True)
 
     assert result.matches == [match]
@@ -154,14 +173,14 @@ async def test_replace_match_rejects_old_new_without_modifying_file(
     """Both whole-file and sliced matches reject the path-form argument pattern."""
     original = "def calc(a, b):\n    return a * b\n"
     path = tmp_path / "calc.py"
-    path.write_text(original)
+    path.write_bytes(original.encode("utf-8"))
     match = await sh.read("calc.py", lines)
     with pytest.raises(ValueError) as error:
         if keyword:
             await sh.replace(match, "return a * b", new=replacement)
         else:
             await sh.replace(match, "return a * b", replacement)
-    assert path.read_bytes() == original.encode()
+    assert path.read_bytes() == original.encode("utf-8")
     assert "replace(match, new_text)" in str(error.value)
     assert "replace(path, old, new)" in str(error.value)
     assert "no file was changed" in str(error.value)
@@ -225,8 +244,8 @@ async def test_match_from_read_stays_bound_after_cwd_change(sh, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_close_terminates_underlying_bash_session(sh):
-    """Verify close() terminates BashSession and the shell lazily restarts."""
+async def test_close_terminates_underlying_shell_session(sh):
+    """Verify close() terminates the session and the shell lazily restarts."""
     r = await sh.run("echo started")
     assert r.success
     assert sh._session._process is not None
@@ -288,26 +307,33 @@ async def test_run_with_cwd_runs_there_and_leaves_the_shell_directory(sh, tmp_pa
     home = sh.cwd
     target = str((tmp_path / "sub").resolve()) if absolute else "sub"
     try:
-        r = await sh.run("pwd", cwd=target)
+        r = await sh.run(_PWD_COMMAND, cwd=target)
         assert r.success
-        assert r.stdout == str((tmp_path / "sub").resolve())
+        assert r.stdout.strip() == str((tmp_path / "sub").resolve())
         # A cd inside the scoped command does not move the shell either.
-        r = await sh.run("cd deeper && pwd", cwd=target)
-        assert r.stdout.endswith("deeper")
+        command = "cd deeper; (Get-Location).Path" if _IS_WINDOWS else "cd deeper && pwd"
+        r = await sh.run(command, cwd=target)
+        assert r.success
+        assert r.stdout.strip().endswith("deeper")
         assert sh.cwd == home
-        assert (await sh.run("pwd")).stdout == str(home)
+        assert (await sh.run(_PWD_COMMAND)).stdout.strip() == str(home)
     finally:
         await sh.close()
 
 
 async def test_run_with_a_missing_cwd_fails_without_running_the_command(sh, tmp_path):
     try:
-        r = await sh.run("touch marker; echo ran", cwd="missing")
+        command = (
+            "New-Item -ItemType File marker; Write-Output 'ran'"
+            if _IS_WINDOWS
+            else "touch marker; echo ran"
+        )
+        r = await sh.run(command, cwd="missing")
         assert not r.success
         assert "missing" in r.stderr
         assert "ran" not in r.stdout
         assert not (tmp_path / "marker").exists()
-        assert (await sh.run("pwd")).stdout == str(sh.cwd)
+        assert (await sh.run(_PWD_COMMAND)).stdout.strip() == str(sh.cwd)
     finally:
         await sh.close()
 
@@ -316,8 +342,10 @@ async def test_run_with_cwd_keeps_environment_changes(sh, tmp_path):
     """``cwd=`` runs in the session's own shell, not a subshell: exports persist."""
     (tmp_path / "sub").mkdir()
     try:
-        await sh.run("export ASTER_CWD_PROBE=kept", cwd="sub")
-        assert (await sh.run("echo $ASTER_CWD_PROBE")).stdout == "kept"
+        command = "$env:ASTER_CWD_PROBE = 'kept'" if _IS_WINDOWS else "export ASTER_CWD_PROBE=kept"
+        assert (await sh.run(command, cwd="sub")).success
+        command = "Write-Output $env:ASTER_CWD_PROBE" if _IS_WINDOWS else "echo $ASTER_CWD_PROBE"
+        assert (await sh.run(command)).stdout.strip() == "kept"
     finally:
         await sh.close()
 
@@ -325,21 +353,27 @@ async def test_run_with_cwd_keeps_environment_changes(sh, tmp_path):
 async def test_run_with_cwd_returns_the_command_status(sh, tmp_path):
     (tmp_path / "sub").mkdir()
     try:
-        r = await sh.run("false", cwd="sub")
+        r = await sh.run(_python_command("import sys; sys.exit(1)"), cwd="sub")
         assert r.returncode == 1
-        r = await sh.run("exit_code() { return 7; }; exit_code", cwd="sub")
+        command = (
+            _python_command("import sys; sys.exit(7)")
+            if _IS_WINDOWS
+            else "exit_code() { return 7; }; exit_code"
+        )
+        r = await sh.run(command, cwd="sub")
         assert r.returncode == 7
-        assert (await sh.run("pwd")).stdout == str(sh.cwd)
+        assert (await sh.run(_PWD_COMMAND)).stdout.strip() == str(sh.cwd)
     finally:
         await sh.close()
 
 
+@pytest.mark.skipif(_IS_WINDOWS, reason="CDPATH is a POSIX shell feature")
 async def test_run_with_a_relative_cwd_ignores_cdpath(sh, tmp_path):
     """A relative ``cwd`` is the shell directory's child, whatever CDPATH says."""
     (tmp_path / "sub").mkdir()
     (tmp_path / "elsewhere" / "sub").mkdir(parents=True)
     try:
-        await sh.run(f"export CDPATH={tmp_path / 'elsewhere'}")
+        await sh.run(f"export CDPATH={shlex.quote(str(tmp_path / 'elsewhere'))}")
         r = await sh.run("pwd", cwd="sub")
         assert r.stdout == str((tmp_path / "sub").resolve())
     finally:
@@ -350,9 +384,17 @@ async def test_run_with_stdin_keeps_shell_changes(sh, tmp_path):
     """``stdin=`` runs in the session's own shell, not a subshell: cd and exports persist."""
     (tmp_path / "sub").mkdir()
     try:
-        r = await sh.run("read value; export ASTER_STDIN_PROBE=$value", stdin="kept\n")
+        command = (
+            "$env:ASTER_STDIN_PROBE = [Console]::In.ReadLine()"
+            if _IS_WINDOWS
+            else "read value; export ASTER_STDIN_PROBE=$value"
+        )
+        r = await sh.run(command, stdin="kept\n")
         assert r.success
-        assert (await sh.run("echo $ASTER_STDIN_PROBE")).stdout == "kept"
+        command = (
+            "Write-Output $env:ASTER_STDIN_PROBE" if _IS_WINDOWS else "echo $ASTER_STDIN_PROBE"
+        )
+        assert (await sh.run(command)).stdout.strip() == "kept"
         await sh.run("cd sub", stdin="ignored\n")
         assert sh.cwd == (tmp_path / "sub").resolve()
     finally:
@@ -363,12 +405,21 @@ async def test_run_with_stdin_and_cwd_returns_to_the_shell_directory(sh, tmp_pat
     (tmp_path / "sub").mkdir()
     try:
         home = sh.cwd
-        r = await sh.run("cat; pwd", stdin="line\n", cwd="sub")
-        assert r.stdout == f"line\n{(tmp_path / 'sub').resolve()}"
+        command = (
+            "[Console]::Write([Console]::In.ReadToEnd()); (Get-Location).Path"
+            if _IS_WINDOWS
+            else "cat; pwd"
+        )
+        r = await sh.run(command, stdin="line\n", cwd="sub")
+        assert r.success
+        assert r.stdout.splitlines() == ["line", str((tmp_path / "sub").resolve())]
         assert sh.cwd == home
-        assert (await sh.run("false", stdin="x\n")).returncode == 1
+        assert (
+            await sh.run(_python_command("import sys; sys.exit(1)"), stdin="x\n")
+        ).returncode == 1
         # The session keeps reading its own commands after the redirection ends.
-        assert (await sh.run("echo still here")).stdout == "still here"
+        command = "Write-Output 'still here'" if _IS_WINDOWS else "echo still here"
+        assert (await sh.run(command)).stdout.strip() == "still here"
     finally:
         await sh.close()
 
@@ -376,7 +427,7 @@ async def test_run_with_stdin_and_cwd_returns_to_the_shell_directory(sh, tmp_pat
 async def test_run_stream_with_cwd_runs_there(sh, tmp_path):
     (tmp_path / "sub").mkdir()
     try:
-        events = [event async for event in sh.run_stream("pwd", cwd="sub")]
+        events = [event async for event in sh.run_stream(_PWD_COMMAND, cwd="sub")]
         out = "".join(event.text for event in events if event.kind == "stdout")
         assert out.strip() == str((tmp_path / "sub").resolve())
         assert events[-1].returncode == 0

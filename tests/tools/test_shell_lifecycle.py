@@ -6,7 +6,6 @@ import asyncio
 import gc
 import os
 import shlex
-import signal
 import sys
 import time
 import urllib.request
@@ -22,10 +21,11 @@ from aster.tools.shell_tools import ShellTools
 @pytest.mark.asyncio
 async def test_fresh_shell_server_survives_discard_and_scope_close(tmp_path):
     pid = None
+    process_handle = None
     shell_ref = None
 
     async def start():
-        nonlocal pid, shell_ref
+        nonlocal pid, process_handle, shell_ref
         shell = ShellTools(cwd=str(tmp_path))
         shell_ref = weakref.ref(shell.session)
         assert shell.session._keep_background_on_close
@@ -35,10 +35,26 @@ async def test_fresh_shell_server_survives_discard_and_scope_close(tmp_path):
             "open('server.info','w').write(str(os.getpid())+' '+str(s.server_address[1])); "
             "s.serve_forever()"
         )
-        _, _, status = await shell.session.run(
-            f"{shlex.quote(sys.executable)} -u -c {shlex.quote(code)} >server.log 2>&1 &"
-        )
-        assert status == 0
+        if os.name == "nt":
+            import _winapi
+
+            (tmp_path / "server.py").write_text(code, encoding="utf-8")
+            executable = sys.executable.replace("'", "''")
+            directory = str(tmp_path).replace("'", "''")
+            command = (
+                f"(Start-Process -FilePath '{executable}' -ArgumentList '-u', 'server.py' "
+                f"-WorkingDirectory '{directory}' -WindowStyle Hidden -PassThru "
+                f"-RedirectStandardOutput '{directory}/server.log' "
+                f"-RedirectStandardError '{directory}/server.err').Id"
+            )
+        else:
+            command = f"{shlex.quote(sys.executable)} -u -c {shlex.quote(code)} >server.log 2>&1 &"
+        stdout, stderr, status = await shell.session.run(command)
+        assert status == 0, stderr
+        if os.name == "nt":
+            pid = int(stdout.strip())
+            # Hold the original process object so cleanup cannot hit a reused PID.
+            process_handle = _winapi.OpenProcess(0x00100000 | 0x0001, False, pid)
         # Service ownership is the contract here; HTTPServer's reverse-DNS
         # lookup and a two-second startup race are unrelated to that contract.
         deadline = time.monotonic() + 10
@@ -59,7 +75,18 @@ async def test_fresh_shell_server_survives_discard_and_scope_close(tmp_path):
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=2) as response:
             assert response.status == 200  # Grading happens after agent completion.
     finally:
-        if pid is not None:
+        if process_handle is not None:
+            import _winapi
+
+            try:
+                if _winapi.WaitForSingleObject(process_handle, 0) == _winapi.WAIT_TIMEOUT:
+                    _winapi.TerminateProcess(process_handle, 0)
+                assert _winapi.WaitForSingleObject(process_handle, 5000) == _winapi.WAIT_OBJECT_0
+            finally:
+                _winapi.CloseHandle(process_handle)
+        elif pid is not None:
+            import signal
+
             os.kill(pid, signal.SIGKILL)  # Harness teardown after grading.
             for _ in range(100):
                 try:
@@ -86,7 +113,8 @@ async def test_scope_isolation_adoption_and_failure_cleanup(tmp_path):
             async with preserve_background_services() as scope:
                 scope.adopt(adopted.session)
                 scoped = ShellTools(cwd=str(tmp_path), keep_background_on_close=False)
-                await scoped.session.run("true")
+                result = await scoped.session.run("$null" if os.name == "nt" else "true")
+                assert result[2] == 0
                 entered.set()
                 await release.wait()
                 raise ValueError("task failed")
@@ -102,6 +130,7 @@ async def test_scope_isolation_adoption_and_failure_cleanup(tmp_path):
     assert not BashSession(cwd=tmp_path)._keep_background_on_close
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group destructor implementation")
 def test_preservation_destructor_does_not_kill_process_group(monkeypatch):
     from unittest.mock import Mock
 

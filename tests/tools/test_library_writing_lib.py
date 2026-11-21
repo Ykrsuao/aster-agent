@@ -12,6 +12,7 @@ import pytest
 
 from aster.library_manager import LibraryManager
 from aster.skill import Skill
+from aster.tools import ShellTools
 from aster.tools.library_writing_lib import LintReport, SkillWriting
 
 # ---------------------------------------------------------------------------
@@ -329,52 +330,54 @@ async def test_list_empty_when_no_libs(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+async def native_agent(tmp_path):
+    agent = _make_agent()
+    agent.shell = ShellTools(cwd=str(tmp_path))
+    try:
+        yield agent
+    finally:
+        await agent.shell.close()
+
+
 @pytest.mark.asyncio
-async def test_run_tests_passes(tmp_path: Path):
-    """run_tests() on a library with a passing test returns output containing 'passed'."""
-    libs = SkillWriting(_make_agent(), path=tmp_path)
+@pytest.mark.parametrize("passes", [True, False])
+async def test_run_tests_uses_native_shell_and_restores_pythonpath(
+    tmp_path: Path, monkeypatch, native_agent, passes
+):
+    previous_path = tmp_path / "existing modules"
+    previous_path.mkdir()
+    (previous_path / "prior_module.py").write_text("VALUE = 3\n")
+    monkeypatch.setenv("PYTHONPATH", str(previous_path))
+    libs_path = tmp_path / "generated libs's"
+    libs = SkillWriting(native_agent, path=libs_path)
     await libs.create("rt_math", DESCRIPTION)
-    (tmp_path / "rt_math" / "rt_math.py").write_text(SIMPLE_SOURCE)
-    tests_dir = tmp_path / "rt_math" / "tests"
+    (libs_path / "rt_math" / "rt_math.py").write_text(SIMPLE_SOURCE)
+    tests_dir = libs_path / "rt_math" / "tests"
     tests_dir.mkdir(parents=True, exist_ok=True)
     (tests_dir / "test_rt_math.py").write_text(
-        "from rt_math.rt_math import add\ndef test_add(): assert add(1, 2) == 3\n"
+        "from prior_module import VALUE\nfrom rt_math.rt_math import add\n"
+        f"def test_add(): assert add(1, 2) == VALUE + {0 if passes else 1}\n"
     )
     output = await libs.run_tests("rt_math")
-    assert "passed" in output.lower(), output
+    assert ("1 passed" if passes else "1 failed") in output.lower(), output
+    assert f"returncode={0 if passes else 1}" in output, output
+    command = (
+        "Write-Output $env:PYTHONPATH" if sys.platform == "win32" else 'printf %s "$PYTHONPATH"'
+    )
+    after = await native_agent.shell.run(command)
+    assert after.stdout.strip() == str(previous_path)
 
 
 @pytest.mark.asyncio
 async def test_run_tests_passes_when_pythonpath_is_unset_and_shell_uses_nounset(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_agent
 ):
-    """run_tests() must not expand an unset PYTHONPATH under ``set -u``."""
-
-    class _NounsetShell(_FakeShell):
-        async def run(self, command, timeout=120.0):
-            import os
-            import subprocess
-
-            from aster.tools._results import RunResult
-
-            env = os.environ.copy()
-            env.pop("PYTHONPATH", None)
-            result = subprocess.run(
-                ["bash", "-u", "-c", command],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                env=env,
-            )
-            return RunResult(
-                stdout=result.stdout.strip(),
-                stderr=result.stderr.strip(),
-                returncode=result.returncode,
-            )
-
-    agent = _make_agent()
-    agent.shell = _NounsetShell()
-    libs = SkillWriting(agent, path=tmp_path)
+    """An unset PYTHONPATH stays unset, including with strict shell settings."""
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    strict = "Set-StrictMode -Version Latest" if sys.platform == "win32" else "set -u"
+    assert (await native_agent.shell.run(strict)).returncode == 0
+    libs = SkillWriting(native_agent, path=tmp_path)
     await libs.create("rt_nounset", DESCRIPTION)
     (tmp_path / "rt_nounset" / "rt_nounset.py").write_text(SIMPLE_SOURCE)
     tests_dir = tmp_path / "rt_nounset" / "tests"
@@ -383,11 +386,15 @@ async def test_run_tests_passes_when_pythonpath_is_unset_and_shell_uses_nounset(
         "from rt_nounset.rt_nounset import add\ndef test_add(): assert add(1, 2) == 3\n"
     )
 
-    monkeypatch.delenv("PYTHONPATH", raising=False)
     output = await libs.run_tests("rt_nounset")
 
     assert "passed" in output.lower(), output
     assert "unbound variable" not in output.lower(), output
+    command = (
+        "Test-Path Env:PYTHONPATH" if sys.platform == "win32" else 'printf %s "${PYTHONPATH-unset}"'
+    )
+    after = await native_agent.shell.run(command)
+    assert after.stdout.strip() == ("False" if sys.platform == "win32" else "unset")
 
 
 # ---------------------------------------------------------------------------

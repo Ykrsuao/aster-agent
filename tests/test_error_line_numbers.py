@@ -132,15 +132,15 @@ e = c.get("foo")
         assert "line 5" in formatted, f"Expected 'line 5' in error, got:\n{formatted}"
 
     @pytest.mark.asyncio
-    async def test_wrapper_line_offset_is_calculated(self, test_agent):
-        """Verify wrapper_line_offset is set in ExecutionResult."""
+    async def test_ast_wrapper_keeps_original_line_numbers(self, test_agent):
+        """AST wrapping needs no line-number correction."""
         code = "x = 1 / 0"  # Line 1
         result = await test_agent.runtime.execute_code(
             code, execution_count=1, wrap_in_function=True
         )
 
         assert result.error is not None
-        assert result.wrapper_line_offset > 0, "wrapper_line_offset should be > 0"
+        assert result.wrapper_line_offset == 0
         print(f"wrapper_line_offset = {result.wrapper_line_offset}")
 
     @pytest.mark.asyncio
@@ -312,30 +312,24 @@ class TestOffsetClearing:
             builtins = {**builtins, **result.captured_locals}
             print(f"Exec {i}: offset={result.wrapper_line_offset}, globals={list(builtins.keys())}")
 
-        # Offset should be 2 (no globals) or 3 (with globals), never growing unbounded
+        # AST wrapping keeps cell coordinates even as session globals grow.
         for i, offset in enumerate(offsets, 1):
-            assert offset <= 3, f"Execution {i} has offset {offset} - should be <= 3"
+            assert offset == 0, f"Execution {i} unexpectedly shifted source lines"
 
     @pytest.mark.asyncio
     async def test_offset_matches_actual_wrapper_structure(self, test_agent):
-        """wrapper_line_offset should match the actual number of header lines."""
-        # First execution - no globals, offset should be 2
+        """Both new and resumed cells preserve original AST source positions."""
         code1 = "x = 1"
         result1 = await test_agent.runtime.execute_code(
             code1, execution_count=1, wrap_in_function=True
         )
-        assert result1.wrapper_line_offset == 2, (
-            f"Expected offset 2 with no globals, got {result1.wrapper_line_offset}"
-        )
+        assert result1.wrapper_line_offset == 0
 
-        # Second execution - 1 global, offset should be 3
         code2 = "y = x + 1"
         result2 = await test_agent.runtime.execute_code(
             code2, execution_count=2, wrap_in_function=True, builtins=result1.captured_locals
         )
-        assert result2.wrapper_line_offset == 3, (
-            f"Expected offset 3 with globals, got {result2.wrapper_line_offset}"
-        )
+        assert result2.wrapper_line_offset == 0
 
     @pytest.mark.asyncio
     async def test_error_line_correct_across_many_executions(self, test_agent):
@@ -697,47 +691,6 @@ class TestWrappedBaseExceptionTraceback:
             "SystemExit / sys.exit() / exit() / quit() to stop a cell — use break, "
             "a flag, a helper return, or return_result()."
         )
-
-
-class TestPersistedHelperTraceback:
-    """Persisted helper frames retain their own source-relative locations."""
-
-    @pytest.mark.asyncio
-    async def test_earlier_helper_uses_original_source_and_line_number(self, test_agent):
-        namespace = {}
-        helper_source = """def boom():
-    marker = "helper"
-    raise ValueError("x")
-"""
-        defined = await test_agent.runtime.execute_code(
-            helper_source,
-            execution_count=71,
-            wrap_in_function=True,
-            builtins=namespace,
-        )
-        namespace.update(defined.captured_locals)
-        namespace.update(defined.defined_methods)
-
-        # A persisted global changes this cell's wrapper offset. That offset must
-        # apply only to Cell In[73], never to the direct-compiled helper in Cell In[71].
-        namespace["persisted"] = 1
-        failed = await test_agent.runtime.execute_code(
-            "boom()",
-            execution_count=73,
-            wrap_in_function=True,
-            builtins=namespace,
-        )
-
-        assert failed.error is not None
-        formatted = format_error_for_llm(
-            failed.error,
-            "boom()",
-            line_offset=failed.wrapper_line_offset,
-        )
-        assert "Cell In[73], line 1" in formatted
-        assert "Cell In[71], line 3, in boom" in formatted
-        assert 'raise ValueError("x")' in formatted
-        assert "Cell In[71], line 1, in boom" not in formatted
 
 
 class TestFormatterDirectly:

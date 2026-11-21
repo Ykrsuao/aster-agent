@@ -23,54 +23,54 @@ class SampleAgent(Agent):
 
 
 @pytest.mark.asyncio
-async def test_llm_defining_target_method_triggers_error_and_retry():
-    """Test that when LLM defines the target method with other non-function code, it gets rejected.
+async def test_wrapped_method_with_other_code_requires_an_explicit_result():
+    """A same-named plain function does not complete the generation method.
 
     Scenario:
-    1. LLM defines `process_data` as a function WITH other top-level code (print statement)
-    2. System rejects it with error message (because of other non-function code)
-    3. LLM sees error and provides correct implementation with return statement
+    1. LLM defines `process_data` plus a public helper and prints a message.
+    2. The cell runs without returning the requested result.
+    3. The next cell reuses the public helper and returns the completed result.
     """
     llm = FakeLLMClient.with_code_responses(
         [
-            # First attempt: LLM defines target method WITH other non-function code (will be rejected)
+            # Public bindings persist between cells; underscore bindings stay local.
             """
 
 
-async def _helper(self, item: str) -> str:
+async def helper(self, item: str) -> str:
     return item.upper()
 
 
 async def process_data(self, items: list[str]) -> list[str]:
     results = []
     for item in items:
-        results.append(await _helper(self, item))
+        results.append(await helper(self, item))
     return results
 
-print("done")  # Other non-function code - causes rejection
+print("done")  # Defining the plain function does not call or replace the method.
 """,
-            # Second attempt: LLM sees error, provides correct inline implementation.
+            # The continuation returns the task result explicitly.
             # call the helper as a plain callable — ``helper(self, item)``.
             """
 results = []
 for item in items:
-    results.append(await _helper(self, item))
+    results.append(await helper(self, item))
 return results
 """,
         ]
     )
 
     my_agent = SampleAgent(llm=llm)
-    result = await my_agent.process_data(["hello", "world"])
+    method = my_agent.process_data
+    result = await method(["hello", "world"])
 
-    # Should successfully process after retry
     assert result == ["HELLO", "WORLD"]
+    assert my_agent.process_data == method
 
     # helpers are plain callables in session_locals — not attached to agent.
-    assert not hasattr(my_agent, "_helper")
+    assert not hasattr(my_agent, "helper")
 
-    # Verify that both responses were used (first was rejected due to other code, second succeeded)
-    assert llm.call_count == 2, "Should have used both LLM responses (rejection + retry)"
+    assert llm.call_count == 2, "The first cell must not complete the task"
 
 
 @pytest.mark.asyncio

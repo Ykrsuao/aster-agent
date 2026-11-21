@@ -47,6 +47,9 @@ def test_run_solver_exit_requires_result(tmp_path, monkeypatch, harness_exit, ha
         assert neutral.is_relative_to(tmp_path)
         neutral_dirs.append(neutral)
         log_handles.append(kwargs["stdout"])
+        [visible_run] = results_root.glob("aster_solver/*_synthetic_mdfiles")
+        (neutral / "ipc" / "probe.txt").write_text("实时结果", encoding="utf-8")
+        assert (visible_run / "ipc" / "probe.txt").read_text(encoding="utf-8") == "实时结果"
         if Path(command[1]).name == "harness.py":
             if has_result:
                 (neutral / "result.json").write_text(json.dumps(result))
@@ -82,6 +85,9 @@ def test_run_solver_exit_requires_result(tmp_path, monkeypatch, harness_exit, ha
     assert all(handle.closed for handle in log_handles)
     assert all(not directory.exists() for directory in neutral_dirs)
     [run_dir] = results_root.glob("aster_solver/*_synthetic_mdfiles")
+    assert not (run_dir / "ipc").is_symlink()
+    assert not (run_dir / "ipc").is_junction()
+    assert (run_dir / "ipc" / "probe.txt").read_text(encoding="utf-8") == "实时结果"
     if has_result:
         assert json.loads((run_dir / "result.json").read_text()) == result
         assert exit_code == 0

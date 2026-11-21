@@ -230,7 +230,7 @@ impl Document {
                 let cell = &buffer[(x, y)];
                 let symbol = cell.symbol();
                 let width = symbol.width().max(1);
-                if cell.skip
+                if cell.diff_option == ratatui::buffer::CellDiffOption::Skip
                     || symbol.contains('\x1b')
                     || symbol
                         .chars()

@@ -333,3 +333,51 @@ async def test_stream_prices_requested_route_instead_of_known_response_model(
         321 * 0.000003 + 67 * 0.000009 if custom_prices else 321 * 0.00000015 + 67 * 0.0000006
     )
     assert response.usage.cost_usd == pytest.approx(expected)
+
+
+async def test_observed_stream_is_collected_while_tracing_instruments_litellm(monkeypatch):
+    """The tracing instrumentor wraps a stream; its usage must still reach the reply."""
+    from openinference.instrumentation.litellm import LiteLLMInstrumentor
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from aster.tracing._litellm_patch import apply_litellm_patch
+
+    def respond(request):
+        return httpx.Response(200, text=_sse(True), headers={"content-type": "text/event-stream"})
+
+    monkeypatch.setattr(litellm, "in_memory_llm_clients_cache", LLMClientCache())
+    transport = httpx.MockTransport(respond)
+    monkeypatch.setattr(
+        _ClientHttp, "_httpx_hardening", staticmethod(lambda: {"transport": transport})
+    )
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    instrumentor = LiteLLMInstrumentor()
+    # A preceding tracing test can leave the singleton bound to a closed provider.
+    if instrumentor.is_instrumented_by_opentelemetry:
+        instrumentor.uninstrument()
+    instrumentor.instrument(tracer_provider=provider)
+    apply_litellm_patch()
+    client = CompletionClient(
+        "openai/gpt-4o-mini",
+        api_base="https://endpoint.example/v1",
+        api_key="synthetic",
+        retry_config=RetryConfig(max_retries=0),
+    )
+    seen = []
+    try:
+        with observe_stream(lambda kind, value: seen.append(kind)):
+            response = await client.acall(MESSAGES)
+    finally:
+        await client.aclose()
+        instrumentor.uninstrument()
+        provider.shutdown()
+
+    assert response.content == "streamed answer"
+    assert response.usage.input_tokens == USAGE["prompt_tokens"]
+    assert response.usage.output_tokens == USAGE["completion_tokens"]
+    assert "chat" in seen
+    assert [span.name for span in exporter.get_finished_spans()] == ["acompletion"]

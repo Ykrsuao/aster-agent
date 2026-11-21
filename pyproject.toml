@@ -91,10 +91,23 @@ constraint-dependencies = [
 ]
 
 [tool.uv.exclude-newer-package]
+# virtualenv 21.14.13 fixes activation-script injection (GHSA-cx6f-vjhg-g3cc).
+virtualenv = "2026-10-22T23:59:59Z"
 microsandbox = "2026-11-13T23:59:59Z"
 litellm = "2026-11-13T23:59:59Z"
 boto3 = "2026-11-13T23:59:59Z"
 botocore = "2026-11-13T23:59:59Z"
+# OpenTelemetry 1.45.2 (2026-10-29) fixes CVE-2026-126360 in opentelemetry-api; its
+# packages are released together and pin one another, so every one in the lockfile is admitted.
+opentelemetry-api = "2026-10-29T23:59:59Z"
+opentelemetry-sdk = "2026-10-29T23:59:59Z"
+opentelemetry-semantic-conventions = "2026-10-29T23:59:59Z"
+opentelemetry-proto = "2026-10-29T23:59:59Z"
+opentelemetry-exporter-otlp-proto-common = "2026-10-29T23:59:59Z"
+opentelemetry-exporter-otlp-proto-http = "2026-10-29T23:59:59Z"
+opentelemetry-instrumentation = "2026-10-29T23:59:59Z"
+opentelemetry-exporter-http-transport = "2026-10-29T23:59:59Z"
+opentelemetry-exporter-otlp-common = "2026-10-29T23:59:59Z"
 
 [tool.uv.workspace]
 members = [
@@ -205,6 +218,19 @@ metadata = false
 # `vX.Y.Z` tag is cut). Once a tag exists, this is ignored.
 fallback-version = "0.0.6"
 
+[tool.hatch.build]
+exclude = ["*.tsbuildinfo", ".playwright-mcp", ".serena"]
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "src", "packages", "util", "tests", "scripts", "docs", "skills", "assets",
+    "examples", "experiments", "notebook_tutorials", ".github",
+    "AGENTS.md", "CHANGELOG.md", "CONTRIBUTING.md", "GLOSSARY.md", "LICENSE",
+    "README.md", "RELEASING.md", "SECURITY.md", "THIRD_PARTY_NOTICES.md",
+    "conftest.py", "pyproject.toml", "uv.lock", ".coderabbit.yaml", ".dockerignore",
+    ".env.example", ".gitattributes", ".gitignore", ".gitleaks.toml", ".pre-commit-config.yaml",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/aster"]
 
@@ -222,7 +248,7 @@ trace-viewer = [
 ]
 dev = [
     {include-group = "trace-viewer"},
-    "pytest>=7.4.0",
+    "pytest>=8.1.1",
     "pytest-asyncio>=0.21.0",
     "pytest-rerunfailures>=14.0",
     "pytest-timeout>=2.3.0",
@@ -247,6 +273,8 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Keep same-named test packages in workspace projects distinct.
+consider_namespace_packages = true
 # A hang is a failure, not a pending result. Without this a test that wedges —
 # a lock that never releases, a subprocess prompt that never answers — stalls
 # CI instead of reporting, and a stalled job reads as "still running" rather
@@ -267,6 +295,7 @@ testpaths = [
     "tests/trace_explorer",
 ]
 pythonpath = [
+    ".",
     "src",
     "packages/aster-cli/src",
 ]

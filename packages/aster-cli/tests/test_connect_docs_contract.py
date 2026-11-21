@@ -110,6 +110,24 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_module, "_auto_tracing_attempted", False)
     monkeypatch.setattr(tracing, "_enabled", False)
     monkeypatch.setattr(tracing, "_probe_failed", False)
+    # Prior tests may have enabled a viewer; LiteLLM copies its journal callback.
+    import litellm
+
+    from aster.tracing._litellm_journal import MessageJournalCallback
+
+    for name in (
+        "callbacks",
+        "input_callback",
+        "success_callback",
+        "failure_callback",
+        "_async_success_callback",
+        "_async_failure_callback",
+    ):
+        monkeypatch.setattr(
+            litellm,
+            name,
+            [cb for cb in getattr(litellm, name) if not isinstance(cb, MessageJournalCallback)],
+        )
     # Trace health I/O is independent of SDK HTTP. No viewer and no file fallback.
     monkeypatch.setattr(tracing, "resolve_otlp_endpoint", Mock(return_value=None))
     monkeypatch.setattr(

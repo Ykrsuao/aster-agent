@@ -11,7 +11,7 @@ use ratatui::{
     widgets::Paragraph,
     Frame,
 };
-use tui_textarea::{CursorMove, TextArea};
+use tui_textarea::{CursorMove, DataCursor, TextArea};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -20,7 +20,7 @@ pub(crate) struct ComposerState {
     width: usize,
     top: usize,
     preferred_column: Option<usize>,
-    last_cursor: Option<(usize, usize)>,
+    last_cursor: Option<DataCursor>,
     pointer_anchor: Option<(usize, usize)>,
 }
 
@@ -321,7 +321,8 @@ pub(crate) fn handle_mouse(
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             let anchor = if mouse.modifiers.contains(KeyModifiers::SHIFT) {
-                let cursor = editor.cursor();
+                let DataCursor(row, col) = editor.cursor();
+                let cursor = (row, col);
                 let anchor = editor.selection_range().map_or(cursor, |(start, end)| {
                     if cursor == start {
                         end

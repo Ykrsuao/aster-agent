@@ -118,7 +118,7 @@ class TestIngestStress:
                     return statuses
 
                 async with AsyncClient(
-                    transport=ASGITransport(app=app), base_url="http://test"
+                    transport=ASGITransport(app=app), base_url="http://localhost"
                 ) as client:
                     # Start the worker manually (lifespan not triggered by ASGITransport)
                     worker = asyncio.create_task(_ingest_worker())
@@ -193,7 +193,7 @@ class TestIngestStress:
                     return statuses
 
                 async with AsyncClient(
-                    transport=ASGITransport(app=app), base_url="http://test"
+                    transport=ASGITransport(app=app), base_url="http://localhost"
                 ) as client:
                     worker = asyncio.create_task(_ingest_worker())
 

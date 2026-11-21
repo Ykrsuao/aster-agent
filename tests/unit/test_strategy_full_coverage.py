@@ -1068,10 +1068,6 @@ class TestPurePythonHelperMethodErrors:
     async def test_helper_method_binding_error(self):
         """When helper method binding produces errors, an error event is
         added and execution returns empty result (lines 722-729)."""
-        from aster.strategies.generated_code import (
-            HelperApplyResult,
-            HelperFunctionManager,
-        )
 
         class TestAgent(Agent, llm=_TEST_LLM):
             @strategy(PurePythonStrategy(max_iterations=3))
@@ -1081,30 +1077,11 @@ class TestPurePythonHelperMethodErrors:
 
         fake_llm = FakeLLMClient(
             scripted_responses=[
-                _resp("def helper(self):\n    return 42\nreturn helper(self)"),
+                _resp("@missing_decorator\ndef helper(self):\n    return 42\nreturn helper(self)"),
                 _resp("return 99"),
             ]
         )
         agent = TestAgent(llm=fake_llm)
 
-        real_apply_method = HelperFunctionManager.apply
-        call_count = [0]
-
-        def counting_apply(self_hm, code, ag, session_locals, *, namespace):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return HelperApplyResult(
-                    installed=[],
-                    errors=["Error defining method `helper`: SyntaxError: invalid syntax"],
-                )
-            return real_apply_method(
-                self_hm,
-                code,
-                ag,
-                session_locals,
-                namespace=namespace,
-            )
-
-        with patch.object(HelperFunctionManager, "apply", counting_apply):
-            result = await agent.do_task()
+        result = await agent.do_task()
         assert result == 99

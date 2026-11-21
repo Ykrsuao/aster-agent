@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "tasks": [
+    {
+      "id": "01-pagination-boundary",
+      "category": "bug-fix",
+      "prompt": "Fix paginate(items, page, size) in pagination.py. Pages are 1-based. Return up to size items, including the last item of each page; an out-of-range page returns []. Reject page or size below 1 with ValueError. Keep the input unchanged. Add or run meaningful checks.",
+      "files": {"pagination.py": "def paginate(items, page, size):\n    start = (page - 1) * size\n    return items[start:start + size - 1]\n"},
+      "solution": {"pagination.py": "def paginate(items, page, size):\n    if page < 1 or size < 1:\n        raise ValueError('page and size must be positive')\n    start = (page - 1) * size\n    return items[start:start + size]\n"},
+      "verify": "from pagination import paginate\nitems = list(range(7))\nassert [paginate(items, n, 3) for n in range(1, 5)] == [[0,1,2],[3,4,5],[6],[]]\nassert items == list(range(7))\nassert paginate([], 1, 2) == []\nfor page, size in [(0, 2), (1, 0), (-1, 3)]:\n    try: paginate(items, page, size)\n    except ValueError: pass\n    else: raise AssertionError('invalid bounds accepted')\n"
+    },
+    {
+      "id": "02-stable-deduplication",
+      "category": "small-feature",
+      "prompt": "Implement unique_names(names) in names.py. Trim surrounding whitespace, omit blank names, and deduplicate case-insensitively using Unicode casefold. Preserve first-seen spelling after trimming and input order. Do not mutate the input. Add or run checks including Unicode.",
+      "files": {"names.py": "def unique_names(names):\n    return list(set(names))\n"},
+      "solution": {"names.py": "def unique_names(names):\n    seen = set()\n    result = []\n    for name in names:\n        clean = name.strip()\n        key = clean.casefold()\n        if clean and key not in seen:\n            seen.add(key)\n            result.append(clean)\n    return result\n"},
+      "verify": "from names import unique_names\nvalues = [' Alice ', 'bob', 'ALICE', '', '  ', 'Straße', 'STRASSE', 'Bob', '张三']\nassert unique_names(values) == ['Alice', 'bob', 'Straße', '张三']\nassert values[0] == ' Alice '\nassert unique_names([]) == []\nassert unique_names(['x','X','y','x']) == ['x','y']\n"
+    },
+    {
+      "id": "03-csv-import",
+      "category": "parser-fix",
+      "prompt": "Fix load_people(text) in people.py to parse CSV with headers name,email, including quoted commas, quoted newlines and CRLF. Return a list of dictionaries, ignore entirely blank records, strip whitespace around values, and reject missing required headers with ValueError. Use the standard library; do not split CSV manually.",
+      "files": {"people.py": "def load_people(text):\n    lines = text.splitlines()\n    return [dict(zip(lines[0].split(','), row.split(','))) for row in lines[1:]]\n"},
+      "solution": {"people.py": "import csv\nimport io\n\ndef load_people(text):\n    reader = csv.DictReader(io.StringIO(text, newline=''))\n    if not {'name', 'email'} <= set(reader.fieldnames or []):\n        raise ValueError('missing required headers')\n    return [{key: (value or '').strip() for key, value in row.items()} for row in reader if any((value or '').strip() for value in row.values())]\n"},
+      "verify": "from people import load_people\nassert load_people('name,email\\r\\n\"Doe, Jane\", jane@example.org \\r\\n\\r\\n\"Two\\nLines\",two@example.org\\r\\n') == [{'name':'Doe, Jane','email':'jane@example.org'},{'name':'Two\\nLines','email':'two@example.org'}]\nassert load_people('name,email\\n,\\n') == []\nfor text in ['', 'name\\nAlice\\n', 'email\\nx@y\\n']:\n    try: load_people(text)\n    except ValueError: pass\n    else: raise AssertionError('required header accepted missing')\n"
+    },
+    {
+      "id": "04-timezone-sort",
+      "category": "bug-fix",
+      "prompt": "Fix sort_events(events) in events.py. Each event has an ISO-8601 timestamp with a timezone offset or Z. Sort by actual instant, preserving original order for equal instants, and do not mutate the input. Reject timestamps without timezone information with ValueError. Return the original event objects in a new list.",
+      "files": {"events.py": "def sort_events(events):\n    events.sort(key=lambda event: event['timestamp'])\n    return events\n"},
+      "solution": {"events.py": "from datetime import datetime\n\ndef sort_events(events):\n    def instant(event):\n        value = datetime.fromisoformat(event['timestamp'])\n        if value.tzinfo is None:\n            raise ValueError('timezone required')\n        return value\n    return sorted(events, key=instant)\n"},
+      "verify": "from events import sort_events\na = {'timestamp':'2025-01-01T09:00:00+08:00','id':'a'}\nb = {'timestamp':'2025-01-01T02:00:00Z','id':'b'}\nc = {'timestamp':'2025-01-01T01:00:00+00:00','id':'c'}\nitems = [b,a,c]\nresult = sort_events(items)\nassert result == [a,c,b] and result[0] is a and items == [b,a,c]\nassert sort_events([]) == []\ntry: sort_events([{'timestamp':'2025-01-01T01:00:00'}])\nexcept ValueError: pass\nelse: raise AssertionError('naive timestamp accepted')\n"
+    },
+    {
+      "id": "05-cross-file-units",
+      "category": "multi-file-feature",
+      "prompt": "Add centimetre support to this measurement package. units.to_metres(value, unit) must accept m, cm and mm and raise ValueError for unsupported units. report.describe(value, unit) must return '<converted:g> m' by calling the shared converter; its existing m and mm behavior must remain. Update both modules and verify the integration.",
+      "files": {"units.py": "def to_metres(value, unit):\n    if unit == 'm': return value\n    if unit == 'mm': return value / 1000\n    raise ValueError(unit)\n", "report.py": "def describe(value, unit):\n    if unit == 'mm': value /= 1000\n    return f'{value:g} m'\n"},
+      "solution": {"units.py": "def to_metres(value, unit):\n    factors = {'m': 1, 'cm': 0.01, 'mm': 0.001}\n    if unit not in factors:\n        raise ValueError(unit)\n    return value * factors[unit]\n", "report.py": "from units import to_metres\n\ndef describe(value, unit):\n    return f'{to_metres(value, unit):g} m'\n"},
+      "verify": "import math\nfrom units import to_metres\nfrom report import describe\nfor value, unit, expected in [(125,'cm',1.25),(2000,'mm',2),(-30,'cm',-.3),(0,'m',0)]:\n    assert math.isclose(to_metres(value,unit), expected)\n    assert describe(value,unit) == f'{expected:g} m'\nfor function in [to_metres, describe]:\n    try: function(4,'mile')\n    except ValueError: pass\n    else: raise AssertionError('unknown unit accepted')\nimport report\nfrom unittest.mock import patch\nwith patch('units.to_metres', return_value=17) as shared:\n    for name, value in list(vars(report).items()):\n        if value is to_metres:\n            setattr(report, name, shared)\n    assert report.describe(50,'cm') == '17 m'\n    shared.assert_called_once_with(50,'cm')\n"
+    },
+    {
+      "id": "06-shared-normalization",
+      "category": "refactor",
+      "prompt": "Remove duplicate tag normalization from articles.py and search.py by introducing text_utils.normalize_tag(value). The shared function strips whitespace and uses Unicode casefold. articles.tag_key and search.query_key must continue to expose their existing APIs and delegate normalization to the new helper. Verify ordinary and Unicode tags.",
+      "files": {"articles.py": "def tag_key(value):\n    return value.strip().lower()\n", "search.py": "def query_key(value):\n    return value.strip().lower()\n"},
+      "solution": {"text_utils.py": "def normalize_tag(value):\n    return value.strip().casefold()\n", "articles.py": "from text_utils import normalize_tag\n\ndef tag_key(value):\n    return normalize_tag(value)\n", "search.py": "from text_utils import normalize_tag\n\ndef query_key(value):\n    return normalize_tag(value)\n"},
+      "verify": "from text_utils import normalize_tag\nfrom articles import tag_key\nfrom search import query_key\nfor function in [normalize_tag,tag_key,query_key]:\n    assert function(' Straße ') == 'strasse'\n    assert function(' Aster ') == 'aster'\n    assert function('  ') == ''\nimport ast\nfrom pathlib import Path\nfor filename in ['articles.py','search.py']:\n    tree = ast.parse(Path(filename).read_text())\n    assert any(isinstance(node, ast.Call) and (isinstance(node.func, ast.Name) and node.func.id == 'normalize_tag' or isinstance(node.func, ast.Attribute) and node.func.attr == 'normalize_tag') for node in ast.walk(tree)), 'normalization must be shared'\nimport articles, search\nfrom unittest.mock import patch\nwith patch('text_utils.normalize_tag', return_value='shared-result') as shared:\n    for module in [articles, search]:\n        for name, value in list(vars(module).items()):\n            if value is normalize_tag:\n                setattr(module, name, shared)\n    assert articles.tag_key(' x ') == 'shared-result'\n    assert search.query_key(' y ') == 'shared-result'\n    assert shared.call_count == 2\n"
+    },
+    {
+      "id": "07-mutable-default",
+      "category": "failing-test-diagnosis",
+      "prompt": "Investigate and fix the failure in test_public.py. add_item(item, items=None) must return a new one-item list when no collection is supplied, and append to and return the exact supplied list otherwise, including an empty list. Keep independent callers isolated. Do not modify the existing public test.",
+      "files": {"basket.py": "def add_item(item, items=[]):\n    items.append(item)\n    return items\n", "test_public.py": "from basket import add_item\n\ndef test_callers_do_not_share_items():\n    assert add_item('apple') == ['apple']\n    assert add_item('pear') == ['pear']\n"},
+      "protected": ["test_public.py"],
+      "solution": {"basket.py": "def add_item(item, items=None):\n    if items is None:\n        items = []\n    items.append(item)\n    return items\n"},
+      "verify": "from basket import add_item\nfrom test_public import test_callers_do_not_share_items\ntest_callers_do_not_share_items()\nempty = []\nassert add_item('x',empty) is empty and empty == ['x']\nassert add_item('y',empty) is empty and empty == ['x','y']\nassert add_item('z',None) == ['z']\n"
+    },
+    {
+      "id": "08-relative-path-validation",
+      "category": "input-validation",
+      "prompt": "Fix validate_relative_path(value) in paths.py for portable archive member names. Return the unchanged string only if it is a nonempty slash-separated relative path with no empty, '.' or '..' components. Reject absolute paths, backslashes, colon characters and NUL with ValueError. Unicode names are valid. This validates names only, not filesystem symlink containment.",
+      "files": {"paths.py": "def validate_relative_path(value):\n    if value.startswith('/'):\n        raise ValueError('absolute path')\n    return value\n"},
+      "solution": {"paths.py": "def validate_relative_path(value):\n    if not value or any(char in value for char in ('\\\\', ':', '\\x00')) or any(part in ('', '.', '..') for part in value.split('/')):\n        raise ValueError('invalid relative path')\n    return value\n"},
+      "verify": "from paths import validate_relative_path\nfor value in ['a.txt','folder/文件.txt','a-b/c_d']:\n    assert validate_relative_path(value) == value\nfor value in ['', '/root', '../x', 'a/../b', 'a//b', './x', 'a/', 'C:/x', 'a\\\\b', 'a\\x00b']:\n    try: validate_relative_path(value)\n    except ValueError: pass\n    else: raise AssertionError('unsafe name accepted: ' + repr(value))\n"
+    },
+    {
+      "id": "09-cli-exit-status",
+      "category": "cli-feature",
+      "prompt": "Implement count_lines.py as a standard-library command: python count_lines.py FILE prints the number of logical text lines in a UTF-8 file and exits 0. Empty files count as 0; a final line without newline counts. On missing file or invalid UTF-8, print a brief error to stderr, no stdout, and exit 2. Do not print a traceback. Use an import-safe main entry point.",
+      "files": {"count_lines.py": "import sys\n\nif __name__ == '__main__':\n    print(len(open(sys.argv[1]).read().split('\\n')))\n"},
+      "solution": {"count_lines.py": "import argparse\nfrom pathlib import Path\nimport sys\n\ndef main():\n    parser = argparse.ArgumentParser()\n    parser.add_argument('file')\n    args = parser.parse_args()\n    try:\n        content = Path(args.file).read_text(encoding='utf-8')\n    except (OSError, UnicodeError) as error:\n        print(f'Cannot read file: {type(error).__name__}', file=sys.stderr)\n        return 2\n    print(len(content.splitlines()))\n    return 0\n\nif __name__ == '__main__':\n    raise SystemExit(main())\n"},
+      "verify": "import subprocess,sys,tempfile\nfrom pathlib import Path\nimport count_lines\nwith tempfile.TemporaryDirectory() as temp:\n    root=Path(temp)\n    for index, (data, count) in enumerate([(b'',0),('a\\nb'.encode(),2),('a\\r\\nb\\r\\n'.encode(),2),('中文'.encode(),1)]):\n        path=root/str(index); path.write_bytes(data)\n        result=subprocess.run([sys.executable,'count_lines.py',str(path)],capture_output=True,timeout=5)\n        assert result.returncode == 0 and result.stdout.strip() == str(count).encode(), result.stdout\n    (root/'bad').write_bytes(b'\\xff')\n    for path in [root/'missing',root/'bad']:\n        result=subprocess.run([sys.executable,'count_lines.py',str(path)],capture_output=True,timeout=5)\n        assert result.returncode == 2 and not result.stdout and result.stderr and b'Traceback' not in result.stderr\n"
+    },
+    {
+      "id": "10-config-roundtrip",
+      "category": "state-handling",
+      "prompt": "Fix settings.py. load_settings(path) reads a UTF-8 JSON object, returning {} only when the file is missing. Malformed JSON or a JSON non-object must raise ValueError and leave the original file unchanged. save_settings(path, values) writes a JSON object preserving Unicode; invalid non-dict input must raise ValueError before touching the file. Verify a save/load round trip and error preservation.",
+      "files": {"settings.py": "import json\nfrom pathlib import Path\n\ndef load_settings(path):\n    try:\n        return json.loads(Path(path).read_text())\n    except Exception:\n        return {}\n\ndef save_settings(path, values):\n    Path(path).write_text(json.dumps(values))\n"},
+      "solution": {"settings.py": "import json\nfrom pathlib import Path\n\ndef load_settings(path):\n    try:\n        text = Path(path).read_text(encoding='utf-8')\n    except FileNotFoundError:\n        return {}\n    value = json.loads(text)\n    if not isinstance(value, dict):\n        raise ValueError('settings must be an object')\n    return value\n\ndef save_settings(path, values):\n    if not isinstance(values, dict):\n        raise ValueError('settings must be an object')\n    text = json.dumps(values, ensure_ascii=False)\n    Path(path).write_text(text, encoding='utf-8')\n"},
+      "verify": "from settings import load_settings,save_settings\nfrom pathlib import Path\nimport tempfile\nwith tempfile.TemporaryDirectory() as temp:\n    path=Path(temp)/'settings.json'\n    assert load_settings(path) == {}\n    save_settings(path,{'name':'中文','active':True})\n    assert load_settings(path) == {'name':'中文','active':True}\n    old=path.read_bytes()\n    try: save_settings(path,[])\n    except ValueError: pass\n    else: raise AssertionError('non-object saved')\n    assert path.read_bytes() == old\n    for raw in ['{broken','[]','null']:\n        path.write_text(raw,encoding='utf-8')\n        try: load_settings(path)\n        except ValueError: pass\n        else: raise AssertionError('invalid config silently accepted')\n        assert path.read_text(encoding='utf-8') == raw\n"
+    }
+  ]
+}

@@ -10,9 +10,11 @@ import sys
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel
 
 from aster import Agent, strategy
 from aster.config import CodeActConfig
+from aster.events import PythonOutput, ResultStatus
 from aster.runtime.sandbox.config import SandboxConfig
 from aster.runtime.sandbox.executor import SandboxedExecutor
 from aster.strategies.codeact import CodeActStrategy
@@ -35,6 +37,10 @@ class Service:
 
     def read_path(self, path):
         return Path(path).read_text(encoding="utf-8")
+
+
+class GuestResult(BaseModel):
+    value: int
 
 
 async def test_real_vm_keeps_namespace_and_brokers_state(tmp_path):
@@ -69,7 +75,7 @@ async def test_real_codeact_returns_guest_result(tmp_path, strategy_type):
             ],
         )
 
-    final_cell = "assert 'litellm' not in sys.modules\nreturn_result(value * 7)"
+    final_cell = "assert 'litellm' not in sys.modules\nreturn_result(GuestResult(value=value * 7))"
     if strategy_type is CodeActV2:
         final_cell = (
             "assert python_cell_state()['cell_locals'] == {'seed': 'int', 'value': 'int'}\n"
@@ -85,15 +91,67 @@ async def test_real_codeact_returns_guest_result(tmp_path, strategy_type):
                 )
             )
         )
-        async def calculate(self, seed: int) -> int:
+        async def calculate(self, seed: int) -> GuestResult:
             """Compute the answer."""
             ...
 
     calculator = Calculator()
     try:
-        assert await calculator.calculate(6) == 42
+        assert await calculator.calculate(6) == GuestResult(value=42)
+        prefills = [
+            event
+            for event in calculator.event_manager.all_events()
+            if isinstance(event, PythonOutput)
+            and event.metadata.get("prefill_type") == "inspect_inputs"
+        ]
+        assert len(prefills) == 1
+        output = prefills[0]
+        assert output.execution_status is ResultStatus.COMPLETE, output.error
+        assert not output.error
+        assert "seed (int):\n6" in output.stdout
+        assert "Return type:" in output.stdout
+        assert "GuestResult" in output.stdout
+        assert "value: int" in output.stdout
     finally:
         await calculator.aclose()
+
+
+async def test_framework_source_mount_remains_read_only(tmp_path):
+    executor = SandboxedExecutor(Service(), SandboxConfig(workspace=str(tmp_path)), cell_timeout=15)
+    try:
+        code = (
+            "import errno\nimport os\nimport aster.agentdoc.registry as registry\n"
+            "source = registry.__file__\n"
+            "assert Path(source).is_file()\n"
+            "assert os.statvfs(source).f_flag & os.ST_RDONLY\n"
+            "try:\n"
+            "    with open(source, 'r+b'):\n"
+            "        pass\n"
+            "except OSError as error:\n"
+            "    assert error.errno in (errno.EROFS, errno.EACCES)\n"
+            "else:\n"
+            "    raise AssertionError('framework source mount is writable')"
+        )
+        result = await executor.run_cell(code)
+        assert result.error is None, result.error
+        assert executor.degraded_guards == []
+    finally:
+        await executor.aclose()
+
+
+def test_framework_read_grants_respect_system_paths_opt_out(tmp_path):
+    import microsandbox as sdk
+
+    executor = SandboxedExecutor(
+        Service(), SandboxConfig(workspace=str(tmp_path), system_paths=False), cell_timeout=15
+    )
+    try:
+        executor._mounts(sdk)
+        permissions = executor._bootstrap()["permissions"]
+        assert permissions["system_paths"] is False
+        assert permissions["allow"] == []
+    finally:
+        executor.close_sync()
 
 
 async def test_async_tools_are_lazy_and_host_paths_round_trip(tmp_path):

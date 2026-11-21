@@ -9,7 +9,6 @@ This tests the critical path where PurePythonStrategy generates code with
 from aster.decorators import strategy
 from aster.ellipsis_detection import has_ellipsis_body, has_ellipsis_marker
 from aster.strategies import PredictStrategy
-from aster.strategies.generated_code import HelperFunctionManager
 
 
 class TestHasEllipsisBodyExec:
@@ -58,7 +57,7 @@ async def my_method(self, x: int) -> str:
         exec(code, namespace)
         func = namespace["my_method"]
 
-        # Set _generated_source (this is what HelperFunctionManager does)
+        # Source metadata also supports functions without registered source files
         func._generated_source = code
 
         # Should detect ellipsis body via _generated_source
@@ -87,112 +86,30 @@ class TestHasEllipsisMarkerExec:
         assert has_ellipsis_marker(namespace["deterministic"]) is False
 
 
-class TestHelperFunctionManagerSourceTracking:
-    """Test that HelperFunctionManager sets _generated_source correctly."""
+class TestExecutionCellSourceTracking:
+    """Cell source is available before @strategy inspects a helper."""
 
-    def test_undecorated_method_gets_generated_source(self):
-        """HelperFunctionManager should set _generated_source on undecorated methods."""
-        code = '''
-async def _helper(self, x: int) -> str:
-    """A helper method."""
-    ...
-'''
+    async def test_decorated_helper_with_setup_detects_generation(self):
+        from aster import Agent
+        from aster.unifiedllm import FakeLLMClient
 
-        # Create a mock agent instance
-        class MockAgent:
-            pass
-
-        agent = MockAgent()
-        manager = HelperFunctionManager()
-
-        session_locals: dict = {}
-        result = manager.apply(
-            code,
-            agent,
-            session_locals=session_locals,
-            namespace={},
+        agent = Agent(llm=FakeLLMClient())
+        result = await agent.runtime.execute_code(
+            "@strategy(PredictStrategy())\n"
+            "async def helper(self, value: int) -> str:\n"
+            '    """Summarize the value."""\n'
+            "    prepared = value + 1\n"
+            "    ...",
+            wrap_in_function=True,
         )
-
-        assert "_helper" in result.installed
-        # helper lives in session_locals as a plain function, not on the agent.
-        assert not hasattr(agent, "_helper")
-
-        func = session_locals["_helper"]
-        assert hasattr(func, "_generated_source")
-        assert has_ellipsis_body(func) is True
-
-    def test_decorated_method_needs_generation(self):
-        """Test that @strategy decorator on method via HelperFunctionManager works.
-
-        This is the critical test for the PurePython nested method pattern.
-        """
-        code = '''
-@strategy(PredictStrategy())
-async def _summarize(self, doc: str) -> str:
-    """Summarize a document."""
-    ...
-'''
-
-        class MockAgent:
-            pass
-
-        agent = MockAgent()
-        manager = HelperFunctionManager()
-
-        session_locals: dict = {}
-        result = manager.apply(
-            code,
-            agent,
-            session_locals=session_locals,
-            namespace={
-                "strategy": strategy,
-                "PredictStrategy": PredictStrategy,
-            },
-        )
-
-        assert "_summarize" in result.installed
-        # helper is in session_locals as a plain decorated callable.
-        assert not hasattr(agent, "_summarize")
-
-        decorated = session_locals["_summarize"]
-        assert getattr(decorated, "_needs_generation", None) is True, (
-            f"Expected _needs_generation=True but got "
-            f"{getattr(decorated, '_needs_generation', 'MISSING')}"
-        )
-
-    def test_decorated_implemented_method_no_generation(self):
-        """Test that implemented @strategy method has _needs_generation=False."""
-        code = '''
-@strategy(PredictStrategy())
-async def _helper(self, doc: str) -> str:
-    """Process a document."""
-    return f"Processed: {doc}"
-'''
-
-        class MockAgent:
-            pass
-
-        agent = MockAgent()
-        manager = HelperFunctionManager()
-
-        session_locals: dict = {}
-        result = manager.apply(
-            code,
-            agent,
-            session_locals=session_locals,
-            namespace={
-                "strategy": strategy,
-                "PredictStrategy": PredictStrategy,
-            },
-        )
-
-        assert "_helper" in result.installed
-        decorated = session_locals["_helper"]
-        assert getattr(decorated, "_needs_generation", None) is False
+        assert result.error is None
+        assert result.captured_locals["helper"]._needs_generation is True
+        assert has_ellipsis_body(result.captured_locals["helper"])
+        await agent.aclose()
 
 
 class TestRawExecDecorator:
-    """Test raw exec with @strategy decorator (without HelperFunctionManager).
+    """Test raw exec with @strategy decorators.
 
     These tests document the expected behavior: raw exec doesn't work
     for decorated functions without _generated_source.

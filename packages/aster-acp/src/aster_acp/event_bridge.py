@@ -658,12 +658,13 @@ class ACPEventBridge:
             request.window_tokens if request else getattr(self.agent.llm, "context_window", None)
         )
         size = (
-            max(context_window, usage.input_tokens)
-            if context_window and context_window > 0 and usage is not None
+            max(context_window, usage.input_tokens if available and usage is not None else 0)
+            if context_window and context_window > 0
             else 0
         )
         metadata: dict[str, Any] = {"hud": self._hud.snapshot(self.agent)}
-        if self._context_usage is None:
+        pending = self._context_usage is None
+        if pending:
             metadata["usagePending"] = True
         if not available:
             metadata["usageAvailable"] = False
@@ -674,7 +675,7 @@ class ACPEventBridge:
             UsageUpdate(
                 session_update="usage_update",
                 used=usage.input_tokens if available and usage is not None else 0,
-                size=size if available else 0,
+                size=size if available or pending else 0,
                 cost=Cost(amount=self._hud.cost, currency="USD")
                 if self._hud.cost is not None
                 else None,

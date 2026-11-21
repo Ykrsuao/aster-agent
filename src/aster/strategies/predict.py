@@ -102,7 +102,7 @@ class PredictStrategy(GenerationStrategy):
         3. Follows the exact schema structure
         4. Contains no extra fields beyond the schema
 
-        The LLM will automatically format your output as JSON."""
+        Output only the JSON value matching the schema, without markdown or explanatory text."""
         ...
 
     @strategy(TemplateStrategy())
@@ -392,7 +392,8 @@ class PredictStrategy(GenerationStrategy):
         ## Input parameters:
         {original_call.format_parameters_as_code()}
 
-        Perform the task and return the result directly.
+        You are already executing `{original_call.method_name}`.
+        Complete the task and return its result; do not invoke this method or other agent methods.
         """
         ...
 

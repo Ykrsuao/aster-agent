@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from aster.media_inputs import MediaInput
 from aster.unifiedllm.admission import (
     AdmissionControlConfig,
     _admission_controller_scope,
@@ -38,6 +39,15 @@ class AdmissionControl(UnifiedLLM):
         return getattr(self.base_llm, "context_window", None)
 
     @property
+    def media_inputs(self) -> tuple[MediaInput, ...]:
+        """Read media permissions from the client that sends requests."""
+        return self.base_llm.media_inputs
+
+    @media_inputs.setter
+    def media_inputs(self, value: tuple[MediaInput, ...]) -> None:
+        self.base_llm.media_inputs = value
+
+    @property
     def reasoning_levels(self) -> tuple[str, ...] | None:
         """Return the wrapped client's selectable reasoning levels."""
         return getattr(self.base_llm, "reasoning_levels", None)
@@ -46,6 +56,10 @@ class AdmissionControl(UnifiedLLM):
     def reasoning_default(self) -> str | None:
         """Return the wrapped client's documented reasoning default."""
         return getattr(self.base_llm, "reasoning_default", None)
+
+    def set_reasoning_level(self, level: str | None) -> None:
+        """Change the client that actually sends requests, preserving admission control."""
+        self.base_llm.set_reasoning_level(level)
 
     def call(self, *args: Any, **kwargs: Any) -> Any:
         """Delegate a synchronous call without applying async admission."""

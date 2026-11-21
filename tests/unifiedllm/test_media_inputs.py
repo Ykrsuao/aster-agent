@@ -402,8 +402,15 @@ def test_fake_and_admission_share_explicit_declaration():
             fake, AdmissionControlConfig(max_in_flight=1, concurrency_group="media-test")
         )
         assert wrapped.media_inputs == tuple(enabled)
-        wrapped.call([{"role": "user", "content": [media_to_content_block(media_objects()[0])]}])
-        assert (attachment_kind(fake.last_messages[0]["content"][0]) == "image") == bool(enabled)
+        for current in (tuple(enabled), ("image",), ()):
+            wrapped.media_inputs = current
+            assert wrapped.media_inputs == fake.media_inputs == current
+            wrapped.call(
+                [{"role": "user", "content": [media_to_content_block(media_objects()[0])]}]
+            )
+            assert (attachment_kind(fake.last_messages[0]["content"][0]) == "image") == bool(
+                current
+            )
 
 
 def test_summary_route_demotes_native_media_without_rewriting_archive():

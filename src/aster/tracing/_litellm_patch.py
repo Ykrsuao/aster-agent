@@ -268,6 +268,32 @@ def _patched_get_attributes_from_response_output(result: Any) -> dict[str, Any]:
     return attributes
 
 
+class _TracedStream:
+    """A traced stream that still exposes the provider stream it reads.
+
+    The instrumentor replaces a streaming response with a plain generator, which
+    hides the provider stream's usage and pricing state from the caller.
+    """
+
+    def __init__(self, traced: Any, provider_stream: Any) -> None:
+        self._traced = traced
+        self.provider_stream = provider_stream
+
+    def __iter__(self) -> Any:
+        return iter(self._traced)
+
+    def __aiter__(self) -> Any:
+        return self._traced.__aiter__()
+
+
+def _keep_provider_stream(finalize: Any) -> Any:
+    def traced_stream(span: trace_api.Span, stream: Any) -> _TracedStream:
+        return _TracedStream(finalize(span, stream), stream)
+
+    traced_stream._aster_keeps_provider_stream = True  # type: ignore[attr-defined]
+    return traced_stream
+
+
 def apply_litellm_patch() -> None:
     """Apply monkey patches to fix litellm instrumentation bugs.
 
@@ -276,6 +302,7 @@ def apply_litellm_patch() -> None:
        reasoning_content, and stamps llm.cost.* (not emitted by the instrumentor)
     2. _get_attributes_from_message_param - adds missing tool_call.id capture
     3. _get_attributes_from_response_output - keeps Responses summaries on OTLP
+    4. _finalize_(sync_)streaming_span - keeps the provider stream reachable
 
     It also enables ``litellm.return_response_headers`` so the gateway's
     ``x-litellm-response-cost`` headers are retained on the response for cost
@@ -308,6 +335,12 @@ def apply_litellm_patch() -> None:
         ):
             _original_get_attributes_from_message_param = litellm._get_attributes_from_message_param
             litellm._get_attributes_from_message_param = _patched_get_attributes_from_message_param
+
+        # Patch 4: a traced stream must still give access to the provider stream.
+        for name in ("_finalize_streaming_span", "_finalize_sync_streaming_span"):
+            finalize = getattr(litellm, name)
+            if not getattr(finalize, "_aster_keeps_provider_stream", False):
+                setattr(litellm, name, _keep_provider_stream(finalize))
 
     except (ImportError, AttributeError):
         # If litellm instrumentation is not available, silently skip

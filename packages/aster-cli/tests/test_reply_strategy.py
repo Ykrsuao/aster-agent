@@ -4,7 +4,7 @@
 
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from aster_cli.coding.reply_strategy import CodingReplyStrategy
@@ -127,6 +127,56 @@ async def test_computation_progress_and_uncertain_source_keep_normal_execution(m
     result = await CodingReplyStrategy()._execute_code(runtime, code, {}, None, "handle")
     assert result is expected
     execute.assert_awaited_once()
+
+
+@pytest.mark.parametrize("mapping", ["missing", "none", "not_callable"])
+@pytest.mark.parametrize("refusal", [None, "The user rejected this execution."])
+async def test_custom_sandbox_without_host_path_requires_ordinary_approval(
+    monkeypatch, mapping, refusal
+):
+    original_executor = SimpleNamespace(run_cell=AsyncMock())
+    if mapping == "none":
+        original_executor.host_path = None
+    elif mapping == "not_callable":
+        original_executor.host_path = "/workspace"
+    session = SimpleNamespace(sandbox_executor=original_executor)
+    prepare_file_edit = Mock(return_value=object())
+    authorize = AsyncMock(return_value=refusal)
+    runtime = SimpleNamespace(
+        agent=SimpleNamespace(
+            _execution_control=SimpleNamespace(
+                approval="accept_edits", file_edit_executor=prepare_file_edit, authorize=authorize
+            )
+        )
+    )
+    expected = ExecutionResult(stdout="original executor result")
+    execute = AsyncMock(return_value=expected)
+    monkeypatch.setattr(CodeActStrategy, "_execute_code", execute)
+    code = "await self.shell.write_file('note.txt', 'edited')"
+
+    result = await CodingReplyStrategy()._execute_code(
+        runtime, code, {}, session, "handle", tool_call_id="custom-edit"
+    )
+
+    authorize.assert_awaited_once_with(code, tool_call_id="custom-edit")
+    prepare_file_edit.assert_not_called()
+    assert session.sandbox_executor is original_executor
+    if refusal is None:
+        assert result is expected
+        execute.assert_awaited_once_with(
+            runtime,
+            code,
+            {},
+            session,
+            "handle",
+            tool_call_id="custom-edit",
+            output_metadata=None,
+        )
+        assert execute.await_args.args[3] is session
+    else:
+        assert isinstance(result.error, PermissionError)
+        assert str(result.error) == refusal
+        execute.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

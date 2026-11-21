@@ -27,6 +27,9 @@ def get_git_metadata() -> dict[str, str]:
         commit = (
             subprocess.check_output(
                 ["git", "rev-parse", "HEAD"],
+                # Do not inherit stdin: under ACP it is the protocol pipe that
+                # another thread is reading, and on Windows git then blocks.
+                stdin=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
             .decode()
@@ -35,12 +38,20 @@ def get_git_metadata() -> dict[str, str]:
 
         # Check for uncommitted changes
         # git diff --quiet returns 0 if clean, 1 if dirty
-        dirty = subprocess.call(["git", "diff", "--quiet"], stderr=subprocess.DEVNULL) != 0
+        dirty = (
+            subprocess.call(
+                ["git", "diff", "--quiet"],
+                stdin=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            != 0
+        )
 
         # Get branch name
         branch = (
             subprocess.check_output(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                stdin=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
             .decode()

@@ -22,6 +22,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from weakref import WeakKeyDictionary
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +49,45 @@ _db: sqlite3.Connection | None = None  # used only by init_db() for schema setup
 #               Batched commits amortise WAL sync across many payloads.
 _read_tls = threading.local()
 _write_tls = threading.local()
+_connections: WeakKeyDictionary[sqlite3.Connection, Path] = WeakKeyDictionary()
+_connections_lock = threading.Lock()
+
+
+class _Connection(sqlite3.Connection):
+    """Allow weak ownership tracking without retaining connections from finished threads."""
+
+
+def _connect_db() -> sqlite3.Connection:
+    # Connections stay thread-local during use; their owner closes them after its workers stop.
+    path = DB_PATH.resolve()
+    connection = sqlite3.connect(
+        str(path), timeout=30, check_same_thread=False, factory=_Connection
+    )
+    with _connections_lock:
+        _connections[connection] = path
+    return connection
+
+
+def _close_connection(connection: sqlite3.Connection) -> None:
+    connection.close()
+    with _connections_lock:
+        _connections.pop(connection, None)
+
+
+def close_db(path: Path) -> None:
+    """Close only this database's connections after all of its requests and writes stop."""
+    global _db
+    resolved = path.resolve()
+    with _connections_lock:
+        connections = [conn for conn, owner in _connections.items() if owner == resolved]
+        for connection in connections:
+            connection.close()
+            del _connections[connection]
+            if connection is _db:
+                _db = None
+    for local in (_read_tls, _write_tls):
+        if getattr(local, "conn", None) in connections:
+            del local.conn
 
 
 def _get_db() -> sqlite3.Connection:
@@ -60,7 +100,7 @@ def _get_db() -> sqlite3.Connection:
     if _db is None:
         raise RuntimeError("Database not initialized. Call init_db() first.")
     if not hasattr(_read_tls, "conn"):
-        _read_tls.conn = sqlite3.connect(str(DB_PATH), timeout=30)
+        _read_tls.conn = _connect_db()
         _read_tls.conn.execute("PRAGMA journal_mode=WAL")
         _read_tls.conn.execute("PRAGMA synchronous=NORMAL")
         _read_tls.conn.execute("PRAGMA busy_timeout=30000")
@@ -81,7 +121,7 @@ def _get_write_db() -> sqlite3.Connection:
     as 500s on the client in under a second.
     """
     if not hasattr(_write_tls, "conn"):
-        _write_tls.conn = sqlite3.connect(str(DB_PATH), timeout=30)
+        _write_tls.conn = _connect_db()
         _write_tls.conn.execute("PRAGMA journal_mode=WAL")
         _write_tls.conn.execute("PRAGMA synchronous=NORMAL")
         _write_tls.conn.execute("PRAGMA busy_timeout=30000")
@@ -251,7 +291,7 @@ def init_db() -> int:
     # test uses a different tmp database file).
     if hasattr(_read_tls, "conn"):
         try:
-            _read_tls.conn.close()
+            _close_connection(_read_tls.conn)
         except Exception:
             log.debug(
                 "Failed to close thread-local read connection during init_db()", exc_info=True
@@ -260,14 +300,14 @@ def init_db() -> int:
 
     if hasattr(_write_tls, "conn"):
         try:
-            _write_tls.conn.close()
+            _close_connection(_write_tls.conn)
         except Exception:
             log.debug(
                 "Failed to close thread-local write connection during init_db()", exc_info=True
             )
         del _write_tls.conn
 
-    _db = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    _db = _connect_db()
     _db.execute("PRAGMA journal_mode=WAL")
     _db.execute("PRAGMA synchronous=NORMAL")
     _db.row_factory = sqlite3.Row

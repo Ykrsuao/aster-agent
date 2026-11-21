@@ -176,10 +176,24 @@ def parse_prompt(
         raise ValueError("Prompt text must not be empty")
     if not manifest:
         return ParsedPrompt(text=user_text, user_text=user_text, context=None)
-    lines = [f"- {item['name']} ({item['mimeType']}, {item['bytes']} bytes)" for item in manifest]
-    transcript = "\n\n".join(
-        part for part in (user_text, "Attached context:\n" + "\n".join(lines)) if part
-    )
+    lines = []
+    for item in manifest:
+        size = item["bytes"]
+        size_label = (
+            f"{size} B"
+            if size < 1024
+            else f"{size / 1024:.1f} KiB"
+            if size < 1024 * 1024
+            else f"{size / (1024 * 1024):.1f} MiB"
+        )
+        kind = "Image" if item["kind"] == "image" else "File"
+        format_label = (
+            item["mimeType"].split("/", 1)[1].upper() if kind == "Image" else item["mimeType"]
+        )
+        lines.append(f"[{kind}] {item['name']} · {format_label} · {size_label}")
+    if user_text.strip():
+        lines.append(user_text)
+    transcript = "\n".join(lines)
     context = Task(
         prompt=(
             "The user supplied the following attachment snapshots as reference data for their "

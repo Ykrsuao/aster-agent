@@ -1313,7 +1313,6 @@ def test_model_settings_can_be_edited_skipped_or_cancelled(
 
 
 def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monkeypatch):
-    # The exact count below includes LiteLLM's pre-HTTP interface rejection.
     monkeypatch.setenv("ASTER_LLM_TRANSPORT", "litellm")
     import json
 
@@ -1363,12 +1362,12 @@ def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monk
         levels.split(",")[0],
         *levels.split(","),
     ]
-    # Two interfaces reach HTTP; the runtime rejects the third before sending.
+    # All three interfaces reach HTTP, including the two rejected by this server.
     # check_interfaces also probes the first level (max) per interface, cheaply,
     # to recommend which interface actually surfaces reasoning. Routing is then
     # rechecked at the configured cap; tools and all six levels run for real.
     # Model default does not select max for the session; all three base-setting turns run.
-    assert len(bodies) == 14
+    assert len(bodies) == 15
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert "provenance" not in entry  # outcomes were checked on the wire; see bodies
 

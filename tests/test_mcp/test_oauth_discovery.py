@@ -295,6 +295,16 @@ def test_token_is_expired_logic():
     assert not no_exp.is_expired()
 
 
+@pytest.mark.parametrize("expires_in", [0, -1])
+def test_non_positive_token_lifetime_is_already_expired(expires_in):
+    token = oauth.OAuthToken(
+        access_token="expired-token",
+        expires_in=expires_in,
+        obtained_at=oauth.time.time() + 3600,
+    )
+    assert token.is_expired(leeway=0)
+
+
 @pytest.mark.parametrize(
     ("label", "payload"),
     [("array", "[]"), ("string", '"nope"'), ("null", "null")],
@@ -321,6 +331,9 @@ def test_token_cache_roundtrip(tmp_path, monkeypatch):
         obtained_at=oauth.time.time(),
         client_id="client-id",
         client_secret="client-secret",
+        authorization_server="https://maas.example/auth",
+        token_endpoint="https://maas.example/auth/token",
+        resource=url,
     )
     oauth._save_cached_token(url, token)
 
@@ -330,11 +343,15 @@ def test_token_cache_roundtrip(tmp_path, monkeypatch):
     assert loaded.refresh_token == "ref"
     assert loaded.client_id == "client-id"
     assert loaded.client_secret == "client-secret"
+    assert loaded.authorization_server == "https://maas.example/auth"
+    assert loaded.token_endpoint == "https://maas.example/auth/token"
+    assert loaded.resource == url
 
     cache_file = tmp_path / ".aster" / "mcp_tokens.json"
     assert cache_file.exists()
-    # Owner-only permissions (0o600).
-    assert (cache_file.stat().st_mode & 0o777) == 0o600
+    # POSIX mode bits do not describe the inherited Windows directory ACL.
+    if oauth.os.name == "posix":
+        assert (cache_file.stat().st_mode & 0o777) == 0o600
 
 
 @pytest.mark.asyncio
@@ -343,13 +360,23 @@ async def test_handle_mcp_oauth_returns_cached_token(monkeypatch, tmp_path):
     url = "https://maas.example/mcp"
     oauth._save_cached_token(
         url,
-        oauth.OAuthToken(access_token="cached", expires_in=3600, obtained_at=oauth.time.time()),
+        oauth.OAuthToken(
+            access_token="cached",
+            expires_in=3600,
+            obtained_at=oauth.time.time(),
+            authorization_server="https://maas.example/auth",
+            token_endpoint="https://maas.example/auth/token",
+        ),
     )
 
-    async def fail_discover(client, server_url):
-        return []
+    async def fake_resource_metadata(client, server_url):
+        return {"authorization_servers": ["https://maas.example/auth"]}
 
-    monkeypatch.setattr(oauth, "_discover_authorization_servers", fail_discover)
+    async def fake_metadata(client, auth_server):
+        return {"token_endpoint": f"{auth_server}/token"}
+
+    monkeypatch.setattr(oauth, "_fetch_protected_resource_metadata", fake_resource_metadata)
+    monkeypatch.setattr(oauth, "_fetch_authorization_server_metadata", fake_metadata)
 
     token = await oauth.handle_mcp_oauth(url)
     assert token.access_token == "cached"
@@ -368,6 +395,9 @@ async def test_handle_mcp_oauth_refreshes_expired_token(monkeypatch, tmp_path):
             obtained_at=oauth.time.time() - 100,
             client_id="cached-client",
             client_secret="cached-secret",
+            authorization_server="https://maas.example/auth",
+            token_endpoint="https://maas.example/auth/token",
+            resource=url,
         ),
     )
 
@@ -402,7 +432,11 @@ async def test_handle_mcp_oauth_refreshes_expired_token(monkeypatch, tmp_path):
     token = await oauth.handle_mcp_oauth(url)
     assert token.access_token == "new"
     # Refreshed token is persisted.
-    assert oauth._load_cached_token(url).access_token == "new"
+    loaded = oauth._load_cached_token(url)
+    assert loaded.access_token == "new"
+    assert loaded.authorization_server == "https://maas.example/auth"
+    assert loaded.token_endpoint == "https://maas.example/auth/token"
+    assert loaded.resource == url
 
 
 @pytest.mark.asyncio

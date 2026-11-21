@@ -67,7 +67,8 @@ while ($null -ne ($line = $commandReader.ReadLine())) {
         if ($null -ne $request.input) {
             [IO.File]::WriteAllBytes($inputFile, [Convert]::FromBase64String($request.input))
         }
-        $inputStream = [IO.File]::Open($inputFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        # A background child may retain stdin after this command; allow deleting its temporary file.
+        $inputStream = [IO.File]::Open($inputFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::Read -bor [IO.FileShare]::Delete))
         $handle = $inputStream.SafeFileHandle.DangerousGetHandle()
         [void][AsterInputHandle]::SetHandleInformation($handle, 1, 1)
         [void][AsterInputHandle]::SetStdHandle(-10, $handle)
@@ -121,6 +122,10 @@ class PowerShellSession:
     Commands and lifecycle operations on one event loop are serialized. A
     session may move to another loop once the previous loop's commands have
     finished; concurrent use across loops or threads is not supported.
+    Timeout or cancellation stops the whole Windows Job, including background
+    children. The next command starts a fresh shell.
+    Keeping background children on close still stops an unresponsive shell;
+    the Job stays owned until shutdown succeeds.
     """
 
     def __init__(
@@ -152,6 +157,11 @@ class PowerShellSession:
         if scope:
             scope.adopt(self)
 
+    @property
+    def cwd(self) -> Path:
+        """Current working directory of the session."""
+        return self._cwd
+
     async def __aenter__(self) -> Any:
         await self.start()
         return self
@@ -170,7 +180,10 @@ class PowerShellSession:
         if self._started_on_loop is not None and self._started_on_loop is not loop:
             await self._stop_unlocked(False)
         if self._started:
-            return
+            if self._process is not None and self._process.returncode is None:
+                return
+            # A shell may exit between commands; discard its dead pipes before restarting.
+            await self._stop_unlocked(False)
         self._started_on_loop = loop
         connected = loop.create_future()
         token = secrets.token_hex(24)
@@ -236,6 +249,8 @@ class PowerShellSession:
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
         while chunk := await reader.read(8192):
             text = decoder.decode(chunk)
+            if self._process is None or reader is not getattr(self._process, name):
+                continue  # Drain preserved children without mixing old output into a new shell.
             self._buffers[name].write(text)
             if self._events is not None:
                 await self._events.put((name, text))
@@ -367,45 +382,67 @@ class PowerShellSession:
         self._process = self._job = None
         self._started = False
         self._started_on_loop = None
-        if job:
-            if keep:
+        preserved = False
+        try:
+            if job and not keep:
+                job.close()
+            if process:
+                if keep and same_loop and process.returncode is None:
+                    try:
+                        process.stdin.write(b'{"op":"close"}\n')
+                        await process.stdin.drain()
+                    except (BrokenPipeError, ConnectionError):
+                        pass
+                elif process.returncode is None:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                if process.stdin:
+                    try:
+                        process.stdin.close()
+                    except RuntimeError:
+                        if same_loop:
+                            raise
+                if same_loop:
+                    if keep:
+                        # Process.wait() also waits for pipes inherited by kept children.
+                        try:
+                            async with asyncio.timeout(5):
+                                while process.returncode is None:
+                                    await asyncio.sleep(0.01)
+                        except TimeoutError:
+                            try:
+                                process.kill()  # Stop only the unresponsive shell.
+                            except ProcessLookupError:
+                                pass
+                            async with asyncio.timeout(5):
+                                while process.returncode is None:
+                                    await asyncio.sleep(0.01)
+                    else:
+                        await asyncio.wait_for(process.wait(), 5)
+            if job and keep:
                 job.keep_alive(True)
-            job.close()
-        if process:
-            if keep and same_loop and process.returncode is None:
+            preserved = keep
+        finally:
+            # Keep the kill-on-close Job until success, so errors cannot orphan its tree.
+            if job:
+                job.close()
+            if self._control_writer:
                 try:
-                    process.stdin.write(b'{"op":"close"}\n')
-                    await process.stdin.drain()
-                except (BrokenPipeError, ConnectionError):
-                    pass
-            elif process.returncode is None:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-            if process.stdin:
-                try:
-                    process.stdin.close()
+                    self._control_writer.close()
                 except RuntimeError:
                     if same_loop:
                         raise
-            if same_loop:
-                await asyncio.wait_for(process.wait(), 5)
-        if self._control_writer:
-            try:
-                self._control_writer.close()
-            except RuntimeError:
+                self._control_writer = None
+            self._control_reader = None
+            if not preserved or not same_loop:
+                for reader in self._readers:
+                    if not reader.get_loop().is_closed():
+                        reader.cancel()
                 if same_loop:
-                    raise
-            self._control_writer = None
-        self._control_reader = None
-        if not keep or not same_loop:
-            for reader in self._readers:
-                if not reader.get_loop().is_closed():
-                    reader.cancel()
-            if same_loop:
-                await asyncio.gather(*self._readers, return_exceptions=True)
-            self._readers.clear()
+                    await asyncio.gather(*self._readers, return_exceptions=True)
+                self._readers.clear()
 
     async def close(self) -> None:
         self._ensure_lock_on_current_loop()

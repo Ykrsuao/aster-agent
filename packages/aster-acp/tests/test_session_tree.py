@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 from acp import RequestError, text_block
 from acp.interfaces import Client
+from acp.schema import RequestPermissionResponse
 from aster_acp.server import CodingACPAdapter
 from aster_cli.coding.reply_strategy import CodingReplyStrategy
 from aster_cli.sessions import SessionTurnFinished
@@ -59,7 +60,11 @@ async def tree_adapters(tmp_path, monkeypatch):
 
     def make(responses=None):
         adapter = CodingACPAdapter(lambda: factory(responses))
-        adapter.on_connect(AsyncMock(spec=Client))
+        client = AsyncMock(spec=Client)
+        client.request_permission.return_value = RequestPermissionResponse.model_validate(
+            {"outcome": {"outcome": "selected", "optionId": "allow_once"}}
+        )
+        adapter.on_connect(client)
         built.append(adapter)
         return adapter
 

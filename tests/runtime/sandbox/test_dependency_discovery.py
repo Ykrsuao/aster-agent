@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import csv
+import importlib
 import importlib.metadata as metadata
+import os
 from pathlib import Path
 from types import ModuleType
 
@@ -22,6 +24,7 @@ def _distribution(root: Path, name: str, records: list[str]) -> Path:
     (info / "METADATA").write_text(f"Name: {name}\nVersion: 1.0\n", encoding="utf-8")
     with (info / "RECORD").open("w", newline="", encoding="utf-8") as stream:
         csv.writer(stream).writerows((record, "", "") for record in records)
+    importlib.invalidate_caches()
     return info
 
 
@@ -99,12 +102,24 @@ def test_dependency_discovery_reads_each_exposed_distribution_version_once(disco
     assert versions.count("tool-provider") == 1
 
 
-def test_dependency_discovery_observes_version_and_installed_provider_changes(discovery, tmp_path):
+def test_dependency_discovery_observes_version_and_installed_provider_changes(
+    discovery, tmp_path, monkeypatch
+):
     executor, exposed, _ = discovery
     exposed["tools"] = ModuleType("shared.tools")
     info = _distribution(tmp_path, "first-provider", ["shared/first.py"])
     (tmp_path / "shared").mkdir()
     (tmp_path / "shared/first.py").touch()
+    original_stat = os.stat
+    installed_stat = tmp_path.stat()
+
+    def same_directory_timestamp(path, *args, **kwargs):
+        if path == str(tmp_path):
+            return installed_stat
+        return original_stat(path, *args, **kwargs)
+
+    # Metadata finders cache by directory mtime, which can repeat across rapid installs.
+    monkeypatch.setattr(os, "stat", same_directory_timestamp)
     assert executor._dependencies() == ["cloudpickle==3.1.2", "first-provider==1.0"]
 
     (info / "METADATA").write_text("Name: first-provider\nVersion: 2.0\n", encoding="utf-8")

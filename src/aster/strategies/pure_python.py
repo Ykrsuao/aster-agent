@@ -6,10 +6,9 @@ Flow:
 1. Build prompt (task + agent state + available methods)
 2. Call LLM with NO tools - just get text output
 3. Validate code (REPL policy: no classes, await async methods)
-4. Pre-compile helper functions (before execution for same-turn use)
-5. Execute output as Python via runtime.execute_code()
-6. If code has return statement OR method returns None → validate and complete
-7. Otherwise → send feedback (stdout, defined helpers) and continue loop
+4. Execute output as Python via runtime.execute_code()
+5. If code has return statement OR method returns None → validate and complete
+6. Otherwise → send feedback (stdout, defined helpers) and continue loop
 
 Strategy Variants:
 - PurePythonStrategy: Strategy instructions in system message (default)
@@ -43,9 +42,7 @@ from aster.strategies.base import RuntimeServices
 from aster.strategies.codeact_errors import format_validation_error
 from aster.strategies.composite import CompositeStrategy
 from aster.strategies.generated_code import (
-    ExecutionNamespaceBuilder,
     GeneratedCodeValidator,
-    HelperFunctionManager,
     ReturnValueValidator,
 )
 from aster.strategies.template import TemplateStrategy
@@ -87,6 +84,8 @@ class GenerationSession:
     error_count: int = 0
     consecutive_api_errors: int = 0
     session_locals: dict[str, Any] = field(default_factory=dict)
+    # shortcut: reused helpers keep prior-generation globals; revisit cross-generation persistence.
+    execution_namespace: dict[str, Any] = field(default_factory=dict)
     task_event_id: str = ""
     out_accessor: Any = field(default=None)  # OutAccessor instance, created lazily
 
@@ -763,48 +762,6 @@ class PurePythonStrategy(CompositeStrategy):
             logger.warning(f"[PURE_PYTHON] Validation errors: {validation_errors}")
             return ExecutionResult(stdout="", error=None, defined_methods={})
 
-        # 2) Build execution namespace (consistent with ActorRuntime.execute_code)
-        # Include strategy symbols for LLM-generated helper methods
-        strategy_extras: dict[str, Any] = {
-            "PurePythonStrategy": type(self),
-        }
-        # Try to import other strategies for helper method decorators
-        try:
-            from aster.strategies.predict import PredictStrategy
-            from aster.strategies.reflexion import ReflexionStrategy
-
-            strategy_extras["PredictStrategy"] = PredictStrategy
-            strategy_extras["ReflexionStrategy"] = ReflexionStrategy
-        except ImportError:
-            pass
-
-        namespace = ExecutionNamespaceBuilder.build(
-            runtime.agent, extra={**builtins, **session.session_locals, **strategy_extras}
-        )
-
-        # 3) Pre-compile helper function defs so @strategy decorators can see
-        # _generated_source at decoration time. Helpers are never attached to the agent.
-        helper_compiler = HelperFunctionManager()
-        helper_result = helper_compiler.apply(
-            code,
-            runtime.agent,
-            session.session_locals,
-            namespace=namespace,
-        )
-
-        if helper_result.errors:
-            session.record_error()
-            error_msg = "**Error**: Failed to define helper function(s):\n" + "\n".join(
-                f"- {e}" for e in helper_result.errors
-            )
-            runtime.event_manager.add(Error(content=error_msg))
-            logger.warning(f"[PURE_PYTHON] Helper compile errors: {helper_result.errors}")
-            return ExecutionResult(stdout="", error=None, defined_methods={})
-
-        if helper_result.installed:
-            logger.debug(f"[PURE_PYTHON] Compiled helpers: {helper_result.installed}")
-
-        # 4) Execute with session locals (includes pre-compiled helpers)
         execution_builtins = {**builtins, **session.session_locals}
 
         # Track this execution so the /activity slash command can report that
@@ -815,6 +772,7 @@ class PurePythonStrategy(CompositeStrategy):
             return await runtime.execute_code(
                 code,
                 builtins=execution_builtins,
+                namespace=session.execution_namespace,
                 validate=True,
                 wrap_in_function=True,
                 execution_count=session.execution_count,

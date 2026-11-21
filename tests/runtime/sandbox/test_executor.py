@@ -10,7 +10,9 @@ the serialization boundary, and each guardrail enforced *inside a real cell*
 
 from __future__ import annotations
 
+import asyncio
 import enum
+import errno
 import os
 import sys
 import tempfile
@@ -22,14 +24,15 @@ from pydantic import BaseModel
 
 from aster import Agent
 from aster.runtime.sandbox.config import FileRule, SandboxConfig
-from aster.runtime.sandbox.errors import CellSerializationError
+from aster.runtime.sandbox.errors import (
+    CellSerializationError,
+    CellTimeoutError,
+    SandboxExecutionError,
+)
 from aster.runtime.sandbox.executor import SandboxedExecutor
-from aster.runtime.sandbox.guards import probe_capabilities
 from aster.unifiedllm.fake import FakeLLMClient
 
 pytestmark = pytest.mark.sandbox
-
-CAPS = probe_capabilities()
 
 _side_effects: list[str] = []
 
@@ -696,29 +699,67 @@ async def test_workspace_is_created_if_missing():
 
 
 # --- guardrails enforced inside a real cell ---------------------------------
-@pytest.mark.skipif(
-    sys.platform != "linux" or not CAPS.rlimit, reason="Linux RLIMIT_AS unavailable"
-)
-async def test_memory_guard_inside_cell():
-    ex = _executor(SandboxConfig(require=False, network=True, filesystem=False, max_memory_mb=128))
+# These run in the Linux guest on every host; host kernel probes do not apply.
+@pytest.mark.parametrize("max_memory_mb", [0, 32], ids=["uncapped", "capped"])
+async def test_memory_guard_inside_cell(max_memory_mb):
+    ex = _executor(SandboxConfig(network=True, filesystem=False, max_memory_mb=max_memory_mb))
     try:
-        res = await _run(ex, "x = bytearray(1024 * 1024 * 1024)")
-        assert not res.success
-        assert "memory" in str(res.error).lower()
+        small = await _run(
+            ex,
+            "import sys\nsentinel = 'kept'\n(sys.platform, len(bytearray(1024 * 1024)))",
+        )
+        assert small.error is None, small.error
+        assert small.returned_value == ("linux", 1024 * 1024)
+        res = await _run(ex, "data = bytearray(128 * 1024 * 1024)\nlen(data)", 2)
+        if max_memory_mb:
+            assert isinstance(res.error, SandboxExecutionError), res.error
+            assert isinstance(res.error.original_error, MemoryError), res.error
+        else:
+            assert res.error is None, res.error
+            assert res.returned_value == 128 * 1024 * 1024
+        after = await _run(ex, "(sentinel, self.add_one(41))", 3)
+        assert after.error is None, after.error
+        assert after.returned_value == ("kept", 42)
+        assert ex.degraded_guards == []
     finally:
         await ex.aclose()
 
 
-@pytest.mark.skipif(not CAPS.seccomp, reason="seccomp unavailable")
-async def test_network_guard_inside_cell():
-    ex = _executor(SandboxConfig(require=False, network=False, filesystem=False))
+@pytest.mark.parametrize("network", [False, True], ids=["blocked", "allowed"])
+async def test_network_guard_inside_cell(network):
+    ex = _executor(SandboxConfig(network=network, filesystem=False))
     try:
-        res = await _run(
+        local = await _run(
             ex,
-            "import socket\nsocket.socket(socket.AF_INET, socket.SOCK_STREAM)",
+            "import sys, socket\nsentinel = 'kept'\n"
+            "with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM):\n    pass\nsys.platform",
         )
-        assert not res.success
-        assert "PermissionError" in str(res.error) or "permission" in str(res.error).lower()
+        assert local.error is None, local.error
+        assert local.returned_value == "linux"
+        for n, (family, kind) in enumerate(
+            (
+                (family, kind)
+                for family in ("AF_INET", "AF_INET6")
+                for kind in ("SOCK_STREAM", "SOCK_DGRAM")
+            ),
+            2,
+        ):
+            res = await _run(
+                ex,
+                "try:\n"
+                f"    with socket.socket(socket.{family}, socket.{kind}):\n        pass\n"
+                "except PermissionError as error:\n    outcome = ('blocked', error.errno)\n"
+                "else:\n    outcome = ('allowed', None)\noutcome",
+                n,
+            )
+            assert res.error is None, res.error
+            assert res.returned_value == (
+                ("allowed", None) if network else ("blocked", errno.EACCES)
+            ), (family, kind, res.returned_value)
+        after = await _run(ex, "(sentinel, self.add_one(41))", 6)
+        assert after.error is None, after.error
+        assert after.returned_value == ("kept", 42)
+        assert ex.degraded_guards == []
     finally:
         await ex.aclose()
 
@@ -755,16 +796,49 @@ async def test_filesystem_guard_inside_cell():
             await ex2.aclose()
 
 
-@pytest.mark.skipif(not CAPS.rlimit, reason="RLIMIT unavailable")
-async def test_cpu_guard_kills_spin_loop():
+@pytest.mark.parametrize("max_cpu_seconds", [0, 1], ids=["uncapped", "capped"])
+async def test_cpu_guard_kills_spin_loop(max_cpu_seconds):
     ex = _executor(
-        SandboxConfig(require=False, network=True, filesystem=False, max_cpu_seconds=1),
-        cell_timeout=30.0,
+        SandboxConfig(
+            network=True, filesystem=False, max_cpu_seconds=max_cpu_seconds, rss_poll_s=60
+        ),
+        cell_timeout=None,
     )
     try:
-        res = await _run(ex, "while True:\n    pass")
-        assert not res.success
-        assert "cpu" in str(res.error).lower() or "kill" in str(res.error).lower()
+        idle = await _run(
+            ex,
+            "import sys, time\nself.value = 17\nsentinel = 'kept'\ntime.sleep(1.2)\nsys.platform",
+        )
+        assert idle.error is None, idle.error
+        assert idle.returned_value == "linux"
+        # The same bounded workload completes without a cap. No cell deadline,
+        # and the host watchdog cannot fire before this kernel-limit assertion.
+        res = await asyncio.wait_for(
+            _run(
+                ex,
+                "started = time.process_time()\n"
+                "while time.process_time() - started < 3:\n    pass\n42",
+                2,
+            ),
+            timeout=15,
+        )
+        if max_cpu_seconds:
+            assert isinstance(res.error, CellTimeoutError), res.error
+            assert "worker CPU budget" in str(res.error)
+        else:
+            assert res.error is None, res.error
+            assert res.returned_value == 42
+        after = await _run(ex, "self.value + 1", 3)
+        assert after.error is None, after.error
+        assert after.returned_value == 18
+        local = await _run(ex, "sentinel", 4)
+        if max_cpu_seconds:
+            assert isinstance(local.error, SandboxExecutionError), local.error
+            assert isinstance(local.error.original_error, NameError), local.error
+        else:
+            assert local.error is None, local.error
+            assert local.returned_value == "kept"
+        assert ex.degraded_guards == []
     finally:
         await ex.aclose()
 

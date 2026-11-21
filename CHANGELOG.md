@@ -6,6 +6,68 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Windows ACP startup no longer waits for the first provider-code cache build
+  before answering the protocol handshake. Cache preparation runs off the event
+  loop when the first session needs a model; concurrent sessions share it, and
+  cancelling one request does not cancel preparation for the others. Model
+  clients are still constructed on the protocol event loop.
+
+- **Security:** upgrade terminal UI dependencies to remove vulnerable `lru 0.12`.
+  Adapt the textarea and image renderer for Ratatui 0.30, preserving saved cursors
+  and repainting text exposed by moved images. CI now audits the full frontend
+  dependency tree and the terminal's Cargo lockfile.
+- **Security:** sandboxed cells can no longer reach hidden or private members of
+  the host agent through `self.*`. The host resolved any attribute path a guest
+  named, so a cell could call `self.runtime.evaluate_expression(...)` and run
+  Python in the host process, or read fields marked `hidden`. The host now
+  accepts only what `doc(self)` shows: public members, plus `_private` methods
+  opted in with `@spec(hidden=False)`. Refused access fails in the cell with a
+  message naming the refused member.
+  Behaviour change in sandbox mode: a cell can no longer register an expression
+  context block (`Context(expr=...)`, `self.context.set(..., expr=...)`), because
+  the host evaluates the expression outside the sandbox. Literal blocks still
+  work. Public tools the agent exposes still run on the host, as before.
+- **Security:** in `accept_edits` mode, a file read, write or replace is handled
+  without approval only when its target resolves inside the workspace (or a
+  directory granted to the sandbox with `SandboxConfig.allow`; a read-only grant
+  admits reads only). Targets elsewhere, and anything under `.git`, `.aster`,
+  `.agents`, `.cursor` or `.claude`, now ask for approval like other code.
+  Previously any path was accepted, including `..`, absolute and UNC paths.
+- **Security:** code containing control characters or bidirectional overrides is
+  refused before it is offered for approval, and the terminal cancels a request
+  whose code it could not display unchanged. An escape sequence could hide the
+  lines after it from the approval dialog while Python still ran them.
+- **Security:** `aster start-dev` and `python -m aster.viewer` now bind
+  `127.0.0.1` by default instead of `0.0.0.0`. Pass `--host 0.0.0.0` (or set
+  `ASTER_TRACE_VIEWER_HOST`) to accept other machines, which must present
+  `ASTER_VIEWER_AUTH_TOKEN`.
+- **Security:** the ACP server asks for approval before running generated code
+  for every client. Previously only clients that declared the `runtimeControls`
+  capability were asked, so a general ACP client such as Zed ran generated code
+  without any prompt. The request is the standard `session/request_permission`.
+  Behaviour change: a client that cannot answer it no longer gets execution, and
+  every session now reports its modes and sends a `current_mode_update`.
+- **Security:** `aster` and `aster-acp` no longer act on a folder's own files
+  until the user trusts the folder. Opening a repository used to import the
+  Python in `.aster/libs` and its skill directories, apply its `llm_config.yaml`
+  (which could send an API key to another server) and `secrets.yaml`, and load
+  its saved sessions. `aster` now asks before using these files, `aster trust` manages
+  the list, and other ACP clients get a message naming what was ignored.
+  Behaviour change: existing projects are asked on the next start, and until
+  trusted their project settings, skills and earlier sessions are not used. Set
+  `ASTER_TRUST_ALL_WORKSPACES=1` for unattended runs. Library use is unchanged.
+  Skill paths originating inside an untrusted folder remain blocked when a
+  symlink or directory junction points outside it. Concurrent trust changes
+  preserve other hosts' additions and revocations.
+  The terminal also excludes the working directory from Python's automatic
+  module search when starting its backend, before the trust check can run.
+- **Security:** OpenTelemetry packages are updated to 1.45.2 / 0.66b2, which
+  fixes CVE-2026-126360 in `opentelemetry-api`.
+- Starting a session while the trace viewer is running no longer hangs on
+  Windows. The git commands that describe the checkout for traces inherited the
+  ACP protocol pipe as their input and never returned.
+- Streamed model replies no longer fail with `Expected ModelResponse, got
+  <class 'async_generator'>` while tracing is enabled.
 - Core installs now exclude the individually verified LiteLLM releases affected
   by the optional-MCP import regression (1.106.0–1.106.7, 1.108.0–1.108.1, and
   affected prereleases). Future patch and security releases remain eligible;
@@ -43,18 +105,12 @@ to follow semantic versioning.
   `context_window` only when an entry's route matches its own, including the
   resolved key when the client passes `api_key`; otherwise it falls back to
   LiteLLM model metadata.
-- Windows: WSL 2 is the supported way to run aster on Windows. Native Windows is
-  unsupported: `import aster` raises `UnsupportedPlatformError` (an
-  `ImportError`) and the `aster` command exits with one line pointing to WSL 2,
-  unless `ASTER_SKIP_PLATFORM_CHECK=1` is set. With the override, the pure-Python
-  core (agents, PredictStrategy, in-process CodeAct, in-memory storage) and
-  `aster connect` work and are tested in CI (the registry lock uses `filelock`
-  there; POSIX keeps `fcntl`), redirected CLI output is written as UTF-8, and
-  POSIX-only features (bash sessions and shell tools, the CodeAct sandbox,
-  file-backed SQLite storage, `monitor()`) raise `PosixOnlyFeatureError` naming
-  WSL 2. Previously `import aster` failed on Windows with `fcntl`/`SIGUSR2`
-  errors. CI adds a native-Windows smoke, a WSL quick check on every PR, and a
-  nightly full suite under WSL.
+- Windows: native Windows is supported without `ASTER_SKIP_PLATFORM_CHECK`.
+  Host commands use PowerShell, file-backed storage uses native locking, and
+  process-tree cleanup uses Job Objects. In-process execution does not require
+  microsandbox; sandbox execution uses the optional microsandbox runtime.
+  CI checks built wheels, CLI startup, host behavior, security regressions and
+  the Rust terminal on native Windows. WSL 2 supplies additional Linux coverage.
 - CodeAct and PurePython `max_retries` now count only consecutive LLM API
   errors; a successful LLM call resets the count. Other errors, such as
   invalid tool calls and failed result validation, still add up across the

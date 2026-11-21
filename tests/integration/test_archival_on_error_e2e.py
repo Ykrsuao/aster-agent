@@ -69,14 +69,16 @@ class TestArchivalOnContextErrorE2E:
         all_events = fixture_data["events"]
         model_name = "openai/" + fixture_data["model"]
 
-        llm = CompletionClient(
-            model=model_name,
-            api_base=_API_BASE,
-            api_key=api_key,
-            temperature=0,
-        )
+        client_config = {
+            "model": model_name,
+            "api_base": _API_BASE,
+            "api_key": api_key,
+            "temperature": 0,
+        }
+        llm = CompletionClient(**client_config)
         if llm.context_window is None:
-            llm._registry_config = {"context_window": ctx_window}
+            llm.close()
+            llm = CompletionClient(**client_config, context_window=ctx_window)
 
         class A(Agent, llm=llm):
             async def respond(self, prompt: str) -> str:

@@ -106,7 +106,15 @@ fn main() {
     state.status = "Ready".into();
     if !matches!(
         mode,
-        "welcome" | "welcome-drafts" | "drafts" | "drafts-empty"
+        "welcome"
+            | "welcome-hud-full"
+            | "sent-hud-full"
+            | "starting"
+            | "starting-multiple"
+            | "starting-paused"
+            | "welcome-drafts"
+            | "drafts"
+            | "drafts-empty"
     ) {
         state.title = "Polish the terminal workspace".into();
         state.entries=vec![
@@ -123,6 +131,8 @@ fn main() {
                 expanded:false,started:Some(Instant::now()-Duration::from_secs(4)),elapsed:None}),
         ];
         state.phase = Phase::Busy;
+        state.active_turn_id = Some("preview-turn".into());
+        state.steering_supported = true;
         state.status = "Running interaction tests…".into();
         state.started = Some(Instant::now() - Duration::from_secs(12));
         state.editor.insert_str("完成后检查窄窗口下的布局");
@@ -141,6 +151,117 @@ fn main() {
         state.session_id = Some("session-current".into());
     }
     match mode {
+        "skills" | "skills-detail" | "skills-empty" | "skills-error" => {
+            state.skills.supported = true;
+            state.skills.items = vec![
+                json!({"name":"aster.libwriting", "description":"Create reusable skills from working code", "active":true, "loaded":true, "kind":"python"}),
+                json!({"name":"aster.repo", "description":"Inspect repository files, symbols and changes", "active":true, "loaded":true, "kind":"python"}),
+                json!({"name":"aster.shell", "description":"Run commands and read or edit workspace files", "active":true, "loaded":true, "kind":"python"}),
+                json!({"name":"aster.todo", "description":"Track a task's plan and progress", "active":true, "loaded":true, "kind":"python"}),
+                json!({"name":"cmd.review", "description":"Review changes against repository instructions", "active":false, "loaded":true, "kind":"text"}),
+                json!({"name":"plugin.docs", "description":"Not loaded; documentation is available after loading", "active":false, "loaded":false, "kind":"python"}),
+            ];
+            state.skills.total = state.skills.items.len();
+            state.open(Overlay::Skills);
+            if mode == "skills-detail" {
+                state.selected = 4;
+                state.skills.detail = Some(json!({
+                    "name":"cmd.review", "description":"Review source changes", "active":false,
+                    "loaded":true, "kind":"text", "truncated":false,
+                    "text":"# Review source changes\n\nRead repository instructions before reviewing the diff.\nCheck behavior, failure paths, tests and compatibility.\n\nReport findings with a concrete trigger and file location.\nExplain the consequence before proposing the smallest fix.\n\nThis browser shows documentation only. Opening this page does not activate or execute the skill.",
+                }));
+            } else if mode == "skills-empty" {
+                state.skills.items.clear();
+                state.skills.total = 0;
+            } else if mode == "skills-error" {
+                state.skills.items.clear();
+                state.skills.total = 0;
+                state.skills.error = Some("This backend does not support the skills browser. Update aster-acp and reconnect.".into());
+            }
+        }
+        "starting" | "starting-multiple" | "starting-paused" => {
+            state.phase = Phase::Preparing;
+            state.queued.push_back("hi".into());
+            if mode == "starting-multiple" {
+                state.queued.push_back("Check the current project".into());
+                state.queued.push_back("Summarize the changes".into());
+            }
+            state.queue_paused = mode == "starting-paused";
+            state.hud.configure("full").unwrap();
+        }
+        "permissions" | "permissions-plan" => {
+            state.phase = Phase::Ready;
+            state.status = "Ready".into();
+            state.started = None;
+            state.runtime_supported = true;
+            state.mode = if mode == "permissions-plan" {
+                "plan"
+            } else {
+                "code"
+            }
+            .into();
+            state.approval_policy = "ask".into();
+            state.runtime = json!({
+                "permissionMode":if mode == "permissions-plan" { "plan" } else { "manual" },
+                "mode":state.mode,
+                "approval":"ask"
+            });
+            state.open(Overlay::Permissions);
+        }
+        "reasoning" | "reasoning-unknown" | "reasoning-unsupported" => {
+            state.phase = Phase::Ready;
+            state.status = "Ready".into();
+            state.started = None;
+            state.runtime_supported = true;
+            state.runtime = json!({
+                "reasoningLevel":"high", "reasoningSelection":"high",
+                "reasoningDefault":"medium", "reasoningLevels":["low", "medium", "high"]
+            });
+            if mode == "reasoning" {
+                state.model = "declared-demo".into();
+            }
+            if mode != "reasoning" {
+                state.runtime["reasoningLevel"] = Value::Null;
+                state.runtime["reasoningSelection"] = Value::Null;
+                state.runtime["reasoningDefault"] = Value::Null;
+                state.runtime["reasoningLevels"] = if mode == "reasoning-unknown" {
+                    Value::Null
+                } else {
+                    json!([])
+                };
+            }
+            state.open(Overlay::Reasoning);
+        }
+        "model-effort" | "model-effort-unknown" => {
+            state.phase = Phase::Ready;
+            state.status = "Ready".into();
+            state.started = None;
+            state.runtime_supported = true;
+            state.model = "declared-demo".into();
+            state.runtime = json!({
+                "reasoningLevel":"medium", "reasoningSelection":null,
+                "reasoningDefault":"medium", "reasoningLevels":["low","medium","high"],
+                "models":[
+                    {"id":state.model, "name":"Declared demo"},
+                    {"id":"custom-demo", "name":"Custom demo", "reasoningLevels":["quick","deep"], "reasoningDefault":"quick"},
+                    {"id":"unsupported-demo", "name":"Unsupported demo", "reasoningLevels":[]}
+                ]
+            });
+            if mode == "model-effort-unknown" {
+                state.model = "deepseek-flash".into();
+                state.runtime["models"][0] = json!({"id":state.model});
+                state.runtime["reasoningLevel"] = Value::Null;
+                state.runtime["reasoningSelection"] = Value::Null;
+                state.runtime["reasoningDefault"] = Value::Null;
+                state.runtime["reasoningLevels"] = Value::Null;
+            }
+            state.open(Overlay::Models);
+            if mode == "model-effort" {
+                state
+                    .model_effort_drafts
+                    .insert(state.model.clone(), Some("high".into()));
+            }
+        }
         "model-switch" | "model-switch-empty" => {
             state.phase = Phase::Ready;
             state.status = "Ready".into();
@@ -582,7 +703,7 @@ fn main() {
     if mode.starts_with("hud") {
         state.runtime_supported = true;
         state.approval_policy = "ask".into();
-        state.runtime = json!({"reasoningLevel":"high"});
+        state.runtime = json!({"reasoningLevel":"high", "permissionMode":"manual"});
         state.hud.host.git = Some(aster_tui::workspace_changes::GitSummary {
             branch: "main".into(),
             dirty: true,
@@ -610,13 +731,71 @@ fn main() {
                     {"title":"Check ACP usage","status":"done","elapsedSeconds":23}]
         });
         match mode {
-            "hud-full" | "hud-unknown" | "hud-monochrome" => state.hud.configure("full").unwrap(),
+            "hud-full" | "hud-tokens" | "hud-unknown" | "hud-monochrome" => {
+                state.hud.configure("full").unwrap()
+            }
             "hud-compact" => state.hud.configure("compact").unwrap(),
-            "hud-zh" => state.hud.configure("set language zh").unwrap(),
+            "hud-zh" => {
+                state.hud.configure("full").unwrap();
+                state.hud.configure("set language zh").unwrap();
+            }
             "hud-settings" => state.open(Overlay::Hud),
             _ => {}
         }
+        if mode == "hud-tokens" {
+            state.hud.configure("set context_value tokens").unwrap();
+        }
         state.monochrome = mode == "hud-monochrome";
+    }
+    if matches!(mode, "welcome-hud-full" | "sent-hud-full") {
+        state.hud.configure("full").unwrap();
+    }
+    if mode == "welcome-hud-full" {
+        state.context_window = Some(1_048_576);
+        state.hud.config.context_value = "tokens".into();
+    }
+    if mode == "sent-hud-full" {
+        state.session_id = Some("session-current".into());
+        let mut controller = Controller::new(state, None, false);
+        controller.paste("检查发消息后的状态栏".into());
+        let actions = controller.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::Request {
+                method: "session/prompt",
+                ..
+            }]
+        ));
+        state = controller.state;
+    }
+    if matches!(mode, "sent-image" | "sent-image-caption" | "sent-images") {
+        state.phase = Phase::Ready;
+        state.active_turn_id = None;
+        state.entries.clear();
+        state.started = None;
+        state.title = "Image review".into();
+        state.editor = Default::default();
+        state.attachments_supported = true;
+        state.image_input_supported = true;
+        state.runtime_supported = true;
+        state.approval_policy = "ask".into();
+        state.runtime = json!({"permissionMode":"manual", "reasoningLevel":"high"});
+        let mut controller = Controller::new(state, None, false);
+        let generation = controller.state.conversation_generation;
+        controller.add_attachment(generation, Ok(preview_image()));
+        if mode == "sent-images" {
+            let mut second = preview_image();
+            if let aster_tui::attachments::Attachment::Image { name, .. } = &mut second {
+                *name = "reference.png".into();
+            }
+            controller.add_attachment(generation, Ok(second));
+        }
+        if mode == "sent-image-caption" {
+            controller.paste("看看这张图片的界面，有什么可以改善？".into());
+        }
+        let actions = controller.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(actions.as_slice(), [Action::Request { method: "session/prompt", .. }]));
+        state = controller.state;
     }
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     let mut hits = ui::HitAreas::default();
@@ -759,7 +938,9 @@ fn main() {
         let mut previous_fg = String::new();
         let mut previous_bg = String::new();
         for cell in row {
-            if cell.skip || cell.symbol().contains('\x1b') {
+            if cell.diff_option == ratatui::buffer::CellDiffOption::Skip
+                || cell.symbol().contains('\x1b')
+            {
                 cells.push(json!({"text":"", "fg":color(cell.fg, "#e1e1e1"),
                     "bg":color(cell.bg, "#141414"), "bold":false}));
                 continuation = 0;

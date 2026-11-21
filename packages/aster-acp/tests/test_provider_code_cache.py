@@ -55,6 +55,7 @@ httpx.AsyncClient.send = model_response
 prepared = []
 
 async def prepare_model(factory, **options):
+    await options['prepare_model']()
     client = factory()
     try:
         response = await client.acall([{'role': 'user', 'content': 'Only reply OK.'}])
@@ -80,6 +81,8 @@ print(json.dumps({'prepared_models': len(prepared), 'model_requests': len(reques
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Automatic bulk code loading is Windows-only")
+# Let the subprocess's own timeout report and clean up a slow cold-cache build.
+@pytest.mark.timeout(150)
 def test_real_startup_and_response_do_not_read_individual_sdk_modules(tmp_path):
     config = tmp_path / "llm_config.yaml"
     config.write_text(

@@ -196,6 +196,7 @@ async def test_runner_executes_delegation_and_preserves_provider_turns(
 ):
     import json
 
+    from aster._platform import is_native_windows
     from aster.unifiedllm import (
         AssistantReasoning,
         CacheBoundary,
@@ -238,12 +239,13 @@ async def test_runner_executes_delegation_and_preserves_provider_turns(
         "parent-start",
         native=True,
     )
+    check_command = "[Console]::Write('verified')" if is_native_windows() else "printf verified"
     llm = RecordingLLM(
         scripted_responses=[
             first,
             response(
                 f"assert str(self.shell.cwd) == {str(tmp_path)!r}\n"
-                "checked = await self.shell.run('printf verified')\n"
+                f"checked = await self.shell.run({check_command!r})\n"
                 "assert checked.returncode == 0 and checked.stdout == 'verified'\n"
                 "return_result(TaskResult(solution_description='Verified workspace', "
                 "evidence=checked.stdout, how_to_verify='true'))",

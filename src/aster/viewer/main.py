@@ -17,7 +17,7 @@ import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, quote, urlencode
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -137,6 +137,15 @@ async def _ingest_worker() -> None:
 
 class _QuietAccessFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
+        # Error access logs still contain bootstrap URLs, including encoded token keys.
+        if isinstance(record.args, tuple) and len(record.args) == 5:
+            path, separator, query = str(record.args[2]).partition("?")
+            parameters = parse_qsl(query, keep_blank_values=True)
+            if separator and any(key == "token" for key, _ in parameters):
+                safe_query = urlencode(
+                    [(key, "[REDACTED]" if key == "token" else value) for key, value in parameters]
+                )
+                record.args = (*record.args[:2], f"{path}?{safe_query}", *record.args[3:])
         msg = record.getMessage()
         # Keep 4xx/5xx responses visible
         return '" 4' in msg or '" 5' in msg
@@ -166,9 +175,9 @@ async def lifespan(app: FastAPI):
         )
     else:
         log.info(
-            "Browser requests accepted for Host: localhost, IP literals, %s, %s.*%s",
+            "Requests accepted for Host: localhost, IP literals, %s, %s%s",
             _OWN_HOSTNAME,
-            _OWN_HOSTNAME,
+            _OWN_FQDN,
             f", {', '.join(sorted(extra_hosts))}" if extra_hosts else "",
         )
 
@@ -215,42 +224,31 @@ def _is_loopback_client(request: Request) -> bool:
     try:
         return ipaddress.ip_address(client_host).is_loopback
     except ValueError:
-        # Starlette's in-process test transport uses this non-network host.
-        return client_host == "testclient"
+        return False
 
 
 def _require_viewer_authorization(request: Request) -> None:
     """Authorize a protected viewer API route.
 
-    Three independent credentials, checked as OR rather than else-if:
-
-    1. Loopback origin — local agents ingest with no configuration, which is the
-       default single-machine workflow.
-    2. Session cookie — the browser, bootstrapped from ``?token=`` (see
-       :func:`_maybe_issue_session_cookie`). The SPA cannot set an
-       ``Authorization`` header on a navigation, so a header-only scheme locks
-       the UI out entirely.
-    3. ``Authorization: Bearer`` — remote programmatic clients (exporters).
-
-    An earlier revision made the token *replace* the loopback allowance, which
-    left no configuration in which both the UI and remote ingest worked.
+    Without a configured token, only loopback clients are allowed. Once a token
+    is configured, every client needs a session cookie or an explicit bearer
+    token, including requests forwarded by a local reverse proxy.
     """
-    if _is_loopback_client(request):
-        return
-
     expected = viewer_auth_token()
     if not expected:
+        if _is_loopback_client(request):
+            return
         raise HTTPException(
             status_code=403,
             detail="set ASTER_VIEWER_AUTH_TOKEN before exposing the viewer",
         )
 
     cookie = request.cookies.get(SESSION_COOKIE, "")
-    if cookie and hmac.compare_digest(cookie, expected):
+    if cookie and hmac.compare_digest(cookie.encode(), expected.encode()):
         return
 
     authorization = request.headers.get("Authorization", "")
-    if hmac.compare_digest(authorization, f"Bearer {expected}"):
+    if hmac.compare_digest(authorization.encode(), f"Bearer {expected}".encode()):
         return
 
     raise HTTPException(
@@ -270,25 +268,38 @@ _cors_origins = [
 _protected = [Depends(_require_viewer_authorization)]
 
 
-# Headers no non-browser client sends. Chrome 76+/Firefox 90+/Safari 16.4+ set
-# Sec-Fetch-*; anything issuing a cross-origin fetch sets Origin. urllib and
-# requests — which the OTLP exporter and journal client use — set neither.
-_BROWSER_MARKER_HEADERS = ("sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "origin")
-
 _OWN_HOSTNAME = socket.gethostname().lower()
-
-
-def _request_is_browser_shaped(request: Request) -> bool:
-    return any(h in request.headers for h in _BROWSER_MARKER_HEADERS)
+_OWN_FQDN = socket.getfqdn().lower()
 
 
 def _host_without_port(raw: str) -> str:
     """``example.com:5001`` -> ``example.com``; ``[::1]:5001`` -> ``[::1]``."""
     raw = raw.strip().lower()
+    if not raw or any(c.isspace() or c in "/\\?#@" for c in raw):
+        return ""
     if raw.startswith("["):
         end = raw.find("]")
-        return raw[: end + 1] if end != -1 else raw
-    return raw.rsplit(":", 1)[0] if ":" in raw else raw
+        if end < 0:
+            return ""
+        host, remainder = raw[: end + 1], raw[end + 1 :]
+        try:
+            ipaddress.IPv6Address(raw[1:end])
+        except ValueError:
+            return ""
+    else:
+        host, separator, port = raw.partition(":")
+        remainder = separator + port
+    if remainder:
+        port = remainder[1:]
+        if (
+            not remainder.startswith(":")
+            or not port.isascii()
+            or not port.isdecimal()
+            or len(port) > 5
+            or int(port) > 65535
+        ):
+            return ""
+    return host
 
 
 def _host_is_our_own(host: str) -> bool:
@@ -303,39 +314,36 @@ def _host_is_our_own(host: str) -> bool:
         return True
     except ValueError:
         pass
-    # Prefix match, not equality: when the qualified name comes from a DNS
-    # search domain, gethostname() returns only the leading label, so a client
-    # addressing us as ``<host>.<domain>`` is legitimate. Comparing exactly
-    # rejected real traffic and 400'd every span POST from such clients.
-    return host == _OWN_HOSTNAME or host.startswith(_OWN_HOSTNAME + ".")
+    return host in {_OWN_HOSTNAME, _OWN_FQDN}
 
 
 def allowed_hosts() -> set[str]:
     """Extra ``Host`` values accepted beyond this machine's own names."""
     configured = os.environ.get("ASTER_VIEWER_ALLOWED_HOSTS", "").strip()
-    return {h.strip().lower() for h in configured.split(",") if h.strip()}
+    hosts = {h.strip().lower() for h in configured.split(",") if h.strip()}
+    public_host = _host_without_port(os.environ.get("ASTER_VIEWER_PUBLIC_HOST", ""))
+    if public_host and public_host != "*":
+        hosts.add(public_host)
+    return hosts
 
 
 @app.middleware("http")
 async def _enforce_host_header(request: Request, call_next):
-    """Reject browser requests whose ``Host`` is not one of ours — DNS rebinding.
+    """Check Host independently of optional browser headers.
 
-    A malicious page can publish a short-TTL record, have the browser fetch its
-    own origin, then re-answer DNS with 127.0.0.1. The browser connects to this
-    server still believing the origin is the attacker's, so same-origin policy
-    lets their script *read* the response — and the request arrives from
-    loopback, which :func:`_require_viewer_authorization` allows with no
-    credential. Binding to localhost does not help; loopback is the target.
-
-    Only browser-shaped requests are checked. Rebinding is inherently a browser
-    attack, so exempting programmatic clients costs nothing — and it means this
-    can never reject a span export, which is how an earlier, stricter version
-    silently broke trace ingest.
+    Exporters using an unlisted alias must authenticate with a bearer token.
+    Ambient session cookies cannot exempt a browser from the Host check.
     """
     extra = allowed_hosts()
-    if "*" not in extra and _request_is_browser_shaped(request):
-        host = _host_without_port(request.headers.get("host", ""))
-        if host and not _host_is_our_own(host) and host not in extra:
+    if "*" not in extra:
+        hosts = request.headers.getlist("host")
+        host = _host_without_port(hosts[0]) if len(hosts) == 1 else ""
+        expected = viewer_auth_token()
+        authorization = request.headers.get("Authorization", "")
+        authenticated = bool(expected) and hmac.compare_digest(
+            authorization.encode(), f"Bearer {expected}".encode()
+        )
+        if not host or (not _host_is_our_own(host) and host not in extra and not authenticated):
             return JSONResponse(
                 status_code=400,
                 content={
@@ -615,15 +623,22 @@ def _maybe_issue_session_cookie(request: Request, path: str) -> RedirectResponse
     """
     expected = viewer_auth_token()
     supplied = request.query_params.get("token")
-    if not expected or not supplied or not hmac.compare_digest(supplied, expected):
+    if (
+        not expected
+        or not supplied
+        or not hmac.compare_digest(supplied.encode(), expected.encode())
+    ):
         return None
 
     remaining = [(k, v) for k, v in request.query_params.multi_items() if k != "token"]
-    target = f"/{path}"
+    # Decoded leading slashes/backslashes must not create a network-path redirect.
+    target = "/" + quote(path.lstrip("/\\"), safe="/")
     if remaining:
         target += "?" + urlencode(remaining)
 
     response = RedirectResponse(target, status_code=303)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
     response.set_cookie(
         SESSION_COOKIE,
         expected,
@@ -654,5 +669,7 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.environ.get("ASTER_TRACE_VIEWER_PORT", "5001"))
-    log.info("Starting viewer on port %d", port)
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # Loopback unless the operator opts in to other machines reaching the viewer.
+    host = os.environ.get("ASTER_TRACE_VIEWER_HOST", "127.0.0.1")
+    log.info("Starting viewer on %s:%d", host, port)
+    uvicorn.run(app, host=host, port=port)

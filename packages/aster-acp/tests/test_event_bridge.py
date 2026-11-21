@@ -346,6 +346,33 @@ async def test_bridge_retains_python_source_when_interrupted(tmp_path):
     await agent.close()
 
 
+@pytest.mark.parametrize("context_window", [None, 0, 1_048_576])
+async def test_startup_usage_preserves_known_capacity_without_a_measurement(
+    tmp_path, context_window
+):
+    llm = FakeLLMClient()
+    llm._context_window = context_window
+    agent = CodingAgent(llm=llm, cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+    try:
+        bridge.refresh_usage()
+        await bridge.flush()
+        updates = [update for _, update in client.updates if isinstance(update, UsageUpdate)]
+        assert len(updates) == 1
+        update = updates[0]
+        assert (update.used, update.size) == (0, context_window or 0)
+        assert update.field_meta["aster"]["usagePending"] is True
+        assert update.field_meta["aster"]["usageAvailable"] is False
+        assert "context" not in update.field_meta["aster"]
+        assert update.cost is not None and update.cost.amount == 0
+        assert update.field_meta["aster"]["hud"]["calls"] == 0
+        assert llm.call_count == 0
+    finally:
+        await bridge.close()
+        await agent.close()
+
+
 @pytest.mark.parametrize("context_window", [None, 0, 20, 128_000])
 async def test_bridge_reports_tokens_and_cost_independently_of_context_window(
     tmp_path, context_window

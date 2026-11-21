@@ -197,7 +197,10 @@ tui.sys = SimpleNamespace(
     stdin=SimpleNamespace(isatty=lambda: True),
     stdout=SimpleNamespace(isatty=lambda: True),
 )
-tui.importlib.util.find_spec = lambda name: object()
+original_find_spec = tui.importlib.util.find_spec
+tui.importlib.util.find_spec = lambda name: (
+    SimpleNamespace(name=name) if name in {'acp', 'aster_acp'} else original_find_spec(name)
+)
 sys.argv = ['aster'] if entrypoint == 'aster_main' else ['aster', 'tui']
 if model_source == 'argument':
     sys.argv.extend(['--model', 'configured-model'])
@@ -459,6 +462,100 @@ def test_tui_rejects_redirected_stream_before_startup(
     assert result.exit_code == 2
     assert "interactive terminal" in result.output
     assert terminal_app == []
+
+
+@pytest.mark.parametrize(
+    ("choice", "expected_exit", "starts_backend"),
+    [
+        ("trust", 0, True),
+        ("exit", 0, False),
+        ("interrupt", 1, False),
+        ("eof", 1, False),
+        ("decline", 0, False),
+        ("blank", 0, False),
+        ("unconfirmed", 0, False),
+    ],
+)
+def test_workspace_choice_controls_trust_and_backend_startup(
+    terminal_command, terminal_app, monkeypatch, tmp_path, choice, expected_exit, starts_backend
+):
+    from aster_cli import _workspace_trust_prompt as trust_prompt
+    from prompt_toolkit.shortcuts.choice_input import ChoiceInput
+
+    from aster import workspace_trust
+
+    monkeypatch.delenv("ASTER_TRUST_ALL_WORKSPACES", raising=False)
+    monkeypatch.delenv("ASTER_PROJECT_DIR", raising=False)
+    folder = tmp_path / "untrusted-workspace"
+    project = folder / ".aster"
+    project.mkdir(parents=True)
+    (project / "settings.yaml").write_text("tui:\n  default_model: untrusted-model\n")
+    if choice not in {"decline", "blank"}:
+        monkeypatch.setattr(
+            trust_prompt, "sys", SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: True))
+        )
+
+    def choose(_):
+        assert not workspace_trust.is_trusted(folder)
+        assert terminal_app == []
+        if choice == "interrupt":
+            raise KeyboardInterrupt
+        if choice == "eof":
+            raise EOFError
+        return choice
+
+    if choice == "unconfirmed":
+        monkeypatch.setattr(trust_prompt, "prompt_workspace_trust", lambda *args: False)
+    else:
+        monkeypatch.setattr(ChoiceInput, "prompt", choose)
+    arguments = ["-w", str(folder)]
+    if starts_backend:
+        arguments.extend(["--model", "test-model"])
+    else:
+        from aster_cli import _tui_model
+
+        def unexpected_model_lookup(*args, **kwargs):
+            pytest.fail("Cancelling workspace trust must precede model configuration lookup.")
+
+        monkeypatch.setattr(_tui_model, "resolve_tui_model", unexpected_model_lookup)
+    result = CliRunner().invoke(
+        terminal_command, arguments, input={"decline": "n\n", "blank": "\n"}.get(choice)
+    )
+
+    assert result.exit_code == expected_exit, result.output
+    assert bool(terminal_app) is starts_backend
+    assert workspace_trust.is_trusted(folder) is (choice == "trust")
+
+
+def test_workspace_trust_save_failure_exits_before_model_lookup_or_backend_startup(
+    terminal_command, terminal_app, monkeypatch, tmp_path
+):
+    from aster_cli import _tui_model
+
+    from aster import workspace_trust
+
+    monkeypatch.delenv("ASTER_TRUST_ALL_WORKSPACES", raising=False)
+    monkeypatch.delenv("ASTER_PROJECT_DIR", raising=False)
+    folder = tmp_path / "untrusted-workspace"
+    project = folder / ".aster"
+    project.mkdir(parents=True)
+    (project / "settings.yaml").write_text("tui:\n  default_model: untrusted-model\n")
+
+    def cannot_save(_):
+        raise PermissionError("trust store is read-only")
+
+    def unexpected_model_lookup(*args, **kwargs):
+        pytest.fail("A trust save failure must stop before model configuration lookup.")
+
+    monkeypatch.setattr(workspace_trust, "trust", cannot_save)
+    monkeypatch.setattr(_tui_model, "resolve_tui_model", unexpected_model_lookup)
+    result = CliRunner().invoke(terminal_command, ["-w", str(folder)], input="y\n")
+
+    assert result.exit_code == 1, result.output
+    assert "Error:" in result.output
+    assert "trust store is read-only" in result.output
+    assert terminal_app == []
+    assert not workspace_trust.is_trusted(folder)
 
 
 @pytest.mark.parametrize("missing", ["acp", "aster_acp"])

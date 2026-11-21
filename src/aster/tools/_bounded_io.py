@@ -61,7 +61,9 @@ class FileTooLargeError(ValueError):
     call sites behaving as they did without a new exception type to catch.
     """
 
-    def __init__(self, path: Path | str, size: int, limit: int, hint: str, summary: str) -> None:
+    def __init__(
+        self, path: Path | str | int, size: int, limit: int, hint: str, summary: str
+    ) -> None:
         self.path = str(path)
         self.size = size
         self.limit = limit
@@ -69,7 +71,7 @@ class FileTooLargeError(ValueError):
 
 
 def iter_lines_keepends(
-    path: Path,
+    path: Path | int,
     *,
     max_line_chars: int,
     chunk_chars: int = CHUNK_CHARS,
@@ -77,6 +79,7 @@ def iter_lines_keepends(
     """Yield lines exactly as ``read_text().splitlines(keepends=True)`` would.
 
     Peak memory is one chunk plus the longest line, instead of the whole file.
+    An integer file descriptor is owned and closed by this reader.
 
     Args:
         path: File to read.
@@ -115,7 +118,7 @@ def iter_lines_keepends(
 
 
 def read_line_range(
-    path: Path,
+    path: Path | int,
     start: int,
     end: int,
     *,
@@ -133,12 +136,16 @@ def read_line_range(
     Returns:
         ``(text, clamped_end)`` — the joined region and the line number to
         report as :attr:`Match.end`.
+
+    An integer file descriptor is owned and closed by this reader.
     """
     if end < 1:
         # A non-positive end selects nothing. The old code reached Python's
         # negative-index slicing here and returned a reversed region for
         # end < 0, which no caller can have meant; an empty region is reported
         # instead.
+        if isinstance(path, int):
+            os.close(path)
         return "", end
 
     pieces: list[str] = []
@@ -184,7 +191,7 @@ def read_specific_lines(
     return found
 
 
-def read_whole_file_checked(path: Path, max_bytes: int, *, hint: str) -> str:
+def read_whole_file_checked(path: Path | int, max_bytes: int, *, hint: str) -> str:
     """Read an entire file, refusing above ``max_bytes``.
 
     The file is opened once and read through that descriptor, at most
@@ -195,6 +202,7 @@ def read_whole_file_checked(path: Path, max_bytes: int, *, hint: str) -> str:
 
     Decoding matches ``Path.read_text()``: locale default encoding and
     universal newlines.
+    An integer file descriptor is owned and closed by this reader.
 
     Raises:
         FileTooLargeError: The file is larger than ``max_bytes``.

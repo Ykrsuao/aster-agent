@@ -1,9 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 use serde_json::Value;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 use tui_textarea::TextArea;
+
+pub(crate) const PYTHON_SANDBOX_SCOPE: &str =
+    "Shell/file tools stay on host. Python objects are not migrated; saved state stays.";
 
 #[derive(Clone, Debug)]
 pub struct Tool {
@@ -35,6 +38,40 @@ pub enum Entry {
     Assistant(String),
     Tool(Tool),
     Notice { text: String, error: bool },
+}
+
+impl Entry {
+    pub(crate) fn user(draft: &crate::drafts::MessageDraft) -> Self {
+        let text = clean(&draft.text);
+        if draft.attachments.is_empty() {
+            return Self::User(text);
+        }
+        let mut lines = Vec::new();
+        for attachment in &draft.attachments {
+            let bytes = attachment.byte_len();
+            let size = if bytes < 1024 {
+                format!("{bytes} B")
+            } else if bytes < 1024 * 1024 {
+                format!("{:.1} KiB", bytes as f64 / 1024.0)
+            } else {
+                format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+            };
+            let kind = if attachment.is_image() { "Image" } else { "File" };
+            let format = if attachment.is_image() {
+                attachment.mime_type().trim_start_matches("image/").to_uppercase()
+            } else {
+                attachment.mime_type().into()
+            };
+            lines.push(format!(
+                "[{kind}] {} · {format} · {size}",
+                clean(attachment.name()).replace(['\n', '\r', '\t'], " ")
+            ));
+        }
+        if !text.trim().is_empty() {
+            lines.push(text);
+        }
+        Self::User(lines.join("\n"))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +112,18 @@ pub struct ModelSelection {
     pub generation: u64,
 }
 
+#[derive(Default)]
+pub struct SkillsBrowser {
+    pub supported: bool,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub items: Vec<Value>,
+    pub detail: Option<Value>,
+    pub generation: u64,
+    pub total: usize,
+    pub truncated: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Overlay {
     Commands,
@@ -86,6 +135,7 @@ pub enum Overlay {
     Diagnostics,
     Hud,
     HudInfo,
+    Skills,
     Context,
     Queue,
     Search,
@@ -94,8 +144,10 @@ pub enum Overlay {
     Files,
     Attachments,
     Models,
+    Reasoning,
     Modes,
     Permissions,
+    Sandbox,
     Approval,
     Tasks,
     Rollback,
@@ -258,6 +310,7 @@ pub struct State {
     pub conversation_generation: u64,
     pub title: String,
     pub phase: Phase,
+    pub(crate) sandbox_preparing: bool,
     pub status: String,
     /// A second Ctrl+C before this instant confirms the user's exit request.
     pub exit_confirmation: Option<Instant>,
@@ -311,6 +364,9 @@ pub struct State {
     pub runtime_supported: bool,
     pub runtime: Value,
     pub model_selection: ModelSelection,
+    pub skills: SkillsBrowser,
+    /// Effort changes stay local to the model picker until Enter confirms them.
+    pub model_effort_drafts: HashMap<String, Option<String>>,
     pub mode: String,
     pub approval_policy: String,
     pub approvals: VecDeque<ApprovalRequest>,
@@ -330,6 +386,8 @@ pub struct State {
     pub show_sidebar: bool,
     pub usage: String,
     pub hud: crate::hud::Hud,
+    /// Known model capacity, independent of a reported context measurement.
+    pub context_window: Option<u64>,
     pub context_ratio: Option<f64>,
     pub context_snapshot: Option<crate::context::ContextSnapshot>,
     pub context_expanded: bool,
@@ -358,6 +416,7 @@ impl State {
             conversation_generation: 0,
             title: String::new(),
             phase: Phase::Connecting,
+            sandbox_preparing: false,
             status: "Starting agent…".into(),
             exit_confirmation: None,
             escape_confirmation: None,
@@ -404,6 +463,8 @@ impl State {
             runtime_supported: false,
             runtime: Value::Null,
             model_selection: ModelSelection::default(),
+            skills: SkillsBrowser::default(),
+            model_effort_drafts: HashMap::new(),
             mode: "code".into(),
             approval_policy: "backend".into(),
             approvals: VecDeque::new(),
@@ -420,6 +481,7 @@ impl State {
             show_sidebar: false,
             usage: String::new(),
             hud: crate::hud::Hud::default(),
+            context_window: None,
             context_ratio: None,
             context_snapshot: None,
             context_expanded: false,
@@ -448,6 +510,10 @@ impl State {
 
     pub fn preparing(&self) -> bool {
         matches!(self.phase, Phase::Connecting | Phase::Preparing)
+    }
+
+    pub fn can_cancel(&self) -> bool {
+        self.phase == Phase::Busy && (self.active_turn_id.is_some() || self.sandbox_preparing)
     }
 
     pub fn can_undo_attachment(&self) -> bool {
@@ -480,10 +546,12 @@ impl State {
                     | Overlay::Models
                     | Overlay::Modes
                     | Overlay::Permissions
+                    | Overlay::Sandbox
                     | Overlay::Tasks
                     | Overlay::Hud
             )
-        ) || (self.overlay == Some(Overlay::Changes) && !self.conversation_changes)
+        ) || (self.overlay == Some(Overlay::Skills) && self.skills.detail.is_none())
+            || (self.overlay == Some(Overlay::Changes) && !self.conversation_changes)
     }
 
     pub fn open(&mut self, overlay: Overlay) {
@@ -500,6 +568,104 @@ impl State {
         self.context_view = None;
         self.context_view_generation = self.context_view_generation.wrapping_add(1);
         self.context_reveal_selection = false;
+        self.model_effort_drafts.clear();
+        self.skills.generation = self.skills.generation.wrapping_add(1);
+        self.skills.detail = None;
+        self.skills.loading = false;
+        self.focus_runtime_choice();
+    }
+
+    pub(crate) fn focus_runtime_choice(&mut self) {
+        let value = match self.overlay {
+            Some(Overlay::Models) => self.model.as_str(),
+            Some(Overlay::Reasoning) => self.runtime["reasoningSelection"].as_str().unwrap_or(""),
+            Some(Overlay::Modes) => self.mode.as_str(),
+            Some(Overlay::Permissions) => self.permission_mode(),
+            Some(Overlay::Sandbox) => self.runtime["executionBackend"].as_str().unwrap_or(""),
+            _ => return,
+        };
+        self.selected = self
+            .choices()
+            .iter()
+            .position(|choice| choice.value == value)
+            .unwrap_or(0);
+    }
+
+    pub fn permission_mode(&self) -> &str {
+        match self.runtime["permissionMode"].as_str() {
+            Some(mode @ ("auto" | "manual" | "accept_edits" | "plan")) => mode,
+            _ if self.mode == "plan" => "plan",
+            _ => match self.approval_policy.as_str() {
+                "ask" | "manual" => "manual",
+                "session" | "auto" => "auto",
+                other => other,
+            },
+        }
+    }
+
+    pub fn permission_label(&self) -> &str {
+        match self.permission_mode() {
+            "auto" => "Auto",
+            "manual" => "Manual",
+            "accept_edits" => "Accept edits",
+            "plan" => "Plan",
+            "backend" => "Backend default",
+            other => other,
+        }
+    }
+
+    fn model_reasoning_metadata(&self, model: &str) -> Option<&Value> {
+        if model == self.model {
+            Some(&self.runtime)
+        } else {
+            self.runtime["models"]
+                .as_array()?
+                .iter()
+                .find(|entry| entry["id"].as_str() == Some(model))
+        }
+    }
+
+    pub(crate) fn model_effort_choices(&self, model: &str) -> (Vec<Choice>, usize) {
+        let Some(metadata) = self.model_reasoning_metadata(model) else {
+            return (Vec::new(), 0);
+        };
+        let choices = reasoning_choices(metadata);
+        let selection = self.model_effort_drafts.get(model).map_or_else(
+            || metadata["reasoningSelection"].as_str().unwrap_or(""),
+            |level| level.as_deref().unwrap_or(""),
+        );
+        let selected = choices
+            .iter()
+            .position(|choice| choice.value == selection)
+            .unwrap_or(0);
+        (choices, selected)
+    }
+
+    pub(crate) fn adjust_model_effort(&mut self, increase: bool) {
+        if !self.runtime_supported || self.session_id.is_none() || self.model.is_empty() {
+            return;
+        }
+        let Some(model) = self
+            .choices()
+            .get(self.selected)
+            .map(|choice| choice.value.clone())
+        else {
+            return;
+        };
+        let (levels, current) = self.model_effort_choices(&model);
+        if levels.len() < 2 {
+            return;
+        }
+        let next = if increase {
+            (current + 1).min(levels.len() - 1)
+        } else {
+            current.saturating_sub(1)
+        };
+        if next != current {
+            let value = levels[next].value.clone();
+            self.model_effort_drafts
+                .insert(model, (!value.is_empty()).then_some(value));
+        }
     }
 
     pub(crate) fn text_scope(&self) -> crate::text_selection::Scope {
@@ -626,6 +792,19 @@ impl State {
         }
         let query = self.query.to_lowercase();
         let choices: Vec<Choice> = match self.overlay {
+            Some(Overlay::Skills) if !self.skills.loading && self.skills.error.is_none()
+                && self.skills.detail.is_none() => self.skills.items.iter().filter_map(|skill| {
+                let name = skill["name"].as_str()?;
+                let active = skill["active"] == true;
+                let status = if active { "Active" } else if skill["loaded"] == true {
+                    "Available"
+                } else { "Not loaded" };
+                Some(Choice {
+                    label: format!("{} {}", if active { "✓" } else { "·" }, clean(name)),
+                    detail: format!("{status} · {}", clean(skill["description"].as_str().unwrap_or(""))),
+                    value: name.into(),
+                })
+            }).collect(),
             Some(Overlay::Hud) => self.hud.choices(),
             Some(Overlay::Rollback) => {
                 let mut scopes = vec![Choice {
@@ -683,6 +862,7 @@ impl State {
                     })
                 })
                 .collect(),
+            Some(Overlay::Reasoning) => reasoning_choices(&self.runtime),
             Some(Overlay::Modes) => self.runtime["modes"]
                 .as_array()
                 .into_iter()
@@ -698,20 +878,47 @@ impl State {
                 .collect(),
             Some(Overlay::Permissions) => vec![
                 Choice {
-                    label: "Ask before executing code".into(),
-                    detail:
-                        "Review each generated cell; allow once, allow for this session, or reject"
-                            .into(),
-                    value: "ask".into(),
+                    label: "Auto".into(),
+                    detail: "Run code and change or delete files without asking".into(),
+                    value: "auto".into(),
                 },
                 Choice {
-                    label: "Allow code for this live session".into(),
-                    detail:
-                        "All generated code may execute until this session closes or reconnects"
-                            .into(),
-                    value: "session".into(),
+                    label: "Manual".into(),
+                    detail: "Ask before running code or making changes".into(),
+                    value: "manual".into(),
+                },
+                Choice {
+                    label: "Accept edits".into(),
+                    detail: "Accept file reads and edits; ask before commands and other code"
+                        .into(),
+                    value: "accept_edits".into(),
+                },
+                Choice {
+                    label: "Plan".into(),
+                    detail: "Plan from supplied context without running tools".into(),
+                    value: "plan".into(),
                 },
             ],
+            Some(Overlay::Sandbox) => [
+                ("native", "Native", "Run Python on the host"),
+                ("sandbox", "Python sandbox", "Run Python cells in a microVM"),
+            ]
+            .into_iter()
+            .filter(|(backend, _, _)| {
+                self.runtime["executionBackends"]
+                    .as_array()
+                    .is_some_and(|backends| backends.iter().any(|value| value == backend))
+            })
+            .map(|(backend, label, detail)| Choice {
+                label: label.into(),
+                detail: if self.runtime["executionBackend"] == backend {
+                    format!("Current · {detail}")
+                } else {
+                    detail.into()
+                },
+                value: backend.into(),
+            })
+            .collect(),
             Some(Overlay::Approval) => self
                 .approvals
                 .front()
@@ -928,6 +1135,51 @@ impl State {
     }
 }
 
+fn reasoning_choices(metadata: &Value) -> Vec<Choice> {
+    let Some(levels) = metadata.get("reasoningLevels") else {
+        return Vec::new();
+    };
+    let selection = metadata["reasoningSelection"].as_str();
+    let default = metadata["reasoningDefault"]
+        .as_str()
+        .filter(|level| !level.trim().is_empty());
+    let detail = match levels.as_array() {
+        None => "Selectable levels are unknown for this route",
+        Some(levels) if levels.is_empty() => {
+            "This route does not support reasoning-level selection"
+        }
+        Some(_) => "Use the model's request defaults",
+    };
+    let mut choices = vec![Choice {
+        label: default.map_or_else(
+            || "Model default".into(),
+            |level| format!("Model default ({})", clean(level)),
+        ),
+        detail: if selection.is_none() {
+            format!("Current · {detail}")
+        } else {
+            detail.into()
+        },
+        value: String::new(),
+    }];
+    choices.extend(levels.as_array().into_iter().flatten().filter_map(|level| {
+        let level = level
+            .as_str()
+            .filter(|level| !level.trim().is_empty() && level.len() <= 256)?;
+        Some(Choice {
+            label: clean(level),
+            detail: if selection == Some(level) {
+                "Current · applies to subsequent requests"
+            } else {
+                "Apply to subsequent requests in this session"
+            }
+            .into(),
+            value: level.into(),
+        })
+    }));
+    choices
+}
+
 pub fn default_commands() -> Vec<Command> {
     [
         ("/new", "Save and start a new conversation"),
@@ -957,12 +1209,25 @@ pub fn default_commands() -> Vec<Command> {
             "Restore interrupted input for editing before resending",
         ),
         ("/undo", "Review and undo the last file rollback"),
-        ("/model", "Switch this session to a configured model"),
+        ("/model", "Choose model and reasoning effort (Alt+P)"),
+        (
+            "/effort",
+            "Adjust reasoning effort; auto restores model defaults",
+        ),
+        (
+            "/reasoning",
+            "Choose reasoning effort; default restores model defaults",
+        ),
         ("/mode", "Choose Code or Plan mode"),
         ("/plan", "Enter planning mode with execution disabled"),
         ("/code", "Return to Code mode"),
-        ("/permissions", "Choose how execution approval is requested"),
+        ("/permissions", "Choose Auto, Manual, Accept edits or Plan"),
+        (
+            "/sandbox",
+            "Choose Python sandbox; on or off changes this session",
+        ),
         ("/tasks", "Inspect plan steps and background jobs (Alt+T)"),
+        ("/skills", "Browse available skills, active status and documentation"),
         ("/stop", "Stop a selected background job by its task ID"),
         (
             "/search",

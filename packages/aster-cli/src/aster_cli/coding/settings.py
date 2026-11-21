@@ -10,6 +10,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from aster import workspace_trust
 from aster.layered_config import load_layered_yaml
 
 _SETTINGS_FILENAME = "settings.yaml"
@@ -56,7 +57,12 @@ def load_coding_skills_dirs(
     # unrelated user-level settings.yaml silently suppress it. A modern
     # workspace settings file supersedes the legacy file, and an explicit
     # ASTER_SETTINGS file remains a full override.
-    project_settings = _read_project_settings(root / ".aster" / _SETTINGS_FILENAME)
+    # An untrusted workspace contributes no settings and no skill directories:
+    # Python skills found in a directory are imported.
+    trusted = workspace_trust.is_trusted(root)
+    project_settings = (
+        _read_project_settings(root / ".aster" / _SETTINGS_FILENAME) if trusted else {}
+    )
     # Presence of the key, not truthiness of its value: `additional_skills_dirs: []`
     # is an explicit "none", and treating it as absent silently resurrected the
     # legacy paths the user had just emptied.
@@ -65,7 +71,7 @@ def load_coding_skills_dirs(
         and "additional_skills_dirs" in project_settings[section]
         for section in ("coding", "tui")
     )
-    if not os.environ.get(_SETTINGS_ENV_VAR) and not modern_key_set:
+    if trusted and not os.environ.get(_SETTINGS_ENV_VAR) and not modern_key_set:
         configured.extend(_legacy_project_paths(root / ".aster" / _LEGACY_CONFIG_FILENAME))
 
     candidates: list[Path] = []
@@ -77,8 +83,13 @@ def load_coding_skills_dirs(
     result: list[Path] = []
     seen: set[Path] = set()
     for candidate in candidates:
+        # Check the source before links can resolve outside an untrusted folder.
+        if not trusted and candidate.is_relative_to(root):
+            continue
         resolved = candidate.expanduser().resolve()
         if resolved in seen or not resolved.is_dir():
+            continue
+        if not trusted and (resolved == root or root in resolved.parents):
             continue
         seen.add(resolved)
         result.append(resolved)

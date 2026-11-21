@@ -8,8 +8,11 @@ including input validation (400), session-existence checks (404), and happy path
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlsplit
 
 import pytest
 from starlette.testclient import TestClient
@@ -105,6 +108,9 @@ def client(tmp_path, monkeypatch):
     """
     monkeypatch.setattr(otlp_store, "DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr(otlp_store, "_db", None)
+    monkeypatch.setattr(
+        main_module, "_ingest_queue", asyncio.Queue(maxsize=main_module._INGEST_QUEUE_MAX_ITEMS)
+    )
     # Replace the module-level write executor with a fresh one so that the
     # lifespan shutdown (which calls .shutdown()) doesn't poison other tests.
     monkeypatch.setattr(
@@ -117,7 +123,7 @@ def client(tmp_path, monkeypatch):
         del otlp_store._read_tls.conn
     if hasattr(otlp_store._write_tls, "conn"):
         del otlp_store._write_tls.conn
-    with TestClient(app) as c:
+    with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 54321)) as c:
         # After init_db(), share the _db connection across all threads
         db = otlp_store._db
         otlp_store._read_tls.conn = db
@@ -132,7 +138,7 @@ def client(tmp_path, monkeypatch):
 
 def _remote_client() -> TestClient:
     """A client whose requests arrive from a non-loopback address."""
-    return TestClient(app, client=("10.9.9.9", 54321))
+    return TestClient(app, base_url="http://localhost", client=("10.9.9.9", 54321))
 
 
 def test_loopback_is_allowed_without_a_token(client, monkeypatch):
@@ -140,13 +146,17 @@ def test_loopback_is_allowed_without_a_token(client, monkeypatch):
     assert client.get("/api/version").status_code == 200
 
 
-def test_loopback_still_allowed_when_a_token_is_configured(client, monkeypatch):
-    """Regression: the token must supplement the loopback allowance, not replace it.
-
-    When it replaced it, local agents and the local UI both broke the moment a
-    token was set for remote access — leaving no working configuration.
-    """
+def test_configured_token_is_required_even_on_loopback(client, monkeypatch):
+    """A local reverse proxy must not turn remote users into trusted clients."""
     monkeypatch.setenv("ASTER_VIEWER_AUTH_TOKEN", "test-viewer-token")
+    assert client.get("/api/version").status_code == 401
+    assert (
+        client.get(
+            "/api/version", headers={"Authorization": "Bearer test-viewer-token"}
+        ).status_code
+        == 200
+    )
+    client.cookies.set(main_module.SESSION_COOKIE, "test-viewer-token")
     assert client.get("/api/version").status_code == 200
 
 
@@ -195,6 +205,8 @@ def test_token_query_param_is_exchanged_for_a_cookie_and_stripped(client, monkey
         # The token must not survive into the URL the browser ends up on, so
         # deep links shared afterwards carry no secret.
         assert resp.headers["location"] == "/trace/abc123?tab=spans"
+        assert resp.headers["cache-control"] == "no-store"
+        assert resp.headers["referrer-policy"] == "no-referrer"
 
         cookie = resp.headers["set-cookie"]
         assert "aster_viewer_session=test-viewer-token" in cookie
@@ -208,6 +220,33 @@ def test_wrong_token_query_param_issues_no_cookie(client, monkeypatch):
         resp = remote.get("/", params={"token": "guessed"}, follow_redirects=False)
         assert resp.status_code == 200
         assert "set-cookie" not in resp.headers
+
+
+@pytest.mark.parametrize("path", ["/%2Foutside.example/path", "/%5Coutside.example/path"])
+def test_token_bootstrap_redirect_stays_on_the_viewer(client, monkeypatch, path):
+    monkeypatch.setenv("ASTER_VIEWER_AUTH_TOKEN", "test-viewer-token")
+    response = client.get(path, params={"token": "test-viewer-token"}, follow_redirects=False)
+    assert response.status_code == 303
+    target = response.headers["location"]
+    assert target.startswith("/") and not target.startswith("//")
+    assert not urlsplit(target).netloc
+    assert "\\" not in target
+
+
+@pytest.mark.parametrize("key", ["token", "to%6ben"])
+def test_error_access_logs_redact_bootstrap_tokens(key):
+    record = logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        "",
+        0,
+        '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1:5000", "GET", f"/?{key}=private-marker&tab=spans", "1.1", 400),
+        None,
+    )
+    assert main_module._QuietAccessFilter().filter(record)
+    assert "private-marker" not in record.getMessage()
+    assert "tab=spans" in record.getMessage()
 
 
 # ---------------------------------------------------------------------------
@@ -229,25 +268,97 @@ def test_rebinding_shaped_request_is_rejected(client, monkeypatch):
     assert "ASTER_VIEWER_ALLOWED_HOSTS" in resp.json()["detail"]
 
 
-def test_exporter_shaped_request_is_never_rejected(client, monkeypatch):
-    """Span ingest must not be reachable by this check.
-
-    An earlier version applied it to every request and silently broke trace
-    ingest. Rebinding is inherently a browser attack, so exempting clients that
-    send no browser headers costs nothing and removes that failure mode.
-    """
+def test_hostname_prefix_does_not_authorize_an_unrelated_domain(client, monkeypatch):
     monkeypatch.delenv("ASTER_VIEWER_ALLOWED_HOSTS", raising=False)
-    assert client.get("/api/version", headers={"Host": "anything.example"}).status_code == 200
+    monkeypatch.setenv("ASTER_VIEWER_AUTH_TOKEN", "synthetic-viewer-token")
+    response = client.get(
+        "/api/version",
+        headers={"Host": f"{main_module._OWN_HOSTNAME}.attacker.example", **_BROWSER},
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize("authorization", [None, "Bearer wrong-token"])
+def test_unknown_host_without_browser_headers_cannot_read_traces(
+    client, monkeypatch, authorization
+):
+    """Missing Fetch Metadata headers do not establish a trusted client."""
+    monkeypatch.delenv("ASTER_VIEWER_ALLOWED_HOSTS", raising=False)
+    monkeypatch.setenv("ASTER_VIEWER_AUTH_TOKEN", "test-viewer-token")
+    _seed_session(otlp_store._db)
+    headers = {"Host": "untrusted.example"}
+    if authorization is not None:
+        headers["Authorization"] = authorization
+    response = client.get("/api/traces/sess1/calls", headers=headers)
+    assert response.status_code == 400
+
+
+def test_session_cookie_does_not_bypass_host_validation(client, monkeypatch):
+    monkeypatch.delenv("ASTER_VIEWER_ALLOWED_HOSTS", raising=False)
+    monkeypatch.setenv("ASTER_VIEWER_AUTH_TOKEN", "test-viewer-token")
+    client.cookies.set(main_module.SESSION_COOKIE, "test-viewer-token")
+    response = client.get("/api/version", headers={"Host": "untrusted.example"})
+    assert response.status_code == 400
+
+
+def test_authenticated_exporter_accepts_an_unlisted_hostname(client, monkeypatch):
+    """Exporters can authenticate explicitly when using an unlisted alias."""
+    from aster.tracing._viewer_auth import apply_viewer_auth
+
+    monkeypatch.delenv("ASTER_VIEWER_ALLOWED_HOSTS", raising=False)
+    monkeypatch.setenv("ASTER_VIEWER_AUTH_TOKEN", "test-viewer-token")
+    response = client.post(
+        "/v1/traces",
+        headers=apply_viewer_auth({"Host": "traces.internal"}),
+        json={"resourceSpans": []},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"queued": True}
+
+
+def test_unknown_host_cannot_queue_unauthenticated_spans(client, monkeypatch):
+    monkeypatch.delenv("ASTER_VIEWER_ALLOWED_HOSTS", raising=False)
+    monkeypatch.delenv("ASTER_VIEWER_AUTH_TOKEN", raising=False)
+    response = client.post(
+        "/v1/traces", headers={"Host": "untrusted.example"}, json={"resourceSpans": []}
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize("host", ["", " "])
+def test_empty_host_is_rejected(client, monkeypatch, host):
+    monkeypatch.delenv("ASTER_VIEWER_ALLOWED_HOSTS", raising=False)
+    assert client.get("/api/version", headers={"Host": host}).status_code == 400
+
+
+def test_multiple_host_headers_are_rejected(client, monkeypatch):
+    monkeypatch.delenv("ASTER_VIEWER_ALLOWED_HOSTS", raising=False)
+    response = client.get(
+        "/api/version", headers=[("Host", "localhost"), ("Host", "untrusted.example")]
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize("host", ["[::1]suffix", "localhost:invalid", "localhost:65536"])
+def test_invalid_host_authority_is_rejected(client, monkeypatch, host):
+    monkeypatch.delenv("ASTER_VIEWER_ALLOWED_HOSTS", raising=False)
+    assert client.get("/api/version", headers={"Host": host}).status_code == 400
+
+
+def test_non_ascii_invalid_token_is_refused_without_an_error(client, monkeypatch):
+    monkeypatch.setenv("ASTER_VIEWER_AUTH_TOKEN", "test-viewer-token")
+    response = client.get("/api/version", headers=[(b"Authorization", b"Bearer invalid-\xff")])
+    assert response.status_code == 401
+    response = client.get("/", params={"token": "invalid-\u00ff"}, follow_redirects=False)
+    assert response.status_code == 200
+    assert "set-cookie" not in response.headers
 
 
 def test_dns_search_domain_qualified_name_is_accepted(client, monkeypatch):
-    """The case that broke real traffic.
-
-    gethostname() returns only the leading label when the qualified name comes
-    from a DNS search domain, so `<host>.<domain>` must match on the prefix.
-    """
+    """Accept the machine's actual qualified name without trusting arbitrary suffixes."""
     monkeypatch.delenv("ASTER_VIEWER_ALLOWED_HOSTS", raising=False)
     qualified = f"{main_module._OWN_HOSTNAME}.corp.example.com"
+    monkeypatch.setattr(main_module, "_OWN_FQDN", qualified)
     assert client.get("/api/version", headers={"Host": qualified, **_BROWSER}).status_code == 200
     assert (
         client.get(
@@ -279,6 +390,20 @@ def test_extra_hosts_can_be_allowed_and_check_disabled(client, monkeypatch):
     assert (
         client.get("/api/version", headers={"Host": "evil.example", **_BROWSER}).status_code == 200
     )
+
+
+def test_explicit_public_host_can_bootstrap_authentication(client, monkeypatch):
+    monkeypatch.delenv("ASTER_VIEWER_ALLOWED_HOSTS", raising=False)
+    monkeypatch.setenv("ASTER_VIEWER_PUBLIC_HOST", "traces.internal")
+    monkeypatch.setenv("ASTER_VIEWER_AUTH_TOKEN", "test-viewer-token")
+    response = client.get(
+        "/",
+        params={"token": "test-viewer-token"},
+        headers={"Host": "traces.internal"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "set-cookie" in response.headers
 
 
 def test_cors_rejects_unconfigured_origin(client):

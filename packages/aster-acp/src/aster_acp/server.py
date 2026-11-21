@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
-from collections.abc import Callable
+import os
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -61,15 +63,13 @@ from aster_cli.sessions import (
     SessionHandle,
     SessionNotFoundError,
     SessionStore,
-    SteeringState,
 )
 
+from aster import workspace_trust
 from aster.config import CodeActConfig
 from aster.errors import GenerationError
-from aster.errors.storage import SerializationError
-from aster.events import EventBase
-from aster.interactive import AgentMessage
 from aster.mcp import MCPManager, MCPTool
+from aster.paths import get_user_dir
 from aster.runtime.sandbox.config import SandboxConfig
 from aster.runtime.sandbox.errors import SandboxError
 from aster.slash_dispatch import CoercionError
@@ -79,6 +79,7 @@ from aster.strategies.codeact import (
 )
 from aster.unifiedllm import UnifiedLLM
 from aster_acp._attachments import ParsedPrompt, parse_prompt
+from aster_acp._foreground_turn import ForegroundTurns, InvalidTurnIdError
 from aster_acp._prompt import PromptProgress
 from aster_acp._runtime import (
     SessionBusyError,
@@ -87,9 +88,9 @@ from aster_acp._runtime import (
     SessionRuntimePool,
 )
 from aster_acp._session_replay import record_activity, transcript_updates
+from aster_acp._skills import skills_snapshot
 from aster_acp._startup import mark, phase
 from aster_acp._stdio import diagnostic_stdout, protocol_streams
-from aster_acp._steering import SteeringInbox
 from aster_acp.dispatcher import InteractiveSessionDispatcher
 from aster_acp.event_bridge import ACPEventBridge
 from aster_acp.runtime_controls import RuntimeControls
@@ -109,21 +110,20 @@ class _ACPSession:
     dispatcher: InteractiveSessionDispatcher
     bridge: ACPEventBridge
     commands: CodingSlashCommandRegistry
-    steering: SteeringInbox | None = None
+    foreground: ForegroundTurns = field(init=False)
     controls: RuntimeControls | None = None
+    configuring: bool = False
     startup_warnings: tuple[str, ...] = ()
-    cancel_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    cancel_complete: asyncio.Event = field(default_factory=asyncio.Event)
+    trust_notice: str | None = None
     notification_tasks: set[asyncio.Task[None]] = field(default_factory=set)
     commands_sent_on_prompt: bool = False
     unsubscribe_activity: Callable[[], None] | None = None
 
     def __post_init__(self) -> None:
-        self.cancel_complete.set()
+        self.foreground = ForegroundTurns(self.agent, self.handle, self.dispatcher, self.bridge)
 
     async def close(self) -> None:
-        if self.steering is not None:
-            self.steering.close()
+        self.foreground.close()
         for task in self.notification_tasks:
             task.cancel()
         if self.notification_tasks:
@@ -149,16 +149,22 @@ class CodingACPAdapter:
         llm_factory: Callable[[], UnifiedLLM],
         *,
         model_factory: Callable[[str], UnifiedLLM] | None = None,
+        model: str | None = None,
         sandbox: bool = False,
         sandbox_config: SandboxConfig | None = None,
+        prepare_model: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
+        self._prepare_model = prepare_model
+        self._model_preparation: asyncio.Task[None] | None = None
         self._llm_factory = llm_factory
         self._model_factory = model_factory
+        self._startup_model = model
+        self._pending_model: str | None = None
+        self._workspace_models: dict[Path, str] = {}
         self._sandbox = sandbox
         self._sandbox_config = sandbox_config or SandboxConfig()
         self._client: Client | None = None
         self._stream_messages = False
-        self._runtime_controls = False
         self._structured_progress = False
         self._sessions: SessionRuntimePool[_ACPSession] = SessionRuntimePool()
 
@@ -178,9 +184,6 @@ class CodingACPAdapter:
         self._stream_messages = (
             isinstance(options, dict) and options.get("messageStreaming") is True
         )
-        self._runtime_controls = (
-            isinstance(options, dict) and options.get("runtimeControls") is True
-        )
         self._structured_progress = isinstance(options, dict) and (
             options.get("structuredProgress") is True or options.get("runtimeControls") is True
         )
@@ -198,6 +201,7 @@ class CodingACPAdapter:
                     "userSteering": True,
                     "runtimeControls": True,
                     "structuredProgress": True,
+                    "skills": True,
                     "contextInspection": True,
                     "modelSelection": True,
                     "attachments": True,
@@ -237,7 +241,7 @@ class CodingACPAdapter:
         provisional = isinstance(options, dict) and options.get("prepare") is True
         root = self._validate_workspace(cwd, additional_directories)
         with phase("session_model"):
-            llm = self._llm_factory()
+            llm, model = await self._new_llm(root)
         try:
             with phase("session_storage"):
                 handle = self._store(root).create(
@@ -251,11 +255,19 @@ class CodingACPAdapter:
         except BaseException:
             await llm.aclose()
             raise
+        runtime: SessionRuntime[_ACPSession] | None = None
         try:
             with phase("session_runtime"):
-                runtime = await self._create_runtime(handle, root, mcp_servers, llm=llm)
+                runtime = await self._create_runtime(
+                    handle, root, mcp_servers, llm=llm, model=model
+                )
+            self._remember_prepared_model(root, model)
         except BaseException:
-            handle.close()
+            if runtime is not None:
+                with suppress(KeyError):
+                    await self._sessions.remove(handle.id, include_unavailable=True)
+            else:
+                handle.close()
             self._store(root).delete(handle.id)
             raise
         self._defer_bootstrap_updates(runtime.value)
@@ -282,8 +294,12 @@ class CodingACPAdapter:
             raise RequestError.resource_not_found(session_id) from None
         runtime: SessionRuntime[_ACPSession] | None = None
         try:
+            with phase("session_model"):
+                llm, model = await self._new_llm(root)
             with phase("session_runtime"):
-                runtime = await self._create_runtime(handle, root, mcp_servers, available=False)
+                runtime = await self._create_runtime(
+                    handle, root, mcp_servers, llm=llm, model=model, available=False
+                )
             # After the replay, never during it: replay writes straight to the
             # client while the bridge pump drains bootstrap updates, so every
             # await here would otherwise let a commands update or an MCP warning
@@ -291,6 +307,7 @@ class CodingACPAdapter:
             with phase("session_replay"):
                 await self._replay_session(handle)
             await self._sessions.publish(session_id)
+            self._remember_prepared_model(root, model)
             self._defer_bootstrap_updates(runtime.value)
             mark("session_ready")
         except BaseException:
@@ -358,16 +375,14 @@ class CodingACPAdapter:
 
             return {"models": await asyncio.to_thread(saved_models)}
         if method == "aster/models/select":
-            from aster.unifiedllm import get_llm_client
             from aster.unifiedllm.connect.configuration import saved_models
 
             model = params.get("model")
             if not isinstance(model, str) or model not in {item["id"] for item in saved_models()}:
                 raise RequestError.invalid_params({"reason": "Choose a configured model."})
-            model_factory = self._model_factory
-            if model_factory is None:
-                model_factory = get_llm_client
-            self._llm_factory = lambda: model_factory(model)
+            self._llm_factory = lambda: self._make_model(model)
+            self._startup_model = model
+            self._pending_model = model
             return {"model": model}
         if method not in {
             "aster/session/checkpoints",
@@ -380,11 +395,18 @@ class CodingACPAdapter:
             "aster/session/tasks",
             "aster/session/stop_task",
             "aster/session/context",
+            "aster/session/skills",
         }:
             raise RequestError.method_not_found(f"_{method}")
         session_id = params.get("sessionId")
         if not isinstance(session_id, str) or not session_id:
             raise RequestError.invalid_params({"reason": "sessionId must be a nonempty string"})
+        if method == "aster/session/skills" and "name" in params:
+            name = params["name"]
+            if not isinstance(name, str) or not name.strip() or len(name) > 256:
+                raise RequestError.invalid_params(
+                    {"reason": "name must be a nonempty skill name of at most 256 characters"}
+                )
         index = params.get("userMessageIndex")
         if method == "aster/session/rewind" and (type(index) is not int or index < 0):
             raise RequestError.invalid_params(
@@ -424,13 +446,34 @@ class CodingACPAdapter:
                 )
         runtime = await self._get_runtime(session_id)
         try:
+            if method == "aster/session/configure" and params.keys() == {
+                "sessionId",
+                "permissionMode",
+            }:
+                async with runtime.access() as session:
+                    if session.configuring:
+                        raise RequestError.invalid_request(
+                            {"reason": "Wait for the pending session settings change to finish."}
+                        )
+                    try:
+                        return self._require_controls(session).set_permission_mode(
+                            params["permissionMode"]
+                        )
+                    except ValueError as exc:
+                        raise RequestError.invalid_params({"reason": str(exc)}) from exc
             if method in {
                 "aster/session/runtime",
                 "aster/session/tasks",
                 "aster/session/stop_task",
                 "aster/session/context",
+                "aster/session/skills",
             }:
                 async with runtime.access() as session:
+                    if method == "aster/session/skills":
+                        try:
+                            return skills_snapshot(session.agent.skills, params.get("name"))
+                        except KeyError:
+                            raise RequestError.resource_not_found(params["name"]) from None
                     if method == "aster/session/runtime":
                         return self._require_controls(session).status()
                     if method == "aster/session/tasks":
@@ -463,18 +506,28 @@ class CodingACPAdapter:
                             }
                         )
                 async with runtime.access() as session:
-                    if session.steering is None:
-                        raise RequestError.invalid_request({"reason": "Steering is unavailable"})
                     try:
-                        return session.steering.accept(
+                        return session.foreground.steer(
                             params["turnId"], params["messageId"], params["text"]
                         )
                     except ValueError as exc:
                         raise RequestError.invalid_request({"reason": str(exc)}) from exc
             async with runtime.turn() as session:
                 if method == "aster/session/configure":
+                    if "permissionMode" in params and params.keys() - {
+                        "sessionId",
+                        "permissionMode",
+                        "model",
+                        "mode",
+                        "approval",
+                        "executionBackend",
+                        "reasoningLevel",
+                    }:
+                        raise RequestError.invalid_params(
+                            {"reason": "Unknown fields in permission configuration."}
+                        )
                     changes = {}
-                    for key in ("model", "mode", "approval"):
+                    for key in ("model", "mode", "approval", "permissionMode", "executionBackend"):
                         if key not in params:
                             continue
                         value = params[key]
@@ -482,11 +535,29 @@ class CodingACPAdapter:
                             raise RequestError.invalid_params(
                                 {"reason": f"{key} must be a nonempty string"}
                             )
-                        changes[key] = value
+                        field_name = {
+                            "permissionMode": "permission_mode",
+                            "executionBackend": "execution_backend",
+                        }.get(key, key)
+                        changes[field_name] = value
+                    if "reasoningLevel" in params:
+                        level = params["reasoningLevel"]
+                        if level is not None and (
+                            not isinstance(level, str) or not level.strip() or len(level) > 256
+                        ):
+                            raise RequestError.invalid_params(
+                                {"reason": "reasoningLevel must be null or a nonempty level name"}
+                            )
+                        changes["reasoning_level"] = level
+                    session.configuring = True
                     try:
-                        return await self._require_controls(session).configure(**changes)
+                        result = await self._require_controls(session).configure(**changes)
                     except ValueError as exc:
                         raise RequestError.invalid_params({"reason": str(exc)}) from exc
+                    finally:
+                        session.configuring = False
+                    session.bridge.refresh_usage()
+                    return result
                 if method == "aster/session/checkpoints":
                     return {
                         "checkpoints": [
@@ -525,9 +596,7 @@ class CodingACPAdapter:
     @staticmethod
     def _require_controls(session: _ACPSession) -> RuntimeControls:
         if session.controls is None:
-            raise RequestError.invalid_request(
-                {"reason": "This client did not enable ASTER runtime controls during initialize"}
-            )
+            raise RequestError.internal_error({"reason": "Session has no execution controls"})
         return session.controls
 
     async def set_session_mode(
@@ -546,95 +615,23 @@ class CodingACPAdapter:
         runtime = await self._get_runtime(session_id)
         try:
             async with runtime.turn() as session:
+                # Preserve attached and replayed images; the provider decides image support.
+                media_inputs = session.agent.llm.media_inputs
+                if "image" not in media_inputs:
+                    media_inputs = (*media_inputs, "image")
                 try:
-                    parsed = parse_prompt(prompt, media_inputs=session.agent.llm.media_inputs)
+                    parsed = parse_prompt(prompt, media_inputs=media_inputs)
                 except ValueError as exc:
                     raise RequestError.invalid_params({"reason": str(exc)}) from exc
-                try:
-                    session.handle.checkpoint(session.agent)
-                except SerializationError:
-                    # Unsupported user state must not produce a partial checkpoint
-                    # or prevent otherwise valid messages from being submitted.
-                    logger.warning(
-                        "Could not checkpoint conversation %s", session_id, exc_info=True
-                    )
-                session.handle.storage.invalidate_current_snapshot()
-                backend = "sandbox" if self._sandbox else "inprocess"
-                previous_turn_count = session.handle.info.turn_count
-                async with session.bridge.prompt(received_at, backend) as progress:
-                    steering_state: SteeringState = "interrupted"
-                    completion_attempted = False
-                    can_save_current = True
-                    host_reply_id: str | None = None
-                    prompt_task = asyncio.current_task()
-
-                    def remember_host_reply(event: EventBase) -> None:
-                        nonlocal host_reply_id
-                        if isinstance(event, AgentMessage):
-                            try:
-                                if asyncio.current_task() is prompt_task:
-                                    host_reply_id = event.id
-                            except RuntimeError:
-                                # Agent worker threads are not this ACP caller.
-                                pass
-
-                    def checkpoint_reply(reply_id: str | None) -> None:
-                        nonlocal completion_attempted, can_save_current
-                        completion_attempted = True
-                        try:
-                            session.handle.checkpoint_completed(
-                                session.agent, completed_message_id=reply_id, turn_id=turn_id
-                            )
-                        except SerializationError:
-                            # The outcome is durable even when its state cannot
-                            # be serialized; never fall back to current state.
-                            logger.warning(
-                                "Could not checkpoint completed conversation %s",
-                                session_id,
-                                exc_info=True,
-                            )
-                        except BaseException:
-                            # If the completion metadata itself could not be
-                            # written, a saved current snapshot would look legacy.
-                            can_save_current = False
-                            raise
-
-                    unsubscribe = session.agent.event_manager.on(
-                        "AgentMessage", remember_host_reply
-                    )
-                    previous_completed = session.dispatcher.on_turn_completed
-                    session.dispatcher.on_turn_completed = checkpoint_reply
-                    try:
-                        response = await self._run_prompt(session, parsed, progress, turn_id)
-                        if response.stop_reason == "end_turn":
-                            steering_state = "turn_finished"
-                        elif response.stop_reason == "cancelled":
-                            steering_state = "cancelled"
-                        return response
-                    finally:
-                        session.dispatcher.on_turn_completed = previous_completed
-                        unsubscribe()
-                        if session.steering is not None:
-                            session.steering.finish(steering_state)
-                        if (
-                            not completion_attempted
-                            and session.handle.info.turn_count > previous_turn_count
-                        ):
-                            if steering_state == "turn_finished":
-                                # Host-rendered slash replies do not dispatch a
-                                # model turn; this synchronous caller owns them.
-                                checkpoint_reply(host_reply_id)
-                            else:
-                                session.handle.checkpoint_interrupted(turn_id=turn_id)
-                        if can_save_current:
-                            try:
-                                session.handle.storage.save_current_snapshot(session.agent)
-                            except SerializationError:
-                                logger.warning(
-                                    "Could not save conversation state %s",
-                                    session_id,
-                                    exc_info=True,
-                                )
+                session.agent.llm.media_inputs = media_inputs
+                backend = session.dispatcher._strategy.config.execution_backend
+                async with session.foreground.prompt(turn_id, received_at, backend) as turn:
+                    response = await self._run_prompt(session, parsed, turn.progress, turn_id)
+                    if response.stop_reason == "end_turn":
+                        turn.complete()
+                    return response
+        except InvalidTurnIdError as exc:
+            raise RequestError.invalid_params({"reason": str(exc)}) from exc
         except SessionBusyError:
             raise RequestError.invalid_request(
                 {"sessionId": session_id, "reason": "A prompt is already running"}
@@ -648,23 +645,18 @@ class CodingACPAdapter:
     async def _run_prompt(
         self, session: _ACPSession, parsed: ParsedPrompt, progress: PromptProgress, turn_id: str
     ) -> PromptResponse:
-        if session.steering is not None:
-            try:
-                session.steering.begin(turn_id)
-            except ValueError as exc:
-                raise RequestError.invalid_params({"reason": str(exc)}) from exc
         text = parsed.text
         session.handle.record_user_message(text, turn_id=turn_id)
         if parsed.context is not None:
             session.agent.event_manager.add(parsed.context)
-        session.cancel_complete.clear()
         try:
             if not session.commands_sent_on_prompt:
                 session.bridge.publish(_available_commands_update(session.commands.commands()))
                 session.commands_sent_on_prompt = True
             info = session.handle.info
             if info.turn_count == 1 and not info.title and not info.title_is_user_set:
-                title = " ".join(text.split())[:80]
+                title_text = parsed.user_text if parsed.user_text.strip() else text
+                title = " ".join(title_text.split())[:80]
                 session.handle.set_title(title)
                 session.bridge.publish(
                     SessionInfoUpdate(session_update="session_info_update", title=title)
@@ -731,7 +723,7 @@ class CodingACPAdapter:
         finally:
             progress.mark("dispatch_end")
         if result is None:
-            await session.cancel_complete.wait()
+            await session.foreground.wait_cancelled()
             # Keep the cancellation in durable history, but do not count this
             # host-authored note as the model's first answer.
             progress.stop("cancelled")
@@ -742,16 +734,46 @@ class CodingACPAdapter:
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
         del kwargs
         runtime = await self._get_runtime(session_id)
-        session = runtime.value
-        async with session.cancel_lock:
+        await runtime.value.foreground.cancel()
+
+    def _make_model(self, model: str) -> UnifiedLLM:
+        if self._model_factory is not None:
+            return self._model_factory(model)
+        from aster.unifiedllm import get_llm_client
+
+        return get_llm_client(model)
+
+    async def _new_llm(self, root: Path) -> tuple[UnifiedLLM, str | None]:
+        if self._prepare_model is not None:
+            if self._model_preparation is None:
+                self._model_preparation = asyncio.create_task(self._prepare_model())
+            # Cancelling one session must not cancel another's shared preparation.
+            await asyncio.shield(self._model_preparation)
+        model = self._workspace_models.get(root)
+        if model is not None and self._pending_model is None:
+            return self._make_model(model), model
+        return self._llm_factory(), self._startup_model
+
+    def _remember_model(self, root: Path, model: str) -> None:
+        from aster_cli._tui_model import save_tui_model
+
+        try:
+            save_tui_model(root, model)
+        except OSError:
+            raise ValueError(
+                "Could not save the default model. Check permissions for Aster's settings directory."
+            ) from None
+        # New and loaded sessions in this workspace follow the last confirmed
+        # choice. Other workspaces retain their own startup selection.
+        self._workspace_models[root] = model
+
+    def _remember_prepared_model(self, root: Path, model: str | None) -> None:
+        if model is not None and self._pending_model == model:
             try:
-                if session.steering is not None:
-                    session.steering.finish("cancelled", "Stopped at your request.")
-                if await session.dispatcher.cancel():
-                    await session.bridge.fail_open_tools("Cancelled by user.", title="Cancelled")
-                    await session.bridge.flush()
-            finally:
-                session.cancel_complete.set()
+                self._remember_model(root, model)
+            except ValueError as exc:
+                raise RequestError.invalid_params({"reason": str(exc)}) from exc
+            self._pending_model = None
 
     async def _create_runtime(
         self,
@@ -760,11 +782,12 @@ class CodingACPAdapter:
         mcp_servers: list[Any] | None,
         *,
         llm: UnifiedLLM | None = None,
+        model: str | None = None,
         available: bool = True,
     ) -> SessionRuntime[_ACPSession]:
         if llm is None:
             with phase("session_model"):
-                llm = self._llm_factory()
+                llm, model = await self._new_llm(root)
         if self._client is None:
             await llm.aclose()
             raise RequestError.internal_error({"reason": "ACP client is not connected"})
@@ -805,15 +828,13 @@ class CodingACPAdapter:
                     # connect path already offers for an unreachable server —
                     # instead of failing session/new with an opaque error.
                     registration_warnings.append(f"MCP server {name!r} was not registered: {exc}")
-            coding_strategy = None
-            if self._sandbox:
-                coding_strategy = CodingReplyStrategy(
-                    config=CodeActConfig(
-                        cell_timeout=1800.0,
-                        execution_backend="sandbox",
-                        sandbox=self._sandbox_config.model_copy(update={"workspace": str(root)}),
-                    )
+            coding_strategy = CodingReplyStrategy(
+                config=CodeActConfig(
+                    cell_timeout=1800.0,
+                    execution_backend="sandbox" if self._sandbox else "inprocess",
+                    sandbox=self._sandbox_config.model_copy(update={"workspace": str(root)}),
                 )
+            )
             dispatcher = InteractiveSessionDispatcher(agent, strategy=coding_strategy)
             bridge = ACPEventBridge(
                 agent,
@@ -822,20 +843,25 @@ class CodingACPAdapter:
                 stream_messages=self._stream_messages,
                 structured_progress=self._structured_progress,
             )
-            controls = None
-            if self._runtime_controls:
-                controls = RuntimeControls(
-                    agent,
-                    self._client,
-                    handle.id,
-                    publish=bridge.publish_best_effort,
-                    execution_backend="sandbox" if self._sandbox else "native",
-                    waiting=bridge.set_wait_reason,
-                )
-                agent._execution_control = controls
+            # Every client gets execution approval. It uses the standard ACP
+            # permission request, so it does not depend on an ASTER capability.
+            controls = RuntimeControls(
+                agent,
+                self._client,
+                handle.id,
+                publish=bridge.publish_best_effort,
+                execution_backend="sandbox" if self._sandbox else "native",
+                change_execution_backend=dispatcher.set_execution_backend,
+                model=model,
+                model_factory=self._make_model,
+                remember_model=lambda selected: self._remember_model(root, selected),
+                waiting=bridge.set_wait_reason,
+                sandbox_roots=[
+                    (rule.path, rule.access == "read_write") for rule in self._sandbox_config.allow
+                ],
+            )
+            agent._execution_control = controls
             dispatcher.on_result = bridge.observe_result
-            steering = SteeringInbox(agent, handle, bridge.publish)
-            dispatcher.steering = steering
             commands = CodingSlashCommandRegistry(agent)
             value = _ACPSession(
                 handle,
@@ -843,9 +869,9 @@ class CodingACPAdapter:
                 dispatcher,
                 bridge,
                 commands,
-                steering=steering,
                 controls=controls,
                 startup_warnings=(*mcp_warnings, *registration_warnings),
+                trust_notice=workspace_trust.restricted_notice(root),
                 unsubscribe_activity=record_activity(agent.event_manager, handle),
             )
             commands.set_on_change(
@@ -934,6 +960,10 @@ class CodingACPAdapter:
                 session.controls.publish()
             session.bridge.refresh_tasks()
             session.bridge.refresh_usage()
+            if session.trust_notice:
+                session.bridge.publish_best_effort(
+                    update_agent_message(text_block(session.trust_notice))
+                )
             if session.startup_warnings:
                 details = "\n".join(f"- {warning}" for warning in session.startup_warnings)
                 session.bridge.publish_best_effort(
@@ -978,7 +1008,13 @@ class CodingACPAdapter:
 
     @staticmethod
     def _store(root: Path) -> SessionStore:
-        return SessionStore(root / ".aster" / "sessions")
+        if workspace_trust.is_trusted(root):
+            return SessionStore(root / ".aster" / "sessions")
+        # Loading a session evaluates its saved context expressions, so session
+        # files shipped in an untrusted folder are never opened. Conversations
+        # held there are kept in the user directory instead.
+        folder = hashlib.sha256(os.path.normcase(str(root)).encode()).hexdigest()[:16]
+        return SessionStore(get_user_dir("untrusted-sessions", folder))
 
     @staticmethod
     def _prompt_text(prompt: list[Any]) -> str:
@@ -1014,18 +1050,32 @@ class CodingACPAdapter:
         return name, parts[1] if len(parts) == 2 else ""
 
     async def close(self) -> None:
-        await self._sessions.close()
+        try:
+            await self._sessions.close()
+        finally:
+            if self._model_preparation is not None:
+                self._model_preparation.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await self._model_preparation
 
 
 async def serve(
     llm_factory: Callable[[], UnifiedLLM],
     *,
     model_factory: Callable[[str], UnifiedLLM] | None = None,
+    model: str | None = None,
     sandbox: bool = False,
+    prepare_model: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     reader, writer = await protocol_streams()
     with diagnostic_stdout():
-        adapter = CodingACPAdapter(llm_factory, model_factory=model_factory, sandbox=sandbox)
+        adapter = CodingACPAdapter(
+            llm_factory,
+            model_factory=model_factory,
+            model=model,
+            sandbox=sandbox,
+            prepare_model=prepare_model,
+        )
         try:
             # Bind protocol streams before redirecting ordinary Python output.
             # Provider initialization, model calls and cleanup can all print.

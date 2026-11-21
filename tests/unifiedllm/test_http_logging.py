@@ -5,11 +5,63 @@ from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
 
 from aster.unifiedllm.http_logging import enable_http_request_logging
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize("errors_only", [False, True])
+async def test_url_credentials_are_not_logged(tmp_path, monkeypatch, capsys, is_async, errors_only):
+    url = (
+        "https://synthetic-user:synthetic-password@example.invalid/v1/chat"
+        "?api_key=synthetic-key&%61ccess_token=synthetic-token&key=synthetic-short-key"
+        "&api-version=2026-01-01"
+    )
+    sent = []
+
+    def send(_self, request):
+        sent.append(str(request.url))
+        return httpx.Response(500, json={"error": "test"}, request=request)
+
+    async def asend(_self, request):
+        return send(_self, request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", send)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", asend)
+    disable = enable_http_request_logging(output_dir=tmp_path, errors_only=errors_only)
+    try:
+        if is_async:
+            async with httpx.AsyncClient() as client:
+                await client.post(url, json={"model": "test"})
+        else:
+            with httpx.Client() as client:
+                client.post(url, json={"model": "test"})
+    finally:
+        disable()
+    output = capsys.readouterr().out
+    logs = "\n".join(path.read_text() for path in tmp_path.iterdir())
+    for secret in (
+        "synthetic-user",
+        "synthetic-password",
+        "synthetic-key",
+        "synthetic-token",
+        "synthetic-short-key",
+    ):
+        assert secret not in output + logs
+    assert sent == [url]
+    if errors_only:
+        saved = urlsplit(json.loads(logs)["request"]["url"])
+        assert saved.netloc == "example.invalid"
+        assert parse_qs(saved.query) == {
+            "api_key": ["[REDACTED]"],
+            "access_token": ["[REDACTED]"],
+            "key": ["[REDACTED]"],
+            "api-version": ["2026-01-01"],
+        }
 
 
 def test_opaque_reasoning_state_is_redacted_from_http_debug_payloads(

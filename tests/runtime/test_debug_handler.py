@@ -437,10 +437,10 @@ class TestDebugSignalHandler:
             "aster.runtime.debug_handler._get_debug_dump_path",
             return_value=dump_path,
         ):
-            _debug_signal_handler(signal.SIGUSR2, frame)
+            _debug_signal_handler(12, frame)
 
         assert dump_path.exists()
-        content = dump_path.read_text()
+        content = dump_path.read_text(encoding="utf-8")
         assert "DEBUG DUMP" in content
 
     def test_writes_signal_number(self, tmp_path):
@@ -455,7 +455,7 @@ class TestDebugSignalHandler:
         ):
             _debug_signal_handler(12, frame)
 
-        content = dump_path.read_text()
+        content = dump_path.read_text(encoding="utf-8")
         assert "12" in content
 
     def test_writes_to_stderr(self, tmp_path, capsys):
@@ -468,7 +468,7 @@ class TestDebugSignalHandler:
             "aster.runtime.debug_handler._get_debug_dump_path",
             return_value=dump_path,
         ):
-            _debug_signal_handler(signal.SIGUSR2, frame)
+            _debug_signal_handler(12, frame)
 
         captured = capsys.readouterr()
         assert "DEBUG DUMP" in captured.err
@@ -479,7 +479,7 @@ class TestDebugSignalHandler:
             register_llm_call,
         )
 
-        register_llm_call("gpt-4")
+        register_llm_call("gpt-4-中文😀")
         dump_path = tmp_path / "debug_dump_test.txt"
         frame = sys._getframe()
 
@@ -487,11 +487,12 @@ class TestDebugSignalHandler:
             "aster.runtime.debug_handler._get_debug_dump_path",
             return_value=dump_path,
         ):
-            _debug_signal_handler(signal.SIGUSR2, frame)
+            _debug_signal_handler(12, frame)
 
-        content = dump_path.read_text()
+        content = dump_path.read_text(encoding="utf-8")
         assert "PENDING LLM CALLS" in content
-        assert "gpt-4" in content
+        assert "gpt-4-中文😀" in content
+        assert "DEBUG DUMP COMPLETE" in content
 
     def test_handles_file_write_error(self, tmp_path, capsys):
         from aster.runtime.debug_handler import _debug_signal_handler
@@ -508,7 +509,7 @@ class TestDebugSignalHandler:
             patch("builtins.open", side_effect=OSError("permission denied")),
         ):
             # Should not raise — error is caught and written to stderr
-            _debug_signal_handler(signal.SIGUSR2, frame)
+            _debug_signal_handler(12, frame)
 
         captured = capsys.readouterr()
         assert "Debug dump error" in captured.err
@@ -527,9 +528,9 @@ class TestDebugSignalHandler:
             "aster.runtime.debug_handler._get_debug_dump_path",
             return_value=dump_path,
         ):
-            _debug_signal_handler(signal.SIGUSR2, frame)
+            _debug_signal_handler(12, frame)
 
-        content = dump_path.read_text()
+        content = dump_path.read_text(encoding="utf-8")
         assert "STUCK IN LLM CALL" in content
 
     def test_shows_llm_stuck_when_detected_in_stack(self, tmp_path):
@@ -550,9 +551,9 @@ class TestDebugSignalHandler:
                 return_value=detected_items,
             ),
         ):
-            _debug_signal_handler(signal.SIGUSR2, frame)
+            _debug_signal_handler(12, frame)
 
-        content = dump_path.read_text()
+        content = dump_path.read_text(encoding="utf-8")
         assert "STUCK IN LLM CALL" in content
         assert "httpx" in content
 
@@ -563,22 +564,31 @@ class TestDebugSignalHandler:
 
 
 class TestInstallDebugHandler:
+    @pytest.fixture(autouse=True)
+    def available_debug_signal(self, monkeypatch):
+        monkeypatch.setattr(signal, "SIGUSR2", 12, raising=False)
+        monkeypatch.setattr(signal, "signal", MagicMock())
+
     def setup_method(self):
         _reset_module_state()
 
     def teardown_method(self):
         _reset_module_state()
-        # Restore signal to default if possible
-        try:
-            signal.signal(signal.SIGUSR2, signal.SIG_DFL)
-        except (ValueError, OSError):
-            pass
 
     def test_install_sets_handler_installed(self):
         import aster.runtime.debug_handler as dh
 
         dh.install_debug_handler()
         assert dh._handler_installed is True
+        signal.signal.assert_called_once_with(12, dh._debug_signal_handler)
+
+    def test_install_without_debug_signal_is_noop(self, monkeypatch):
+        import aster.runtime.debug_handler as dh
+
+        monkeypatch.delattr(signal, "SIGUSR2")
+        dh.install_debug_handler()
+        signal.signal.assert_not_called()
+        assert dh._handler_installed is False
 
     def test_install_idempotent(self):
         import aster.runtime.debug_handler as dh

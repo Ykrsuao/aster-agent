@@ -5,6 +5,7 @@
 import asyncio
 import os
 import platform
+import shlex
 import sys
 
 import pytest
@@ -49,6 +50,9 @@ class TestMonitorProcessIsolation:
             lines.append(line)
         assert lines == ["hello", "world"]
 
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="Windows uses Job Objects, not POSIX groups"
+    )
     async def test_monitor_own_process_group(self):
         """Spawned process must be in its own process group (start_new_session)."""
         agent_pgid = os.getpgid(os.getpid())
@@ -176,8 +180,37 @@ class TestMonitorOutputDecoding:
             encoding="utf-8",
         )
 
-        lines = [line async for line in monitor(f'"{sys.executable}" "{emitter}"')]
+        arguments = [sys.executable, str(emitter)]
+        command = shlex.join(arguments)
+        if sys.platform == "win32":
+            command = "& " + " ".join("'" + arg.replace("'", "''") + "'" for arg in arguments)
+        lines = [line async for line in monitor(command)]
 
         # The undecodable byte becomes U+FFFD rather than being dropped, and
         # "last" proves the stream continued past it.
         assert lines == ["first", "caf\ufffd", "last"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows Job lifecycle")
+async def test_monitor_cancel_stops_windows_descendant():
+    import _winapi
+
+    python = sys.executable.replace("'", "''")
+    command = f"& '{python}' -c 'import os, time; print(os.getpid(), flush=True); time.sleep(60)'"
+    producer = monitor(command)
+    handle = None
+    try:
+        pid = int(await asyncio.wait_for(anext(producer), timeout=10))
+        handle = _winapi.OpenProcess(_winapi.SYNCHRONIZE | 0x0001, False, pid)
+        assert _winapi.WaitForSingleObject(handle, 0) == _winapi.WAIT_TIMEOUT
+        await producer.aclose()
+        assert _winapi.WaitForSingleObject(handle, 5000) == _winapi.WAIT_OBJECT_0
+    finally:
+        await producer.aclose()
+        if handle is not None:
+            try:
+                if _winapi.WaitForSingleObject(handle, 0) == _winapi.WAIT_TIMEOUT:
+                    _winapi.TerminateProcess(handle, 1)
+                    _winapi.WaitForSingleObject(handle, 5000)
+            finally:
+                _winapi.CloseHandle(handle)

@@ -60,7 +60,7 @@ async def test_bash_session_survives_loop_change():
     loop_a_ready.wait(timeout=5)
 
     assert loop_a_error is None, f"Loop A failed: {loop_a_error}"
-    assert loop_a_result == "loop_a_ok"
+    assert loop_a_result.splitlines() == ["loop_a_ok"]
     assert session._started is True
 
     # Phase 2: kill loop A (simulates dispatcher crash → loop stops → thread exits)
@@ -101,7 +101,7 @@ async def test_bash_session_survives_loop_change():
 
     # This is the assertion that currently FAILS (RuntimeError: Future attached to different loop)
     assert loop_b_error is None, f"Loop B failed (cross-loop bug): {loop_b_error}"
-    assert loop_b_result == "loop_b_ok"
+    assert loop_b_result.splitlines() == ["loop_b_ok"]
 
 
 async def test_bash_session_works_same_loop():
@@ -109,11 +109,11 @@ async def test_bash_session_works_same_loop():
     session = BashSession(cwd=tempfile.gettempdir())
     try:
         stdout, stderr, code = await session.run("echo hello")
-        assert stdout == "hello"
+        assert stdout.splitlines() == ["hello"]
         assert code == 0
 
         stdout2, stderr2, code2 = await session.run("echo world")
-        assert stdout2 == "world"
+        assert stdout2.splitlines() == ["world"]
         assert code2 == 0
     finally:
         await session.close()

@@ -114,3 +114,16 @@ class TestAllMetadata:
             assert metadata["git.branch"] == "main"
             assert metadata["aster.version"] == "0.1.0"
             assert metadata["python.version"] == "3.12.0"
+
+
+def test_git_commands_do_not_inherit_standard_input():
+    """Under ACP stdin is the protocol pipe; a child that inherits it can block on Windows."""
+    with (
+        patch("subprocess.check_output", return_value=b"main") as check_output,
+        patch("subprocess.call", return_value=0) as call,
+    ):
+        get_git_metadata()
+
+    commands = [*check_output.call_args_list, *call.call_args_list]
+    assert len(commands) == 3
+    assert all(command.kwargs["stdin"] is subprocess.DEVNULL for command in commands)

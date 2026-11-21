@@ -268,3 +268,294 @@ def test_malformed_yaml_reports_path_without_file_contents(workspace, filename):
     assert str(path) in str(result.value)
     assert "sensitive_test_value" not in str(result.value)
     assert "--model" in str(result.value)
+
+
+def test_saved_model_creates_workspace_default_for_next_launch(workspace):
+    from aster_cli._tui_model import save_tui_model
+
+    path = save_tui_model(workspace, "chosen-model")
+
+    assert path == workspace / ".aster/settings.yaml"
+    assert resolve_tui_model(workspace) == "chosen-model"
+    assert not (Path.cwd() / ".aster/settings.yaml").exists()
+
+
+@pytest.mark.parametrize("layer", ["user", "project", "override"])
+def test_save_changes_only_highest_existing_settings_layer(workspace, tmp_path, monkeypatch, layer):
+    import yaml
+    from aster_cli._tui_model import save_tui_model
+
+    original = "tui:\n  default_model: previous\n  theme: dark\nother:\n  enabled: true\n"
+    user = write_config(tmp_path / "user/settings.yaml", original)
+    paths = [user]
+    if layer in {"project", "override"}:
+        paths.append(write_config(workspace / ".aster/settings.yaml", original))
+    if layer == "override":
+        paths.append(write_config(workspace / "first.yaml", original))
+        paths.append(write_config(workspace / "last.yaml", original))
+        monkeypatch.setenv("ASTER_SETTINGS", "first.yaml, last.yaml, missing.yaml")
+        write_config(Path.cwd() / "last.yaml", original)
+
+    saved = save_tui_model(workspace, "new-model")
+
+    assert saved == paths[-1]
+    assert resolve_tui_model(workspace) == "new-model"
+    assert yaml.safe_load(saved.read_text(encoding="utf-8")) == {
+        "tui": {"default_model": "new-model", "theme": "dark"},
+        "other": {"enabled": True},
+    }
+    for lower in paths[:-1]:
+        assert lower.read_text(encoding="utf-8") == original
+    if layer == "override":
+        assert (Path.cwd() / "last.yaml").read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("override", [None, "custom-settings", "~/literal-settings", "absolute"])
+def test_save_creates_project_settings_in_the_selected_workspace(
+    workspace, tmp_path, monkeypatch, override
+):
+    from aster_cli._tui_model import save_tui_model
+
+    write_config(workspace / "pyproject.toml", "[project]\n")
+    nested = workspace / "src/nested"
+    nested.mkdir(parents=True)
+    if override == "absolute":
+        override = str(tmp_path / "external-settings")
+    if override:
+        monkeypatch.setenv("ASTER_PROJECT_DIR", override)
+        directory = Path(override)
+        if not directory.is_absolute():
+            directory = nested / directory
+    else:
+        directory = workspace / ".aster"
+    monkeypatch.setenv("ASTER_SETTINGS", "nonexistent.yaml")
+
+    saved = save_tui_model(nested, "nested-model")
+
+    assert saved == directory / "settings.yaml"
+    assert resolve_tui_model(nested) == "nested-model"
+    assert not (Path.cwd() / ".aster/settings.yaml").exists()
+    assert not (nested / "nonexistent.yaml").exists()
+
+
+@pytest.mark.parametrize(
+    ("variable", "directory"),
+    [("ASTER_USER_DIR", "custom-user"), ("XDG_CONFIG_HOME", "custom-user/aster")],
+)
+def test_save_in_untrusted_workspace_uses_relative_user_directory(
+    workspace, monkeypatch, variable, directory
+):
+    from aster_cli._tui_model import save_tui_model
+
+    from aster import workspace_trust
+
+    monkeypatch.delenv("ASTER_USER_DIR")
+    monkeypatch.delenv("ASTER_TRUST_ALL_WORKSPACES", raising=False)
+    monkeypatch.setenv(variable, "custom-user")
+    caller = Path.cwd()
+    with workspace_trust.enforced():
+        assert not workspace_trust.is_trusted(workspace)
+        saved = save_tui_model(workspace, "selected-model")
+        assert saved == workspace / directory / "settings.yaml"
+        assert resolve_tui_model(workspace) == "selected-model"
+
+    assert Path.cwd() == caller
+    assert not (caller / directory / "settings.yaml").exists()
+    assert not (workspace / ".aster").exists()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "sensitive_test_value: [unfinished\n",
+        "[sensitive_test_value]\n",
+        "sensitive_test_value\n",
+        "false\n",
+        "tui: sensitive_test_value\n",
+        "tui: [sensitive_test_value]\n",
+    ],
+)
+def test_save_rejects_invalid_settings_without_replacing_or_exposing_contents(workspace, content):
+    from aster_cli._tui_model import save_tui_model
+
+    path = write_config(workspace / ".aster/settings.yaml", content)
+    original = path.read_bytes()
+
+    with pytest.raises(ValueError, match="Cannot save default model") as result:
+        save_tui_model(workspace, "new-model")
+
+    assert path.read_bytes() == original
+    assert str(path) in str(result.value)
+    assert "sensitive_test_value" not in str(result.value)
+    assert result.value.__cause__ is None
+
+
+@pytest.mark.parametrize("content", ["", "null\n", "tui: null\n"])
+def test_save_accepts_empty_settings_and_null_sections(workspace, content):
+    from aster_cli._tui_model import save_tui_model
+
+    path = write_config(workspace / ".aster/settings.yaml", content)
+
+    assert save_tui_model(workspace, "new-model") == path
+    assert resolve_tui_model(workspace) == "new-model"
+
+
+@pytest.mark.parametrize("boundary", ["replace", "fsync"])
+def test_save_failure_keeps_original_and_removes_temporary_files(workspace, monkeypatch, boundary):
+    from aster_cli._tui_model import save_tui_model
+
+    path = write_config(workspace / ".aster/settings.yaml", "tui:\n  default_model: previous\n")
+    original = path.read_bytes()
+
+    def fail(*args):
+        assert path.read_bytes() == original
+        if boundary == "replace":
+            assert Path(args[0]).parent == path.parent
+            assert Path(args[1]) == path
+        raise PermissionError("sensitive_test_value")
+
+    monkeypatch.setattr(os, boundary, fail)
+    with pytest.raises(OSError, match="Cannot save default model") as result:
+        save_tui_model(workspace, "new-model")
+
+    assert path.read_bytes() == original
+    assert "sensitive_test_value" not in str(result.value)
+    assert result.value.__cause__ is None
+    assert [p for p in path.parent.iterdir() if not p.name.endswith(".lock")] == [path]
+
+
+def test_save_waits_for_other_settings_writer_and_preserves_its_update(workspace):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+    from contextlib import ExitStack
+
+    import yaml
+    from aster_cli._tui_model import save_tui_model
+
+    path = write_config(workspace / ".aster/settings.yaml", "tui:\n  default_model: previous\n")
+    lock_path = path.with_name(".settings.yaml.lock")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with ExitStack() as stack:
+            if os.name == "nt":
+                from filelock import FileLock
+
+                stack.enter_context(FileLock(lock_path, timeout=1))
+            else:
+                import fcntl
+
+                lock = stack.enter_context(lock_path.open("a"))
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            pending = pool.submit(save_tui_model, workspace, "new-model")
+            with pytest.raises(TimeoutError):
+                pending.result(timeout=0.2)
+            path.write_text("tui:\n  default_model: previous\n  theme: changed\n", encoding="utf-8")
+        assert pending.result(timeout=5) == path
+    assert yaml.safe_load(path.read_text(encoding="utf-8")) == {
+        "tui": {"default_model": "new-model", "theme": "changed"}
+    }
+
+
+@pytest.mark.parametrize("model", ["route/#one: 'quoted' \"name\"", "line\nbreak", "模型/新档位"])
+def test_save_preserves_comments_and_line_endings_while_quoting_model_safely(workspace, model):
+    from aster_cli._tui_model import save_tui_model
+
+    path = write_config(workspace / ".aster/settings.yaml", "")
+    prefix = b"# user preferences\r\ntui:\r\n  theme: 'dark'\r\n  default_model: "
+    suffix = b"  # selected model\r\nother: {enabled: true}\r\n"
+    path.write_bytes(prefix + b"old" + suffix)
+
+    assert save_tui_model(workspace, model) == path
+    assert resolve_tui_model(workspace) == model
+    assert path.read_bytes().startswith(prefix)
+    assert path.read_bytes().endswith(suffix)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "other: &model original\ntui:\n  default_model: *model\n",
+        "tui:\n  default_model: &model original\nother: *model\n",
+        "base: &settings {default_model: original, theme: dark}\n"
+        "tui: *settings\nother: *settings\n",
+    ],
+)
+def test_save_does_not_change_values_shared_by_yaml_anchors(workspace, content):
+    import yaml
+    from aster_cli._tui_model import save_tui_model
+
+    path = write_config(workspace / ".aster/settings.yaml", content)
+    original_other = yaml.safe_load(content)["other"]
+
+    save_tui_model(workspace, "new-model")
+
+    assert resolve_tui_model(workspace) == "new-model"
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["other"] == original_other
+
+
+def test_saving_current_model_leaves_file_bytes_unchanged(workspace, monkeypatch):
+    from aster_cli._tui_model import save_tui_model
+
+    path = write_config(
+        workspace / ".aster/settings.yaml", "# keep this comment\ntui: {default_model: current}\n"
+    )
+    original = path.read_bytes()
+
+    def unexpected_replace(*args):
+        pytest.fail("Saving an unchanged default should not replace the file")
+
+    monkeypatch.setattr(os, "replace", unexpected_replace)
+    assert save_tui_model(workspace, "current") == path
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("model", ["", "   ", None, 42])
+def test_save_rejects_nonblank_model_contract_violations(workspace, model):
+    from aster_cli._tui_model import save_tui_model
+
+    path = write_config(workspace / ".aster/settings.yaml", "tui:\n  default_model: previous\n")
+    original = path.read_bytes()
+
+    with pytest.raises(ValueError, match="nonblank model name"):
+        save_tui_model(workspace, model)
+
+    assert path.read_bytes() == original
+
+
+def test_save_times_out_without_replacing_settings_locked_by_another_writer(workspace):
+    from contextlib import ExitStack
+
+    from aster_cli._tui_model import save_tui_model
+
+    path = write_config(workspace / ".aster/settings.yaml", "tui:\n  default_model: previous\n")
+    original = path.read_bytes()
+    lock_path = path.with_name(".settings.yaml.lock")
+    with ExitStack() as stack:
+        if os.name == "nt":
+            from filelock import FileLock
+
+            stack.enter_context(FileLock(lock_path, timeout=1))
+        else:
+            import fcntl
+
+            lock = stack.enter_context(lock_path.open("a"))
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        with pytest.raises(OSError, match="Cannot save default model"):
+            save_tui_model(workspace, "new-model")
+    assert path.read_bytes() == original
+
+
+def test_save_does_not_overwrite_a_concurrent_edit_outside_the_lock(workspace, monkeypatch):
+    from aster_cli._tui_model import save_tui_model
+
+    path = write_config(workspace / ".aster/settings.yaml", "tui:\n  default_model: previous\n")
+    other_editor = b"tui:\n  default_model: edited-elsewhere\n  theme: changed\n"
+    original_fsync = os.fsync
+
+    def edit_during_save(fd):
+        path.write_bytes(other_editor)
+        original_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", edit_during_save)
+    with pytest.raises(ValueError, match="settings changed"):
+        save_tui_model(workspace, "new-model")
+    assert path.read_bytes() == other_editor
+    assert [p for p in path.parent.iterdir() if not p.name.endswith(".lock")] == [path]

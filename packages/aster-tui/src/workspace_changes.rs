@@ -792,6 +792,14 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn truncated_reader_releases_descendant_file_mappings_before_returning() {
+        // Exercise the gap between job accounting and process teardown on a real host.
+        for _ in 0..20 {
+            assert_truncated_reader_releases_descendant_mapping().await;
+        }
+    }
+
+    #[cfg(windows)]
+    async fn assert_truncated_reader_releases_descendant_mapping() {
         let repository = tempfile::tempdir().unwrap();
         let path = repository.path().join("mapped.txt");
         std::fs::write(&path, b"mapping content").unwrap();

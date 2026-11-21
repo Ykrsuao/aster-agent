@@ -11,6 +11,9 @@ Launch a new conversation with `aster` or `aster tui`. Rust sources live in
 
 ## Build and run
 
+Windows x64 users can install the [terminal bundle](../../README.md#install-a-windows-terminal-bundle)
+without building this crate. The following steps are for source development.
+
 From this repository checkout, with Python 3.12–3.13, Rust 1.88+ and uv installed:
 
 ```powershell
@@ -36,20 +39,27 @@ tui:
   default_model: my-model
 ```
 
-User defaults can be saved in `~/.config/aster/settings.yaml`. Existing model
-aliases and project configuration continue to work.
+User defaults can be saved in `~/.config/aster/settings.yaml`. Confirming a model
+in the picker or with `/model ALIAS` saves its alias as `tui.default_model` after
+the backend successfully prepares it. The save updates the highest-priority
+existing settings file, including `ASTER_SETTINGS` overrides; with no settings
+file, it creates the project's `.aster/settings.yaml` (or `ASTER_PROJECT_DIR`).
+The next launch uses that choice unless `--model` or `ASTER_MODEL` overrides it.
 `-w PATH`, `--client-type completion|responses`, `--sandbox`,
 `--resume ID` and `--continue` are forwarded to the Rust client. Python is selected
 from the environment running `aster`, so the ACP subprocess has the same installed
 packages. New conversations prepare their model and session in the background
 as the interface opens. You can type immediately. If preparation is still running
-when you press Enter, the interface shows `Initializing session…` and explains
-that your message will send automatically when ready. Waiting messages are labeled
-`waiting for initialization`; messages submitted during an active turn use `queued`.
+when you press Enter, your message appears immediately in the conversation.
+The status line shows `Connecting…` or `Starting conversation…` until it can be
+sent. Press Esc to bring the waiting message back for editing. Multiple waiting
+messages also show a count; paused sending is labeled explicitly.
+Messages submitted during an active turn use `queued`.
 `--resume ID` reopens a chosen session. `--continue` reopens the most recent
 session, or starts a new conversation when there is no history.
 
-The Python wheel does not currently bundle the native executable. For a locally
+The ordinary Python wheel does not bundle the native executable; the Windows
+terminal bundle includes it in a platform-specific CLI wheel. For a locally
 installed package, build this crate and put `aster` (`aster.exe` on Windows) on
 PATH, or set `ASTER_TUI_BIN` to its absolute path.
 Launcher discovery checks this override, a bundled `aster_cli/bin` binary, the
@@ -76,15 +86,35 @@ The HUD adapts [claude-hud](https://github.com/jarrodwatts/claude-hud)'s status
 display ideas to Aster's ACP events, runtime tasks and local workspace. The default
 is compact and uses at most three rows: project and usage share a row when the
 width allows, followed by tool, plan and background-job activity when space is
-available. Every layout is also limited to one eighth of the window height
-(at least one row when space permits), so even a saved full layout leaves room
-for the conversation. Growing drafts, attachments and queued messages can reduce
-this further. Short windows prioritize usage and cost when only one HUD row fits.
+available. During a conversation, compact layouts are also limited to one eighth
+of the window height (at least one row when space permits). Expanded and full
+layouts show the configured rows while reserving space for the conversation and
+composer, including after typing or sending a message. Growing drafts,
+attachments and queued messages can reduce the available HUD space. Short
+windows prioritize usage and cost when only one HUD row fits. The project row
+reserves room for the current permissions and reasoning level before the path
+and Git details; compact mode uses two rows when merging would hide those controls.
 The shortcut hint sits immediately below the HUD, without extra blank rows.
+It prioritizes sending, Shift+Tab permissions and F1 help, then adds relevant
+editing and attachment controls as space permits. F1 lists the remaining keys.
+Repeated task status stays in the activity line when it already contains the same
+information; plan progress and background work retain their own summaries.
+The activity timer uses whole seconds, and Esc appears only for a cancellable
+operation when no panel has captured the key.
+Expanded layouts align metric labels in terminals at least 60 columns wide.
+Labels and separators are muted; reported values are brighter, with bold accents
+for the model, selected reasoning level and measured context usage. Pending and
+unavailable values stay subdued. Activity markers distinguish running, completed
+and failed work without adding rows. Narrow layouts drop the label padding.
+The welcome page shows the configured HUD rows while reserving space for the
+Aster wordmark and menu. It reduces spacing and uses two menu columns when
+needed, so the full HUD and complete artwork fit in an 80-column, 24-row window.
+When the artwork cannot fit, a compact `ASTER` wordmark remains visible above
+the menu.
 
 `/hud` opens a searchable settings menu; `/hud info` shows current values, their
 sources, configuration paths and collection errors. Click a HUD row to open the
-matching inspector (`/status`, `/context`, `/tools` or `/tasks`); metric rows open
+matching inspector (`/status`, `/context`, `/effort`, `/tools` or `/tasks`); metric rows open
 `/hud info`. Dragging selects and copies text instead of activating the row.
 
 | Command | Effect |
@@ -119,7 +149,7 @@ For example:
 | Setting | Default and accepted values |
 | --- | --- |
 | `layout` | `compact`; also `expanded`, `hidden` |
-| `elements` | Ordered array: `project`, `usage`, `tools`, `tasks`, `agents`; additional names: `tokens`, `cache`, `cost`, `skills`, `memory`, `limits`, `session`, `custom` |
+| `elements` | Ordered array: `project`, `usage`, `tools`, `tasks`, `agents`; additional names: `reasoning`, `tokens`, `cache`, `cost`, `skills`, `memory`, `limits`, `session`, `custom` |
 | `path_levels` | `1` trailing workspace component; `0` shows the full path; maximum `8` |
 | `max_rows`, `max_width` | `3` rows (1–16), `160` columns (20–400); the row count is also limited by window height and available conversation space |
 | `context_value` | `percent`; also `tokens`, `remaining`, `both` |
@@ -149,6 +179,26 @@ line additions/deletions. Git and host reads run outside the rendering loop.
 The memory row measures host RAM on native Windows and Linux. Skills show active
 and available skills, registered MCP servers and applicable `AGENTS.md` files
 between the Git root and current workspace directory.
+
+Use `/skills` or click the Skills HUD row to browse every discovered skill,
+including skills that are not active. Type to filter names and descriptions,
+use Up/Down to select a skill, and press Enter to read its documentation.
+The list marks active skills and distinguishes loaded skills from plugins that
+have not been loaded. Ctrl+R refreshes the list or retries the current detail;
+Esc returns from details to the list, then closes the browser. PgUp/PgDn scroll
+long documentation, and text can be selected and copied. Your draft and running
+task stay intact.
+
+Browsing is read-only: it does not activate skills, import unloaded plugins,
+execute skill code, or make a model call. Unloaded plugins may have only their
+registered metadata available, which is shown explicitly instead of loading
+them to obtain documentation. Display limits are marked when data is truncated.
+
+The `reasoning` row shows the current runtime reasoning level, falling back to
+the level reported by the backend. With no reported level it shows `model default`;
+the provider's exact default effort remains unknown. `/hud show reasoning` enables
+the row, and `/hud full` includes it automatically. Click it or use `/effort`
+to inspect or switch among the current route's declared levels.
 
 Tokens and cache counts come from reported model usage. A field missing from any
 participating response makes that session total `n/a`; an explicit zero remains
@@ -216,9 +266,14 @@ partial accounting for a complete total.
 
 ## Context and cost
 
-The HUD's usage row is present from startup. `context — │ cost —` means that no
-model response has supplied statistics yet. After a response, it shows the latest
-reported input-token usage as a percentage of the model's known context window.
+The HUD's usage row is present from startup. Before the first response, a known
+model capacity displays `context ░░░░░░ 0k / 1.0m`, with an empty bar and `0k`
+as pending placeholders. The bar respects `context_bar` and available width.
+The context inspector still waits for a reported measurement. An unknown capacity
+displays `context —`. After a response, the row shows the latest reported input
+usage in the selected `context_value` format (percentage or token counts).
+In `tokens` and `both` formats, used tokens stay in `k` (thousands), while capacity
+uses its compact unit; for example, `12.3k / 1.0m`.
 If the window is unknown, it shows the reported token count instead. A missing
 usage report displays `context n/a`; it does not imply an empty context.
 
@@ -269,7 +324,8 @@ responses restored from the saved conversation. If only some calls have valid pr
 the HUD shows the known subtotal prefixed with `≥`. When no calls have valid prices,
 it displays `cost n/a`. An explicitly reported zero can display `$0.0000`.
 Changing models clears the previous context measurement while keeping the current
-cost total; the new model supplies its own context measurement on its next response.
+cost total. Its known capacity appears immediately as `0 / capacity`; the new
+model supplies its own context measurement on its next response.
 
 Day/week totals include newly observed usage recorded by this TUI across workspaces,
 stored in the user directory's `hud-usage/`. They use the local calendar day and a
@@ -290,6 +346,7 @@ measurements from a live model session.
 | Enter | Send a message; queue it while preparing or while a prompt is running |
 | Alt+S | Send the current text as a correction to the running task |
 | Alt+Enter / Shift+Enter | New line (Shift+Enter depends on terminal support) |
+| Shift+Tab (no popup open) | Cycle permissions, including during a task: Auto → Manual → Accept edits → Plan → Auto |
 | Click / drag inside input | Position the cursor / select text; releasing the mouse copies it, and Shift+click extends the selection |
 | Ctrl+C / Ctrl+X with selected input and no popup open | Copy / cut the selection to the system clipboard |
 | Ctrl+V / Ctrl+Shift+V / Shift+Insert / Right click | Paste clipboard text or attach a copied image without sending |
@@ -323,7 +380,7 @@ measurements from a live model session.
 | Esc | Close suggestions / an overlay; recall a message waiting for preparation; cancel a running task |
 | Esc twice within 600 ms, while idle | Clear a nonempty draft; with an empty composer, choose a message to rewind to |
 | Ctrl+Z / Ctrl+U in the composer | Undo an input edit, including clearing a draft with double Esc |
-| Ctrl+D with empty input, Ctrl+Q | Save and exit |
+| Ctrl+Q | Save and exit |
 | Ctrl+X without selected input / F1 (no popup open) | Help |
 
 Pickers support typing to filter, arrow selection, Enter to choose and Esc to
@@ -358,7 +415,7 @@ suggestions open, Esc closes that view first and keeps the draft. Cancellation
 keeps the queue paused until the operation actually finishes. After 20 seconds
 without a terminal response, the TUI reports that it is still waiting and stays
 open; it does not stop the backend automatically. Press Ctrl+C twice within two
-seconds to leave, or use Ctrl+Q, Ctrl+D with an empty composer, or `/exit`.
+seconds to leave, or use Ctrl+Q or `/exit`.
 
 With no text selected, the first Ctrl+C shows an exit confirmation:
 it does not cancel the task or clear your draft. Another key, a paste, or a mouse action dismisses confirmation;
@@ -420,8 +477,9 @@ available in full; Git preview limits are described below.
 
 Commands: `/new`, `/sessions`, `/resume ID`, `/drafts`, `/tree`, `/rewind`, `/search [text]`, `/queue`,
 `/steer TEXT`, `/attach [PATH]`, `/attachments`, `/retry`, `/reconnect`, `/model [ALIAS]`,
-`/mode [code|plan]`, `/permissions [ask|session]`, `/tasks`, `/stop JOB-ID`, `/tools`,
-`/changes`, `/undo`, `/status`, `/context [all]`, `/hud`, `/logs`, `/help`, `/cancel`, `/exit` and commands
+`/effort [LEVEL|auto|status]`, `/reasoning [LEVEL|default]`, `/mode [code|plan]`,
+`/permissions [auto|manual|accept_edits|plan]`, `/sandbox [on|off]`, `/tasks`, `/stop JOB-ID`, `/tools`,
+`/changes`, `/undo`, `/status`, `/context [all]`, `/skills`, `/hud`, `/logs`, `/help`, `/cancel`, `/exit` and commands
 advertised by the agent.
 The interface follows the layout observed in Grok Build 1.0.77: a grayscale
 canvas, full-width conversation, compact bordered composer and session title on
@@ -479,10 +537,19 @@ bytes. This one-step undo lasts until the next text edit, successful attachment
 addition, draft replacement or submission, or conversation switch. Inside
 `/attachments`, Delete removes the selected item and Ctrl+Z restores it. These controls
 affect the current draft; queued and submitted messages keep their snapshots.
+
+Sent attachments stay visible at the start of the user message as compact
+`[Image] name · PNG · size` or `[File] name · type · size` rows, followed by any
+message text. Image-only messages do not start with blank lines or require
+expanding the message just to identify the image. New session history uses the
+same summary; previously saved messages keep their original text.
+
 Files and images are
 captured when attached, so later source-file edits do not change the next prompt.
 Both the prompt and saved conversation retain that snapshot. Sending waits for
-pending file reads.
+pending file reads. You can send an image without entering text. The terminal
+forwards attached images to the selected model without a per-model image switch.
+If the provider does not accept images, its error is shown.
 
 The attachment inspector displays PNGs as pixel images on Windows terminals that
 report Sixel support and cell geometry, including Windows Terminal 1.24. Images
@@ -499,8 +566,8 @@ when sent; the terminal thumbnail does not reduce its quality.
 
 A message accepts at most eight attachments: UTF-8 text up to 256 KiB per file,
 or PNG/JPEG/GIF/WebP images up to 8 MiB each, within a 16 MiB aggregate prompt
-limit. Directories, binary text, unsupported images and models without configured
-image input produce an error while preserving the draft. Selecting a file adds
+limit. Directories, binary text and unsupported image formats produce an error
+while preserving the draft. Selecting a file adds
 its context; it does not grant permission to execute code.
 
 ## Session tree
@@ -561,16 +628,75 @@ already closed, `/reconnect` remains available.
 
 ## Session settings and approvals
 
-`/model`, `/mode` and `/permissions` open session controls. Supply an argument to
-select a configured model alias, `code` or `plan` mode, or `ask` or `session`
-approval policy. Changes apply to the live session; they do not rewrite the model
-registry. Finish or stop foreground and background work before changing settings.
+`/model`, `/effort`, `/reasoning`, `/mode`, `/permissions` and `/sandbox` open session controls. Supply an argument to
+select a configured model alias, `code` or `plan` mode, or one of the four
+permission modes below. A confirmed model becomes the saved startup default and is also
+used by new or reopened conversations in the same workspace. Reasoning effort,
+mode and execution approval apply to the live session. Model, effort, execution
+backend and legacy mode/approval changes require foreground and background work
+to finish or stop. Permission modes can change during a running task.
 
-`/model` lists configured models and preserves their connection settings. The
-picker also works before the first session when no default model is selected.
+`/sandbox` selects **Native** or **Python sandbox** for the current session;
+`/sandbox on` and `/sandbox off` apply either choice directly. Enabling runs a
+readiness check before confirming the microVM. Esc cancels preparation, and a
+failure or cancellation keeps the previous execution environment. Finish or
+stop background jobs first. Chat history and saved agent state remain available;
+temporary Python objects are not migrated between environments. The setting
+lasts for this live session; new or reconnected sessions use the startup flag.
+
+This isolates generated Python cells only. Shell and file tools still execute
+on the host, and permission settings remain separate from Python execution.
+
+`/model` or Alt+P opens the model picker. Use Up/Down to choose a model and
+Left/Right to preview its declared reasoning effort. Enter applies both in one
+request; Esc discards the preview. Each model shows its own available levels,
+including unknown or unsupported capability. The controls follow
+[Claude Code's model and effort interaction](https://code.claude.com/docs/en/model-config#adjust-effort-level).
+If validation or saving fails, the current model and saved default stay unchanged.
+The picker also works before the first session when no default model is selected;
+the alias is saved after successful session preparation, when effort controls
+also become available.
 Add or edit entries through [model configuration](../../docs/model-configuration.md).
 
-With `ask`, execution pauses for a compact review. Literal shell commands and
+`/effort` opens a horizontal slider at the current model's confirmed selection.
+Use Left/Right to preview a level and Enter to apply it. `/effort status` reads
+the current backend setting and available levels. Use `/effort LEVEL` (for
+example, `/effort high` when `high` is listed) to select one directly, or
+`/effort auto` to clear the selection and restore the
+model's configured request defaults. The HUD changes after the backend accepts
+the setting, and subsequent model calls send the declared provider parameters.
+Automatic context budgets also follow any reply cap declared for that level.
+Unknown routes offer only Model default and explain that selectable levels are
+unknown; explicitly unsupported routes report that selection is unavailable.
+An invalid choice preserves the current settings. Labels and their request
+parameters belong in the model's `reasoning_levels` configuration; the terminal
+does not infer them from a model name.
+`/reasoning` remains an alias; `default` also clears the selection.
+
+`/permissions` opens **Permissions · this session** with the current mode selected:
+
+| Mode | Behavior |
+|---|---|
+| Auto | Permit generated code and file changes, including deletion, without asking. |
+| Manual | Ask before executing generated code or making changes. |
+| Accept edits | Automatically allow supported file reads and edits; ask before commands and other code. |
+| Plan | Plan from supplied context with generated code and tool execution disabled. |
+
+Use `/permissions auto`, `/permissions manual`, `/permissions accept_edits`, or
+`/permissions plan` to select a mode directly. Choosing Auto, Manual, or Accept edits
+also enters Code mode. Shift+Tab cycles these modes without interrupting a running
+task. The HUD updates after the backend confirms the selection; subsequent cells
+use the new policy, while already authorized or running operations finish normally.
+Resolve or reject any open execution approval before switching. Model changes,
+sandbox preparation, cancellation and session closure must finish first.
+These settings apply to the live session and reset when it closes or reconnects.
+The earlier `/permissions ask` and `/permissions session` commands remain aliases
+for the existing approval controls; `/mode code|plan` remains available.
+If the backend does not report support for the new permission modes, the menu and
+new commands leave permissions unchanged and ask you to update `aster-acp`.
+The earlier approval commands and `/mode` remain usable with those backends.
+
+With Manual, execution pauses for a compact review. Literal shell commands and
 file operations show their arguments first; Tab opens the complete Python cell.
 Dynamic or incomplete previews show full code immediately. PgUp/PgDn scroll the
 preview while the choices remain visible. Choose Allow once, Allow all code for
@@ -579,6 +705,9 @@ selected choice, and Esc rejects the request. Approval covers the entire Python
 cell, including any files or processes it accesses. Session consent permits all
 code until the session closes or reconnects.
 Approval dialogs close when their task ends or the backend disconnects.
+Accept edits uses the same review for commands, unsupported or computed file
+operations, and code that combines edits with other execution. Approving the whole
+session switches to Auto.
 
 Ordinary conversation can return a written answer without executing code or
 requesting approval. A greeting combined with a coding task still follows the
@@ -693,12 +822,17 @@ FakeLLMClient (no model calls).
 They locate the repository `.venv`, or use `ASTER_TEST_PYTHON` when explicitly set.
 `cargo run --manifest-path packages/aster-tui/Cargo.toml --example preview -- 120 36 work`
 exports actual rendered cells as JSON for visual checks; modes include `welcome`,
-`work`, `tools`, `commands`, `slash`, `changes`, `sessions`, `search`, `queue`,
+`welcome-hud-full`, `sent-hud-full`, `starting`, `starting-multiple`, `starting-paused`,
+`work`, `tools`, `commands`, `slash`, `changes`,
+`sessions`, `search`, `queue`,
 `markdown`, `sidebar`, `compose`, `compact`, `python-error`, `steering`, `files`,
 `attachments`, `image`, `approval`, `approval-expanded`, `approval-fallback`,
 `tasks`, `progress`, `recovery`, `rollback`, `context`, `context-all`, `context-pending`,
 `context-system`, `context-messages`, `context-output`, `hud`, `hud-full`,
-`hud-compact`, `hud-zh`, `hud-monochrome`, `hud-unknown` and `hud-settings`.
+`hud-tokens`, `hud-compact`, `hud-zh`, `hud-monochrome`, `hud-unknown`, `hud-settings`,
+`reasoning`, `reasoning-unknown`, `reasoning-unsupported`, `model-effort`,
+`model-effort-unknown`, `permissions`, `permissions-plan`, `skills`, `skills-detail`,
+`skills-empty` and `skills-error`.
 HUD previews use synthetic ACP and host data with the production renderer.
 Model configuration previews use synthetic fields and credentials:
 `model-switch` and `model-switch-empty`.

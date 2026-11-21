@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Stale Match edits fail closed at their original range, with bounded diagnostics."""
 
+import os
 import shutil
 
 import pytest
@@ -43,7 +44,7 @@ async def test_stale_region_never_writes(shell, tmp_path, current):
     assert (error.start, error.end) == (2, 2)
     for text in [
         "file.txt",
-        str(path.resolve()),
+        repr(str(path.resolve())),
         "captured lines 2-2",
         "No file was changed",
         "Re-read or re-search",
@@ -83,8 +84,8 @@ async def test_unrelated_region_changes_allowed(shell, tmp_path, current):
 @pytest.mark.parametrize("producer", ["whole", "window", "slice", "search"])
 @pytest.mark.parametrize("ending", [b"\n", b"\r\n", b"\r", b""])
 async def test_valid_producers_and_line_endings(shell, tmp_path, producer, ending):
-    if producer == "search" and (shutil.which("rg") is None or shutil.which("grep") is None):
-        pytest.skip("needs rg and grep on PATH")
+    if producer == "search" and shutil.which("rg") is None:
+        pytest.skip("needs rg on PATH")
     path = tmp_path / "file.txt"
     # Search engines count LF lines; keep bare CR coverage to single-line files.
     original = b"captured" + ending
@@ -96,14 +97,15 @@ async def test_valid_producers_and_line_endings(shell, tmp_path, producer, endin
     elif producer == "slice":
         anchor = (await shell.read("file.txt"))[1:1]
     else:
-        result = await shell.run("grep -n captured file.txt")
+        result = await shell.run("rg -n captured file.txt")
         assert result.matches
         anchor = result.matches[0]
     assert anchor.text == "captured" + ("\n" if ending else "")
     result = await shell.replace(anchor, "replacement")
-    expected = b"replacement" + (b"\n" if ending else b"")
-    assert path.read_bytes() == expected  # existing write normalization is unchanged
-    assert result.new_text.encode() == expected
+    expected = "replacement" + ("\n" if ending else "")
+    # Path.write_text keeps the native newline convention; Match text stays normalized.
+    assert path.read_bytes() == expected.replace("\n", os.linesep).encode()
+    assert result.new_text == expected
 
 
 @pytest.mark.parametrize(
@@ -120,7 +122,7 @@ async def test_invalid_or_out_of_bounds_range_never_writes(shell, tmp_path, star
 
 async def test_invalid_read_and_slice_ranges_never_write(shell, tmp_path):
     path = tmp_path / "file.txt"
-    path.write_text("captured\n")
+    path.write_bytes(b"captured\n")
     whole = await shell.read("file.txt")
     for anchor in [await shell.read("file.txt", (5, 8)), whole[5:8], whole[1:0]]:
         with pytest.raises(StaleMatchError):
@@ -180,6 +182,7 @@ async def test_large_diff_bounded_or_omitted(
     path.write_text(expected)
     anchor = await shell.read("file.txt")
     path.write_text(current)
+    before = path.read_bytes()
     if "exceed" in detail:
 
         def forbidden_diff(*args, **kwargs):
@@ -195,7 +198,7 @@ async def test_large_diff_bounded_or_omitted(
     assert detail in str(error)
     assert expected not in str(error)
     assert current not in str(error)
-    assert path.read_bytes() == current.encode()
+    assert path.read_bytes() == before
     footer = "Diff preview truncated (capped at 20 lines and 2 KiB); not a complete diff."
     if "exceed" in detail:
         assert "incomplete" in str(error)
@@ -229,8 +232,8 @@ async def test_no_newline_diff_explains_eof(shell, tmp_path):
 
 @pytest.mark.parametrize("producer", ["window", "slice", "search"])
 async def test_stale_producer_match_never_writes(shell, tmp_path, producer):
-    if producer == "search" and (shutil.which("rg") is None or shutil.which("grep") is None):
-        pytest.skip("needs rg and grep on PATH")
+    if producer == "search" and shutil.which("rg") is None:
+        pytest.skip("needs rg on PATH")
     path = tmp_path / "file.txt"
     path.write_text("first\ncaptured\nthird\n")
     if producer == "window":
@@ -238,7 +241,7 @@ async def test_stale_producer_match_never_writes(shell, tmp_path, producer):
     elif producer == "slice":
         anchor = (await shell.read("file.txt"))[2:3]
     else:
-        result = await shell.run("grep -n captured file.txt")
+        result = await shell.run("rg -n captured file.txt")
         assert result.matches
         anchor = result.matches[0]
     path.write_bytes(b"first\nexternally changed\n")

@@ -1,5 +1,56 @@
 # TUI 自用稳定性记录
 
+本文件保留各轮验证的历史结果，不代表当前版本已经通过全部验收。当前输入恢复行为以[终端指南的 Recovery](../README.md#recovery)为准，候选版本验收见[发布说明](../../../RELEASING.md#terminal-candidate-acceptance-manual)。下文早期记录中的“草稿和队列只在内存”已被持久化恢复实现替代；旧测试数量和构建哈希仅对应当时版本。
+
+## 2026-11-20：会话 ID 修复交付与候选包升级
+
+已将提交 `29e5a343` 的会话 ID 冒号校验修复打入 `0.0.13.dev16` Windows x64 候选包，实际执行 Rust release 构建并打包五个同版 wheel。产物位于 `dist/terminal-windows-session-id-29e5a343/aster-terminal-0.0.13.dev16-windows-x64.zip`，SHA256 为 `79c9d1d7ee065e0413c99b7e79ec56ae8218e056f681941522e196b742929121`。独立核对确认 wheel 包含修复，所有清单／ZIP 文件哈希一致；manifest 保留 `dirty=true`，此包包含主工作区其他未提交修改。
+
+在独立 uv tool 环境完成 `dev15 → dev16` 实际升级，使用 Python 3.13、源码外 cwd 与安装环境的 `python -I`。旧 ACP 会话能重新加载且不调用模型、不重跑旧文件操作，继续一轮任务成功；用户后来修改的文件、草稿／暂停队列 JSON 和配置文件的字节保持原样。另对已安装 dev16 执行32项会话 ID 边界与正常 UUID／Unicode 往返检查，全部通过。证据见 `results/terminal-upgrade-29e5a343/README.md`。
+
+本轮使用 FakeLLM，未重跑真实模型或终端界面操作；草稿结论仅涉及保存字节。升级结论只覆盖上述两份候选包及本机环境，未验证更早发布版、全新机器或长期使用。没有对外发布、推送或替换用户日用安装。
+
+## 2026-11-20：已安装终端真实交互与首次连接修复
+
+在独立仓库中，通过 PTY 实际操作已安装原生终端，使用真实模型路线完成三文件 CSV 销售报告修复，14 项生成测试与独立的 CSV／Decimal／共享函数／CLI 检查通过；Ctrl+G 实际展示修改文件和 diff。运行中的等待任务按 Esc 后留下未完成记录，后续文件写入未执行，排队消息保持暂停，明确 Ctrl+S 后才运行。中文未发送草稿退出后通过 `--continue` 回到编辑器，追加内容后完整发送并完成任务；重启与 `/reconnect` 均未重跑旧文件操作，任务结束后用户手动修改的文件哈希保持不变。
+
+真实使用发现首次 SDK 缓存构建位于 ACP 握手之前。无 prompt 对照中，空缓存原实现 `initialize` 为 21.963 秒，缓存构建耗时 20.285 秒。现改为握手后、首次模型准备时在线程中执行，多个会话共享准备；模型客户端仍在事件循环创建，取消一个会话不取消其他会话所需准备，关闭 adapter 会回收准备协程。空缓存修复后 `initialize` 为 6.280 秒，缓存构建发生在其后。此次 `session/new` 总计 38.196 秒，对比原实现 27.789 秒，不能据此宣称整体冷启动变快；可确认的是连接不再被缓存构建挡住，准备时协议可响应。
+
+新增慢缓存握手、并发／取消、失败和关闭回收回归；最终 CLI 17 passed，实际 SDK 缓存测试 1 passed，较广定向组其余 111 passed、3 个已有 xfailed；旧测试的 mock 已按新准备回调更新并单独通过。Ruff、格式及 diff 检查通过。最终包安装后无 prompt 检查再次通过：已有缓存握手 3.479 秒，session/new 8.967 秒；真实 TUI 重开原会话、显示状态与退出正常。
+
+最终候选包：`dist/terminal-windows-ready/aster-terminal-0.0.13.dev15-windows-x64.zip`，SHA256 `530566d9d4cba532d76959ff147a3619a5924b4158316da511f844472c6d0bbb`。详细记录在 `results/terminal-e2e-20261120/README.md`、`terminal-evidence.json` 和 `diag-startup-*.json`；早先候选包保留用于对照。
+
+未验证长期连续使用、用户实际大型仓库、历史发布版升级或 microVM。首次超过两分钟的等待未在独立对照中完整复现，不能全部归因于缓存；后台准备线程不能被协程取消强制终止，进程退出仍由现有 supervisor／Windows Job 管理。
+
+## 2026-11-20：Windows 安装交付与编码任务验收
+
+已构建 `0.0.13.dev15` Windows x64 候选包，包含原生终端和五个同版 Python wheel。安装器校验文件哈希、固定第三方依赖版本，在独立 uv tool 环境安装；再次安装只替换自身组件，遇到其他程序占用同名启动器会拒绝覆盖。普通纯 Python wheel 和源码包构建仍通过。
+
+本机在源码目录外分别用 Python 3.12.13、3.13.12 全新安装并验证，逐包确认导入来自工具环境，终端查找精确命中已安装的 `aster_cli/bin/aster.exe`。3.13 环境还执行了实际重装：ACP 会话恢复未重跑旧文件编辑，用户后来修改的文件保持原样，随后可完成另一轮任务；草稿与配置文件字节保持不变。这是同版重装验证，不是历史发布版升级或真实终端草稿界面验收。
+
+新增安装与验收工具的回归共 21 passed，Ruff 和格式检查通过。Windows CI 已接入这些回归、完整包构建、仓库外安装和重装检查，并保留产物及结果；本轮没有触发远端 CI。全仓 SPDX 检查仍被本轮前已有的 `.archify/.../memory/author.py` 与 `runtime/author.py` 缺少声明阻挡，新增 Python 文件均有声明。
+
+可交付产物位于 `dist/terminal-windows-final/aster-terminal-0.0.13.dev15-windows-x64.zip`，SHA256 为 `68437dba7c6d8c24e5b6989ed82ca731b272189b8d00bb74b24bfadd5ea8bb10`。安装证据在 `results/terminal-release-20261120/`。该包来自未提交工作区，manifest 明确标为 `dirty=true`；首次安装仍需 uv，并可能下载 Python 和第三方依赖。
+
+固定十个小型编码任务，通过现有 `CodingAgent` 调用模型，由独立检查判分。首次模型 `auto/deepseek-v4.1-flash`、每任务 180 秒／8 次调用／每次 4,096 输出 token、无端点重试，结果 6/10 完成，总耗时 430.268 秒、74 次调用、输入 646,816 token、输出 34,896 token。费用缺少可信价格，保留为未知。
+
+独立复核产出的代码为 9/10 通过：CSV、时区排序、相对路径校验已实现，但未在预算内正常结束；共享函数重构只添加了 helper，漏改两个调用方。原报告和独立复核分别保留在 `results/terminal-acceptance-20261120-baseline/report.json` 和 `verification-audit.json`，没有用复测覆盖失败。四个失败项在 12 次调用上限的对照中全部通过，总耗时 230.905 秒、35 次调用；这份不同条件的子集结果不能与首次结果拼成一次 10/10。对照保存在 `results/terminal-acceptance-20261120-budget12/`。
+
+随后在同一模型、同一冻结任务集和每任务 12 次调用／180 秒／每次 4,096 输出 token 条件下完整重跑，10/10 正常完成且独立代码验收全部通过。总耗时 511.254 秒、80 次调用、输入 732,686 token、输出 42,406 token，费用仍为未知；没有人工修改任务产出。结果在 `results/terminal-acceptance-20261120-candidate12/report.json`。这证明该预算下本次小型任务基线通过，未修改保存模型配置或产品提示，也不代表 8 次调用预算的问题已经消失。
+
+这套任务只衡量小型编程工作，不代表真实大仓库、完整终端操作或沙箱隔离。Live runner 当前限原生 Windows，由 Job Object 在截止时清理 worker 及其子进程；离线任务自检可跨平台执行。历史版本升级、真实 microVM、长期连续使用及真实任务中断恢复尚未验证。
+
+## 2026-11-20：Windows 定向验收基线
+
+在当前未提交工作区执行了发布说明中的四组定向检查，结果共 193 passed、0 failed：
+
+- 原生宿主与 Python 终端启动器：126 passed。
+- Rust `cli`、`first_send`、`startup_recovery`、`recovery_and_rollback`：40 passed。
+- Rust 库中 `cancel` 筛选：19 passed，包含真实 Python ACP 后端配合 FakeLLM 的取消与后续请求。
+- Rust 主程序中 `draft` 筛选：8 passed，包含退出保存失败及并发草稿冲突保护。
+
+执行使用现有依赖与离线模式；Python 每项测试设置 60 秒超时，Rust ACP 测试使用仓库虚拟环境。未调用真实模型、启动 microVM、验证新机器安装或升级，也未重跑全量检查。本轮结果只建立当前工作区的定向基线，不能代替指定提交和构建产物的候选版本验收。
+
 ## 2026-11-10：审查问题修复
 
 Windows 终端多行粘贴现在完整进入草稿，只有显式 Enter 才会发送。输入层保留粘贴边界，支持分批传入的标记、中文、emoji、CRLF、空行和首尾空白；粘贴内容中的控制字符不会触发取消或退出。单次 Esc、双 Esc、双 Ctrl+C、方向键、Alt+Enter、鼠标及窗口缩放继续工作。退出时先结束输入读取，再恢复鼠标和普通输入模式。
@@ -64,7 +115,7 @@ Rust 和终端证据：`E:\aster\.codex-debug\tui-rewind-20261110`。Python JUni
 - 第一次 Ctrl+C 只显示退出确认，不取消任务、不清空草稿；两秒内再次 Ctrl+C 才退出。其他按键、粘贴、鼠标操作或确认超时会取消本次确认。
 - 退出确认独立于任务状态，空闲、工作中和弹窗中都能显示；取消确认后仍显示原任务状态。
 - 任务取消超过 20 秒仍未结束时，只提示仍在等待，保持 Cancelling 和队列暂停。TUI 不会因为这次等待自动退出或停止后端；收到请求终结响应后才恢复可用。
-- 明确退出仍支持 Ctrl+Q、空输入时 Ctrl+D 和 `/exit`，并执行有期限的后端清理。
+- 明确退出支持 Ctrl+Q 和 `/exit`，并执行有期限的后端清理。
 
 本次验证：
 
@@ -108,10 +159,10 @@ Windows 首次扩展回归中，已有输入历史并发测试曾遇到 250 毫�
 
 本机证据位于 `E:\aster\.codex-debug\tui-stability-20261110`：`windows-final.log`、`terminal_smoke.py`、`terminal-results.json` 及各场景终端记录。CLI JUnit 为 `E:\aster\.codex-debug\connect-investigation-20261110\tui-stability-cli-20261110.xml`。
 
-### 当前边界
+### 当时的边界（历史记录）
 
-- 未发送草稿与队列仍只保存在内存，退出后不会恢复；本轮修复的是同一进程内切换会话时的草稿保留。
+- 当时未发送草稿与队列只保存在内存；本轮修复的是同一进程内切换会话时的草稿保留。当前版本已支持持久化恢复，详见[Recovery](../README.md#recovery)。
 - 忙锁时提交任务和内存历史继续工作，但该条输入可能未写入独立的输入回忆文件，界面会提示。
 - 原生 TUI 程序仍需构建或单独分发，Python wheel 暂未打包该程序。
 
-后续自用验收重点是安装启动是否顺畅、真实开发任务是否能完整结束，以及异常退出后的未发送输入恢复。
+候选版本仍须验证安装启动、真实开发任务完成、异常退出后的输入恢复及升级后的历史兼容；历史通过结果不能代替当前候选版本的验收。

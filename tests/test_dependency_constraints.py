@@ -27,7 +27,8 @@ from packaging.requirements import Requirement
 )
 def test_litellm_excludes_known_regression_and_allows_future_fixes(version, allowed):
     """Exclude measured regressions without placing a ceiling on future fixes."""
-    project = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+    with (Path(__file__).resolve().parents[1] / "pyproject.toml").open("rb") as stream:
+        project = tomllib.load(stream)
     requirements = [Requirement(value) for value in project["project"]["dependencies"]]
     requirement = next(value for value in requirements if value.name == "litellm")
     assert requirement.specifier.contains(version, prereleases=True) is allowed

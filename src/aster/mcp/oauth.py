@@ -14,7 +14,6 @@ import asyncio
 import base64
 import contextlib
 import hashlib
-import html
 import json
 import logging
 import os
@@ -73,6 +72,9 @@ class OAuthToken:
         token_type: Token type (typically "Bearer")
         expires_in: Token expiration time in seconds (if provided)
         refresh_token: Refresh token (if provided)
+        authorization_server: Authorization server that issued these credentials
+        token_endpoint: Endpoint to which these credentials may be sent
+        resource: Protected resource for which these credentials were obtained
     """
 
     access_token: str
@@ -82,11 +84,16 @@ class OAuthToken:
     obtained_at: float = 0.0
     client_id: str | None = None
     client_secret: str | None = None
+    authorization_server: str | None = None
+    token_endpoint: str | None = None
+    resource: str | None = None
 
     def is_expired(self, leeway: float = 60.0) -> bool:
         """True if the access token is at/near expiry (with a safety leeway)."""
-        if not self.expires_in:
+        if self.expires_in is None:
             return False
+        if self.expires_in <= 0:
+            return True
         return time.time() >= (self.obtained_at + self.expires_in - leeway)
 
 
@@ -407,21 +414,35 @@ class OAuthHandler:
             return
 
         async with httpx.AsyncClient() as client:
-            response = await client.post(
-                self.config.registration_endpoint,
-                json={"redirect_uris": [redirect_uri]},
-                timeout=10.0,
-            )
-            if response.status_code not in (200, 201):
-                raise RuntimeError(
-                    f"Client registration failed: {response.status_code} {response.text}"
+            try:
+                response = await client.post(
+                    self.config.registration_endpoint,
+                    json={"redirect_uris": [redirect_uri]},
+                    timeout=10.0,
                 )
-            data = response.json()
-            self.config.client_id = data.get("client_id")
+            except httpx.RequestError:
+                raise RuntimeError(
+                    "Client registration failed before a valid HTTP response"
+                ) from None
+            if response.status_code not in (200, 201):
+                raise RuntimeError(f"Client registration failed (HTTP {response.status_code})")
+            try:
+                data = response.json()
+            except ValueError:
+                raise RuntimeError(
+                    f"Client registration returned invalid JSON (HTTP {response.status_code})"
+                ) from None
+            if (
+                not isinstance(data, dict)
+                or not isinstance(data.get("client_id"), str)
+                or not data["client_id"]
+            ):
+                raise RuntimeError(
+                    f"Client registration response did not include client_id (HTTP {response.status_code})"
+                )
+            self.config.client_id = data["client_id"]
             self.config.client_secret = data.get("client_secret")
-            if not self.config.client_id:
-                raise RuntimeError("Client registration response did not include client_id")
-            logger.info(f"Successfully registered OAuth client: {self.config.client_id}")
+            logger.info("Successfully registered OAuth client")
 
     async def authorize(self, open_browser: bool = True) -> str:
         """Perform OAuth authorization flow.
@@ -545,10 +566,10 @@ class OAuthHandler:
                         "<p>You can close this tab and retry.</p>",
                     )
                 elif "error" in params:
-                    error_info.append(params["error"][0])
+                    error_info.append("authorization server rejected the request")
                     body = _html_page(
                         "Authorization Failed",
-                        f"<p style='color:red'>Error: {html.escape(params['error'][0])}</p>"
+                        "<p style='color:red'>The authorization server rejected the request.</p>"
                         "<p>You can close this tab.</p>",
                     )
                 elif "code" in params:
@@ -697,7 +718,20 @@ class OAuthHandler:
             try:
                 response = await client.post(self.config.token_endpoint, data=data)
                 response.raise_for_status()
-                token_data = response.json()
+                try:
+                    token_data = response.json()
+                except ValueError:
+                    raise RuntimeError(
+                        f"Token exchange returned invalid JSON (HTTP {response.status_code})"
+                    ) from None
+                if (
+                    not isinstance(token_data, dict)
+                    or not isinstance(token_data.get("access_token"), str)
+                    or not token_data["access_token"]
+                ):
+                    raise RuntimeError(
+                        f"Token exchange response missing 'access_token' (HTTP {response.status_code})"
+                    )
 
                 logger.info("Token exchange successful!")
 
@@ -722,13 +756,15 @@ class OAuthHandler:
 
                 # Provide helpful error message for common issues
                 error_msg = f"Failed to exchange authorization code for token (HTTP {e.response.status_code})"
-                if error_json and error_json.get("error") == "invalid_grant":
+                if isinstance(error_json, dict) and error_json.get("error") == "invalid_grant":
                     error_msg += (
                         "\nThe authorization code may have expired or already been used. "
                         "Authorization codes are typically valid for only a few minutes. "
                         "Please try the OAuth flow again to get a fresh code."
                     )
-                raise RuntimeError(error_msg) from e
+                raise RuntimeError(error_msg) from None
+            except httpx.RequestError:
+                raise RuntimeError("Token exchange failed before a valid HTTP response") from None
 
     async def client_credentials_token(self) -> OAuthToken:
         """Fetch a token via the non-interactive client_credentials grant.
@@ -755,18 +791,31 @@ class OAuthHandler:
             data["resource"] = self.config.resource
 
         async with httpx.AsyncClient() as client:
-            response = await client.post(self.config.token_endpoint, data=data, timeout=30.0)
             try:
+                response = await client.post(self.config.token_endpoint, data=data, timeout=30.0)
                 response.raise_for_status()
             except httpx.HTTPStatusError as e:
-                detail = e.response.text if e.response is not None else str(e)
                 raise RuntimeError(
-                    f"client_credentials token request failed "
-                    f"(HTTP {e.response.status_code}): {detail}"
-                ) from e
-            td = response.json()
-        if "access_token" not in td:
-            raise RuntimeError(f"client_credentials token response missing 'access_token': {td}")
+                    f"client_credentials token request failed (HTTP {e.response.status_code})"
+                ) from None
+            except httpx.RequestError:
+                raise RuntimeError(
+                    "client_credentials token request failed before a valid HTTP response"
+                ) from None
+            try:
+                td = response.json()
+            except ValueError:
+                raise RuntimeError(
+                    f"client_credentials token response is invalid JSON (HTTP {response.status_code})"
+                ) from None
+        if (
+            not isinstance(td, dict)
+            or not isinstance(td.get("access_token"), str)
+            or not td["access_token"]
+        ):
+            raise RuntimeError(
+                f"client_credentials token response missing 'access_token' (HTTP {response.status_code})"
+            )
         return OAuthToken(
             access_token=td["access_token"],
             token_type=td.get("token_type", "Bearer"),
@@ -935,14 +984,16 @@ async def _fetch_authorization_server_metadata(
         "/.well-known/openid-configuration",
     ):
         try:
-            response = await client.get(auth_server + suffix, timeout=5.0)
+            response = await client.get(auth_server.rstrip("/") + suffix, timeout=5.0)
         except Exception:
             continue
         if response.status_code == 200:
             try:
-                return response.json()
+                metadata = response.json()
             except Exception:
                 continue
+            if isinstance(metadata, dict):
+                return metadata
     return {}
 
 
@@ -972,11 +1023,17 @@ def _load_cached_token(server_url: str) -> OAuthToken | None:
         obtained_at=entry.get("obtained_at", 0.0),
         client_id=entry.get("client_id"),
         client_secret=entry.get("client_secret"),
+        authorization_server=entry.get("authorization_server"),
+        token_endpoint=entry.get("token_endpoint"),
+        resource=entry.get("resource"),
     )
 
 
 def _save_cached_token(server_url: str, token: OAuthToken) -> None:
-    """Persist ``token`` for ``server_url`` to the project token cache (chmod 600)."""
+    """Persist ``token`` to the project cache, with owner-only mode on POSIX.
+
+    Windows access control is inherited from the containing directory's ACL.
+    """
     path = _token_cache_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -994,6 +1051,9 @@ def _save_cached_token(server_url: str, token: OAuthToken) -> None:
             "obtained_at": token.obtained_at,
             "client_id": token.client_id,
             "client_secret": token.client_secret,
+            "authorization_server": token.authorization_server,
+            "token_endpoint": token.token_endpoint,
+            "resource": token.resource,
         }
         path.write_text(json.dumps(data, indent=2))
         with contextlib.suppress(OSError):
@@ -1034,8 +1094,14 @@ async def _refresh_access_token(
             client_id=client_id,
             client_secret=client_secret,
         )
-    except Exception as e:
-        logger.info(f"Refresh token exchange failed ({e}); falling back to full auth")
+    except httpx.HTTPStatusError as exc:
+        logger.info(
+            "Refresh token exchange failed (HTTP %s); falling back to full auth",
+            exc.response.status_code,
+        )
+        return None
+    except Exception:
+        logger.info("Refresh token exchange failed; falling back to full auth")
         return None
 
 
@@ -1055,11 +1121,17 @@ async def handle_mcp_oauth(
     """Handle OAuth flow for MCP server, reusing a cached token when possible.
 
     Resolution order:
-      1. A non-expired cached access token for ``server_url`` is returned as-is.
-      2. A cached refresh token is exchanged for a fresh access token.
+      1. Cached credentials must match the discovered authorization server,
+         token endpoint, resource and any explicitly configured client.
+      2. A matching access token is returned or its refresh token is exchanged.
       3. A full authorization flow runs — either the local-callback browser flow
          or, when ``manual=True``, the out-of-band (link + pasted code) flow for
          headless/remote sessions.
+
+    Legacy cache entries without an authorization binding require one-time
+    reauthorization. Verify the server configuration, remove that server's entry
+    from ``.aster/mcp_tokens.json``, then reconnect. A missing or changed binding
+    never falls through to a flow that might resend a configured client secret.
 
     Args:
         server_url: MCP server URL
@@ -1083,6 +1155,7 @@ async def handle_mcp_oauth(
     auth_endpoint = None
     token_endpoint = None
     registration_endpoint = None
+    auth_server = None
     grant_types: list[str] = []
     resource: str | None = None
 
@@ -1101,18 +1174,41 @@ async def handle_mcp_oauth(
             authorization_servers = await _discover_authorization_servers(client, server_url)
 
         if authorization_servers:
-            auth_server = authorization_servers[0].rstrip("/")
+            if (
+                not isinstance(authorization_servers, list)
+                or not isinstance(authorization_servers[0], str)
+                or not authorization_servers[0]
+            ):
+                raise ValueError("OAuth discovery returned invalid authorization_servers")
+            auth_server = authorization_servers[0]
             metadata = await _fetch_authorization_server_metadata(client, auth_server)
-            auth_endpoint = metadata.get("authorization_endpoint") or auth_server + "/authorize"
-            token_endpoint = metadata.get("token_endpoint") or auth_server + "/token"
-            registration_endpoint = (
-                metadata.get("registration_endpoint") or auth_server + "/register"
-            )
+            if metadata.get("issuer") is not None and metadata["issuer"] != auth_server:
+                raise ValueError(
+                    "OAuth discovery returned a mismatched authorization server issuer"
+                )
+            auth_base = auth_server.rstrip("/")
+            auth_endpoint = metadata.get("authorization_endpoint") or auth_base + "/authorize"
+            token_endpoint = metadata.get("token_endpoint") or auth_base + "/token"
+            registration_endpoint = metadata.get("registration_endpoint") or auth_base + "/register"
             grant_types = metadata.get("grant_types_supported") or []
 
     # 1/2. Reuse a cached token (or refresh it) before prompting for auth again.
     if use_cache:
         cached = _load_cached_token(server_url)
+        if cached and (
+            not auth_server
+            or not token_endpoint
+            or cached.authorization_server != auth_server
+            or cached.token_endpoint != token_endpoint
+            or cached.resource != resource
+            or (client_id is not None and client_id != cached.client_id)
+            or (client_secret is not None and client_secret != cached.client_secret)
+        ):
+            raise RuntimeError(
+                "MCP OAuth credential binding is missing or changed. Verify the authorization "
+                "server configuration, then remove this server's entry from "
+                ".aster/mcp_tokens.json and reconnect to authorize again."
+            )
         if cached and not cached.is_expired():
             logger.info("Using cached MCP OAuth token")
             return cached
@@ -1126,6 +1222,9 @@ async def handle_mcp_oauth(
                 resource,
             )
             if refreshed:
+                refreshed.authorization_server = auth_server
+                refreshed.token_endpoint = token_endpoint
+                refreshed.resource = resource
                 logger.info("Refreshed MCP OAuth token from cache")
                 _save_cached_token(server_url, refreshed)
                 return refreshed
@@ -1171,17 +1270,19 @@ async def handle_mcp_oauth(
     # right path for headless/agent connects (and for servers like maas-nvbugs
     # that reject the OOB redirect used by the manual authorization_code flow).
     # Dynamic registration (run inside the auth flows) supplies the client_secret.
+    token = None
     if "client_credentials" in grant_types:
         if config.client_secret is None and config.registration_endpoint:
             await handler._register_dynamic_client(redirect_uri)
         if config.client_id and config.client_secret:
             logger.info("Using client_credentials grant (non-interactive)")
             token = await handler.client_credentials_token()
-            if use_cache:
-                _save_cached_token(server_url, token)
-            return token
 
-    token = await handler.complete_flow(open_browser=open_browser)
+    if token is None:
+        token = await handler.complete_flow(open_browser=open_browser)
+    token.authorization_server = auth_server
+    token.token_endpoint = token_endpoint
+    token.resource = resource
     if use_cache:
         _save_cached_token(server_url, token)
     return token

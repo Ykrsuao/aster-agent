@@ -102,6 +102,64 @@ async def test_local_helper_dependency_loads_in_fresh_interpreter(tmp_path, monk
             sys.modules.pop(name, None)
 
 
+@pytest.mark.parametrize("transport", ["interpreter", "microvm"])
+async def test_dynamic_tool_class_loads_from_codeact_builtins(tmp_path, monkeypatch, transport):
+    from types import SimpleNamespace
+
+    from aster.runtime.sandbox.paths import PathMap
+    from aster.strategies.codeact import CodeActStrategy
+
+    service_module = types.ModuleType("aster_bootstrap_dynamic_service")
+    tool_module = types.ModuleType("aster_bootstrap_dynamic_tool")
+    for module in (service_module, tool_module):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    exec("class Service: pass\n", service_module.__dict__)
+    exec(
+        "from aster.skill import Skill\n"
+        "class DynamicTool(Skill):\n"
+        "    def double(self, value: int) -> int:\n"
+        "        return value * 2\n",
+        tool_module.__dict__,
+    )
+    agent = service_module.Service()
+    agent.tool = tool_module.DynamicTool()
+    # Loaded skills are instance attributes, not imports in the agent module.
+    # CodeAct exposes their classes through its execution builtins.
+    builtins = CodeActStrategy()._build_builtins(
+        SimpleNamespace(agent=agent), SimpleNamespace(kwargs={}, return_type=int)
+    )
+    executor = SandboxedExecutor(
+        agent,
+        SandboxConfig(workspace=str(tmp_path)),
+        cell_timeout=5,
+        framework_builtins=builtins,
+    )
+    try:
+        if transport == "microvm":
+            result = await executor.run_cell("DynamicTool().double(21)")
+            assert result.error is None, result.error
+            assert result.returned_value == 42
+            return
+        executor._paths = PathMap([])
+        executor._guest_allow = []
+        payload = dumps_namespace(executor._bootstrap(), modules=executor._modules())
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import cloudpickle,sys\n"
+                "data=cloudpickle.loads(sys.stdin.buffer.read())\n"
+                "assert data['builtins']['DynamicTool']().double(21) == 42\n",
+            ],
+            input=payload,
+            capture_output=True,
+            timeout=15,
+        )
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+    finally:
+        await executor.aclose()
+
+
 async def test_codeact_v2_bootstrap_does_not_capture_host_task(monkeypatch):
     import asyncio
     from types import SimpleNamespace

@@ -14,19 +14,24 @@ mod platform {
 
     use anyhow::{bail, Context, Result};
     use tokio::process::{Child, Command};
-    use windows_sys::Win32::Foundation::{FILETIME, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{
+        ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, FILETIME, INVALID_HANDLE_VALUE, WAIT_FAILED,
+        WAIT_OBJECT_0,
+    };
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
     };
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
-        JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
-        TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation, QueryInformationJobObject,
+        SetInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+        JOBOBJECT_BASIC_PROCESS_ID_LIST, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
     use windows_sys::Win32::System::Threading::{
-        GetThreadTimes, OpenThread, ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED,
-        THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME,
+        GetThreadTimes, OpenProcess, OpenThread, ResumeThread, WaitForSingleObject,
+        CREATE_NO_WINDOW, CREATE_SUSPENDED, PROCESS_SYNCHRONIZE, THREAD_QUERY_LIMITED_INFORMATION,
+        THREAD_SUSPEND_RESUME,
     };
 
     // OwnedHandle is Send and closes the non-inheritable job on every error/drop
@@ -88,7 +93,7 @@ mod platform {
             Ok(())
         }
 
-        pub(crate) fn terminate(&mut self) -> Result<()> {
+        fn terminate(&mut self) -> Result<()> {
             // SAFETY: the owned job handle is live. This includes nested child jobs.
             if unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) } == 0 {
                 return Err(io::Error::last_os_error())
@@ -98,25 +103,35 @@ mod platform {
         }
 
         pub(crate) async fn terminate_and_wait(&mut self) -> Result<()> {
+            // Include handle collection in the budget. Synchronous Windows APIs
+            // cannot be preempted, so reject an overrun as soon as they return.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let before = self.accounting();
+            let processes = self.process_handles();
             self.terminate()?;
-            tokio::time::timeout(Duration::from_secs(5), async {
+            let total_processes = before?.TotalProcesses;
+            let processes = processes?;
+            tokio::time::timeout_at(deadline, async {
                 loop {
-                    let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
-                    // SAFETY: the live job writes into a correctly sized buffer.
-                    if unsafe {
-                        QueryInformationJobObject(
-                            self.job.as_raw_handle(),
-                            JobObjectBasicAccountingInformation,
-                            (&mut info as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
-                            size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
-                            null_mut(),
-                        )
-                    } == 0
-                    {
-                        return Err(io::Error::last_os_error())
-                            .context("Could not inspect backend cleanup");
+                    let info = self.accounting()?;
+                    if info.TotalProcesses != total_processes {
+                        bail!("Backend processes started while cleanup was preparing");
                     }
-                    if info.ActiveProcesses == 0 {
+                    let mut exited = true;
+                    for process in &processes {
+                        // SAFETY: owned process handles retain SYNCHRONIZE access until cleanup ends.
+                        let state = unsafe { WaitForSingleObject(process.as_raw_handle(), 0) };
+                        if state == WAIT_FAILED {
+                            return Err(io::Error::last_os_error())
+                                .context("Could not wait for backend cleanup");
+                        }
+                        exited &= state == WAIT_OBJECT_0;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        bail!("Backend cleanup exceeded its five-second deadline");
+                    }
+                    // Job accounting can reach zero before process teardown releases file mappings.
+                    if info.ActiveProcesses == 0 && exited {
                         return Ok(());
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -124,6 +139,76 @@ mod platform {
             })
             .await
             .context("Backend descendants did not exit after being terminated")?
+        }
+
+        fn accounting(&self) -> Result<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION> {
+            let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+            // SAFETY: the live job writes into a correctly sized buffer.
+            if unsafe {
+                QueryInformationJobObject(
+                    self.job.as_raw_handle(),
+                    JobObjectBasicAccountingInformation,
+                    (&mut info as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                    size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    null_mut(),
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error())
+                    .context("Could not inspect backend cleanup");
+            }
+            Ok(info)
+        }
+
+        fn process_handles(&self) -> Result<Vec<OwnedHandle>> {
+            let header_words = (size_of::<JOBOBJECT_BASIC_PROCESS_ID_LIST>() - size_of::<usize>())
+                / size_of::<usize>();
+            let mut buffer = vec![0usize; header_words + 32];
+            for _ in 0..3 {
+                let info = buffer
+                    .as_mut_ptr()
+                    .cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>();
+                let bytes = u32::try_from(buffer.len() * size_of::<usize>())
+                    .context("Backend process list is too large")?;
+                // SAFETY: usize storage provides alignment and space for the header and PID array.
+                let success = unsafe {
+                    QueryInformationJobObject(
+                        self.job.as_raw_handle(),
+                        JobObjectBasicProcessIdList,
+                        info.cast(),
+                        bytes,
+                        null_mut(),
+                    )
+                };
+                if success == 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() == Some(ERROR_MORE_DATA as i32) {
+                        // SAFETY: the API initializes the header even when the PID buffer is small.
+                        let count = unsafe { (*info).NumberOfAssignedProcesses as usize };
+                        buffer.resize(header_words + count, 0);
+                        continue;
+                    }
+                    return Err(error).context("Could not list backend processes for cleanup");
+                }
+                // SAFETY: a successful query reports how many initialized PIDs fit in our buffer.
+                let count = unsafe { (*info).NumberOfProcessIdsInList as usize };
+                let mut processes = Vec::with_capacity(count);
+                for &pid in &buffer[header_words..header_words + count] {
+                    // SAFETY: only retain a waitable handle; termination still targets our job.
+                    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid as u32) };
+                    if handle.is_null() {
+                        let error = io::Error::last_os_error();
+                        if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+                            continue; // The process exited before its handle could be opened.
+                        }
+                        return Err(error).context("Could not retain backend process for cleanup");
+                    }
+                    // SAFETY: successful OpenProcess transferred this handle to us.
+                    processes.push(unsafe { OwnedHandle::from_raw_handle(handle) });
+                }
+                return Ok(processes);
+            }
+            bail!("Backend process list changed while cleanup was preparing")
         }
     }
 
@@ -239,7 +324,7 @@ mod platform {
             ))
         }
 
-        pub(crate) fn terminate(&mut self) -> Result<()> {
+        fn terminate(&mut self) -> Result<()> {
             if !self.terminated {
                 // SAFETY: the positive PID was obtained from our spawned child;
                 // negating it targets only that child's dedicated process group.

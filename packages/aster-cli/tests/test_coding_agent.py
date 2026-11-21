@@ -6,10 +6,41 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from aster_cli.coding import CodingAgent, discover_agent_instruction_files
+from aster_cli.coding import (
+    CodingAgent,
+    CodingSlashCommandRegistry,
+    discover_agent_instruction_files,
+)
 
 from aster.skill import Skill, get_slash_commands, slash_command
 from aster.unifiedllm import FakeLLMClient
+
+
+@pytest.mark.sandbox
+async def test_coding_todo_objects_cross_sandbox_boundary(tmp_path):
+    from aster.runtime.sandbox.config import SandboxConfig
+    from aster.runtime.sandbox.executor import SandboxedExecutor
+    from aster.runtime.sandbox.wire import Codec
+
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    executor = SandboxedExecutor(agent, SandboxConfig(require=False), cell_timeout=None)
+    try:
+        todo = agent.todo.add("Verify the documented object argument", kept="original")
+        response = await executor._service_tool_call(
+            {
+                "type": "tool_call",
+                "tool_call_id": 1,
+                "kind": "call",
+                "path": ["todo", "set_var"],
+                "payload": Codec().dumps(((todo, "checkpoint", "verified"), {})),
+            }
+        )
+        assert response["ok"] is True, response.get("error", response)
+        assert agent.todo.get_var(todo, "checkpoint") == "verified"
+        assert agent.todo.get_var(todo, "kept") == "original"
+    finally:
+        await executor.aclose()
+        await agent.close()
 
 
 async def test_close_awaits_background_components_before_closing_shared_client(tmp_path):
@@ -129,6 +160,85 @@ async def test_library_directory_can_be_scoped_by_the_host(tmp_path):
         await agent.close()
 
 
+async def test_saved_library_commands_use_each_workspace_after_reopening(tmp_path):
+    roots = [tmp_path / name for name in ("first", "second")]
+    for root in roots:
+        library = root / ".aster" / "libs" / "saved_workflow"
+        library.mkdir(parents=True)
+        (library / "pyproject.toml").write_text('[project]\nname = "saved_workflow"\n')
+        (library / "__init__.py").write_text(
+            "from aster.skill import Skill, slash_command\n"
+            "class SavedWorkflow(Skill):\n"
+            "    requires = ('aster.shell', 'aster.repo', 'aster.todo', 'aster.libwriting')\n"
+            "    def attach(self, agent):\n"
+            "        super().attach(agent)\n"
+            "        assert agent.skills['aster.libwriting'] is agent.libs\n"
+            "    @slash_command('saved-workflow', output_to_agent=False)\n"
+            "    def workspace(self):\n"
+            f"        return {root.name!r}\n"
+        )
+    agents = []
+    try:
+        for root in (*roots, roots[0]):
+            agent = CodingAgent(llm=FakeLLMClient(), cwd=root, libs_dir=root / ".aster" / "libs")
+            agents.append(agent)
+            commands = CodingSlashCommandRegistry(agent)
+            try:
+                assert "local.saved_workflow" in agent.skills.activated()
+                assert (await commands.invoke("saved-workflow", "")).value == root.name
+            finally:
+                commands.close()
+        await agents[-1].close()
+        reopened = CodingAgent(
+            llm=FakeLLMClient(), cwd=roots[0], libs_dir=roots[0] / ".aster" / "libs"
+        )
+        agents[-1] = reopened
+        commands = CodingSlashCommandRegistry(reopened)
+        try:
+            assert (await commands.invoke("saved-workflow", "")).value == "first"
+        finally:
+            commands.close()
+    finally:
+        for agent in agents:
+            await agent.close()
+
+
+async def test_saved_library_cannot_claim_the_library_writer(tmp_path):
+    library = tmp_path / "libs" / "libs"
+    library.mkdir(parents=True)
+    (library / "pyproject.toml").write_text('[project]\nname = "libs"\n')
+    (library / "__init__.py").write_text(
+        "from aster.skill import Skill\nclass SavedLibrary(Skill):\n    pass\n"
+    )
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=library.parent)
+    try:
+        assert agent.skills["aster.libwriting"] is agent.libs
+        assert "local.libs" not in agent.skills.loaded()
+        assert agent.libs.path("created") == str(library.parent / "created")
+    finally:
+        await agent.close()
+
+
+async def test_new_library_reload_registers_its_command(tmp_path):
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
+    commands = CodingSlashCommandRegistry(agent)
+    try:
+        await agent.libs.create("new_workflow", "Saved workflow")
+        Path(agent.libs.path("new_workflow", "__init__.py")).write_text(
+            "from aster.skill import Skill, slash_command\n"
+            "class Workflow(Skill):\n"
+            "    @slash_command('new-workflow', output_to_agent=False)\n"
+            "    def run(self):\n"
+            "        return 'registered'\n"
+        )
+        assert "written and loaded" in await agent.libs.reload("new_workflow")
+        assert "local.new_workflow" in agent.skills.activated()
+        assert (await commands.invoke("new-workflow", "")).value == "registered"
+    finally:
+        commands.close()
+        await agent.close()
+
+
 async def test_coding_agent_declares_the_host_input_channels(tmp_path):
     """slash_commands and system_messages belong to the coding host.
 
@@ -170,10 +280,10 @@ def test_repository_instructions_are_read_boundedly(tmp_path, monkeypatch):
 
     (tmp_path / ".git").mkdir()
     reads: list[int | None] = []
-    real_open = Path.open
+    real_fdopen = instructions.os.fdopen
 
-    def spying_open(self, *args, **kwargs):
-        stream = real_open(self, *args, **kwargs)
+    def spying_fdopen(fd, *args, **kwargs):
+        stream = real_fdopen(fd, *args, **kwargs)
         real_read = stream.read
 
         def read(size=-1):
@@ -183,7 +293,7 @@ def test_repository_instructions_are_read_boundedly(tmp_path, monkeypatch):
         stream.read = read  # type: ignore[method-assign]
         return stream
 
-    monkeypatch.setattr(Path, "open", spying_open)
+    monkeypatch.setattr(instructions.os, "fdopen", spying_fdopen)
     monkeypatch.setattr(instructions, "_MAX_INSTRUCTION_FILE_CHARS", 100)
     (tmp_path / "AGENTS.md").write_text("x" * 10_000)
 

@@ -63,11 +63,7 @@ from aster.strategies._completion_guard import completion_binding_errors
 from aster.strategies.base import RuntimeServices, build_sampling_kwargs
 from aster.strategies.codeact_errors import format_validation_error
 from aster.strategies.composite import CompositeStrategy
-from aster.strategies.generated_code import (
-    ExecutionNamespaceBuilder,
-    GeneratedCodeValidator,
-    HelperFunctionManager,
-)
+from aster.strategies.generated_code import GeneratedCodeValidator
 from aster.strategies.loop_guard import LoopGuard, action_fingerprint, mentions_return_result
 from aster.strategies.template import TemplateStrategy
 from aster.strategy_validation import (
@@ -290,6 +286,8 @@ class CodeActSession:
     consecutive_api_errors: int = 0
     consecutive_text_only: int = 0
     session_locals: dict[str, Any] = field(default_factory=dict)
+    # shortcut: reused helpers keep prior-generation globals; revisit cross-generation persistence.
+    execution_namespace: dict[str, Any] = field(default_factory=dict)
     out_accessor: Any = field(default=None)  # OutAccessor instance, created lazily
     sandbox_executor: Any = field(default=None)  # SandboxedExecutor when backend="sandbox"
     execution_count: int = 0
@@ -3254,9 +3252,8 @@ Standard Python builtins and agent instance (`self`) are available."""
             logger.warning(f"[CODEACT] Validation errors: {validation_errors}")
             return ExecutionResult(stdout="", error=Exception(error_msg), defined_methods={})
 
-        # Sandbox backend: the worker owns the persistent namespace and compiles
-        # its own helpers, so we skip the parent-side namespace/helper build and
-        # delegate the cell to the guarded worker process. Routing through
+        # Sandbox backend: the worker owns the persistent namespace and executes
+        # helper definitions, so delegate the cell to the guarded worker. Routing through
         # execute_code (rather than the executor directly) keeps the execute_python
         # middleware, before/after_code_execution hooks and events firing.
         run_kwargs: dict[str, Any]
@@ -3264,43 +3261,10 @@ Standard Python builtins and agent instance (`self`) are available."""
             # Validation of restrictions and the cell guard still runs on the parent.
             run_kwargs = {"sandbox_executor": session.sandbox_executor}
         else:
-            # Build execution namespace
-            strategy_extras: dict[str, Any] = {
-                "CodeActStrategy": type(self),
+            run_kwargs = {
+                "builtins": {**builtins, **session.session_locals},
+                "namespace": session.execution_namespace,
             }
-            try:
-                from aster.strategies.predict import PredictStrategy
-
-                strategy_extras["PredictStrategy"] = PredictStrategy
-            except ImportError:
-                pass
-
-            namespace = ExecutionNamespaceBuilder.build(
-                runtime.agent, extra={**builtins, **session.session_locals, **strategy_extras}
-            )
-
-            # Pre-compile helper function defs so @strategy decorators can see
-            # _generated_source at decoration time. Helpers are never attached to the agent.
-            helper_compiler = HelperFunctionManager()
-            helper_result = helper_compiler.apply(
-                code,
-                runtime.agent,
-                session.session_locals,
-                namespace=namespace,
-            )
-
-            if helper_result.errors:
-                error_msg = "Failed to define helper function(s):\n" + "\n".join(
-                    f"- {e}" for e in helper_result.errors
-                )
-                logger.warning(f"[CODEACT] Helper compile errors: {helper_result.errors}")
-                return ExecutionResult(stdout="", error=Exception(error_msg), defined_methods={})
-
-            if helper_result.installed:
-                logger.debug(f"[CODEACT] Compiled helpers: {helper_result.installed}")
-
-            # Execute with session locals
-            run_kwargs = {"builtins": {**builtins, **session.session_locals}}
 
         # Track this execution so the /activity slash command can report that
         # the agent is currently running a code cell (vs blocked on an LLM call).

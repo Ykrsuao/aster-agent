@@ -117,7 +117,9 @@ def test_receiver_requests_do_not_feed_global_tracing(receiver, monkeypatch):
 
         # Missing session is rejected before any database write. Use the real
         # routing/middleware stack without starting the database lifespan.
-        with contextlib.closing(TestClient(app)) as client:
+        with contextlib.closing(
+            TestClient(app, base_url="http://localhost", client=("127.0.0.1", 54321))
+        ) as client:
             response = client.post("/v1/journal/blocks", json=[])
         assert response.status_code == 400
         assert not collector.get_finished_spans(), "receiver request created recursive trace spans"

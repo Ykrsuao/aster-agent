@@ -272,7 +272,7 @@ class TestSanitizeCode:
         fenced = "```python\nasync def helper(self, x):\n    return x * 2\n```"
         cleaned, token = strip_code_fences(fenced)
         assert token == "```python"
-        # Must be valid Python (HelperFunctionManager.apply calls ast.parse)
+        # Cell validation must receive valid Python.
         tree = ast.parse(cleaned)
         assert any(isinstance(n, ast.AsyncFunctionDef) for n in tree.body)
 
@@ -1620,21 +1620,16 @@ class TestPurePythonExecuteCodeValidation:
 
 
 # ---------------------------------------------------------------------------
-# PurePythonStrategy._execute_code - helper method rejected (lines 720-726)
+# PurePythonStrategy._execute_code - target-named helper does not finish the task
 # ---------------------------------------------------------------------------
 
 
 class TestPurePythonHelperMethodErrors:
-    """Tests for helper method binding errors."""
+    """Helpers stay separate from the method being generated."""
 
     @pytest.mark.asyncio
-    async def test_helper_method_with_same_name_rejected(self):
-        """Helper method with same name as target is rejected (lines 708-717).
-
-        Note: When LLM wraps entire code in target method function def, the body
-        is extracted first. Rejection only fires when a separate helper function
-        is defined with the same name as the target alongside other statements.
-        """
+    async def test_helper_method_with_same_name_does_not_complete_task(self):
+        """Defining a separate target-named helper leaves the task running."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
             @strategy(PurePythonStrategy(max_iterations=5, max_retries=3))
@@ -1642,16 +1637,12 @@ class TestPurePythonHelperMethodErrors:
                 """Compute."""
                 ...
 
-        # Define a compute helper with the SAME name alongside other code.
-        # The HelperFunctionManager will see 'compute' as a helper (separate from target body)
-        # and reject it because it conflicts with the method being implemented.
-        # Note: pure function definitions without 'self' as first arg won't trigger
-        # the rejection; we need async def compute(self) as a standalone helper.
+        # A preceding assignment keeps this helper from being treated as a task wrapper.
         fake_llm = FakeLLMClient(
             scripted_responses=[
                 # This defines a compute function as a separate helper (not wrapping),
                 # alongside a non-self call that prevents extraction.
-                _resp("x = 1\nasync def compute(self):\n    return 99"),  # rejected
+                _resp("x = 1\nasync def compute(self):\n    return 99"),
                 _resp("return 42"),
             ]
         )
@@ -2946,39 +2937,21 @@ class TestCodeActExecuteCodeValidationErrors:
 
 
 class TestCodeActExecuteCodeHelperBindingError:
-    """Tests for _execute_code when helper method compilation reports errors."""
+    """Helper definition errors are reported by the approved runtime execution."""
 
     @pytest.mark.asyncio
     async def test_execute_code_returns_error_on_helper_binding_error(self):
-        """_execute_code should return error result when helper fails to compile (lines 1871-1875)."""
-        from aster.strategies.generated_code import (
-            HelperApplyResult,
-            HelperFunctionManager,
+        agent = Agent(llm=FakeLLMClient())
+        session = CodeActSession(5, 3, "compute", agent.event_manager)
+        result = await CodeActStrategy()._execute_code(
+            agent.runtime,
+            "@missing_decorator\ndef helper():\n    return 42",
+            {},
+            session,
+            "compute",
         )
-
-        strat = CodeActStrategy()
-        em = MagicMock()
-        em.add = MagicMock(return_value="evt1")
-        session = CodeActSession(
-            max_iterations=5, max_retries=3, target_method_name="compute", event_manager=em
-        )
-
-        rt = MagicMock()
-        rt.agent = MagicMock()
-        rt.event_manager = em
-
-        error_result = HelperApplyResult(installed=[], errors=["Failed to bind method"])
-        with patch.object(HelperFunctionManager, "apply", return_value=error_result):
-            result = await strat._execute_code(
-                rt,
-                "x = 1",
-                {},
-                session,
-                "compute",
-                tool_call_id="t1",
-            )
-
-        assert result.error is not None
+        assert isinstance(result.error, NameError)
+        await agent.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -3704,44 +3677,23 @@ class TestPurePythonHelperErrors:
 
 
 class TestCodeActHelperInstalledLogging:
-    """Tests for _execute_code helper installation."""
+    """Helper definitions remain available as cell locals."""
 
     @pytest.mark.asyncio
     async def test_execute_code_with_helper_that_gets_installed(self):
-        """When helper is installed, _execute_code should log it (lines 1877-1878)."""
-        from aster.events import ExecutionResult
-        from aster.strategies.generated_code import (
-            HelperApplyResult,
-            HelperFunctionManager,
+        agent = Agent(llm=FakeLLMClient())
+        session = CodeActSession(5, 3, "compute", agent.event_manager)
+        result = await CodeActStrategy()._execute_code(
+            agent.runtime,
+            "async def my_helper(self):\n    return 42",
+            {},
+            session,
+            "compute",
         )
-
-        strat = CodeActStrategy()
-        em = MagicMock()
-        em.add = MagicMock(return_value="evt1")
-        session = CodeActSession(
-            max_iterations=5, max_retries=3, target_method_name="compute", event_manager=em
-        )
-
-        rt = MagicMock()
-        rt.agent = MagicMock()
-        rt.event_manager = em
-        rt.execute_code = AsyncMock(
-            return_value=ExecutionResult(stdout="42", error=None, defined_methods={})
-        )
-
-        installed_result = HelperApplyResult(installed=["my_helper"], errors=[])
-        with patch.object(HelperFunctionManager, "apply", return_value=installed_result):
-            result = await strat._execute_code(
-                rt,
-                "async def my_helper(self): return 42",
-                {},
-                session,
-                "compute",
-                tool_call_id="t1",
-            )
-
-        # Should have executed (returned the mocked result)
-        assert result is not None
+        assert result.error is None
+        assert await result.captured_locals["my_helper"](agent) == 42
+        assert not hasattr(agent, "my_helper")
+        await agent.aclose()
 
 
 # ---------------------------------------------------------------------------
