@@ -6,7 +6,6 @@ import asyncio
 import threading
 from types import SimpleNamespace
 
-import cloudpickle
 import pytest
 
 from aster.agentdoc import doc
@@ -51,6 +50,8 @@ class _LoopbackConnection:
         self.message = wire.Codec().loads(data)
 
     def recv(self):
+        import cloudpickle
+
         response = asyncio.run(self.executor._service_tool_call(self.message))
         return cloudpickle.loads(dumps_namespace(response))
 

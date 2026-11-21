@@ -2121,9 +2121,9 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
     } else {
         None
     };
-    let desired_height = if kind == Overlay::Skills && state.skills.error.is_some() {
-        max_height
-    } else if kind == Overlay::Context && state.context_view.is_some() {
+    let desired_height = if (kind == Overlay::Skills && state.skills.error.is_some())
+        || (kind == Overlay::Context && state.context_view.is_some())
+    {
         max_height
     } else if kind == Overlay::Context {
         let mut rows = Vec::new();

@@ -456,6 +456,12 @@ jobs:
           uv run --no-sync python -m pytest -q
           tests/test_terminal_release.py
           tests/test_terminal_acceptance.py
+      - name: Install ripgrep
+        shell: pwsh
+        run: |
+          choco install ripgrep --no-progress -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rg --version
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:

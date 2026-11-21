@@ -157,6 +157,9 @@ class _RecordingClient:
         self.sandbox_ready = asyncio.Event()
         self.preparing = asyncio.Event()
         self.waiting_for_model = asyncio.Event()
+        self.smoke_received = asyncio.Event()
+        self.response_ready = asyncio.Event()
+        self.cancelled = asyncio.Event()
 
     async def request_permission(self, session_id, tool_call, options, **kwargs):
         return RequestPermissionResponse.model_validate(
@@ -172,10 +175,19 @@ class _RecordingClient:
                 self.preparing.set()
             if update.title == "Waiting for model":
                 self.waiting_for_model.set()
+            if update.title == "Response ready" and update.status == "completed":
+                self.response_ready.set()
+            if update.title == "Cancelled" and update.status == "failed":
+                self.cancelled.set()
         if isinstance(update, AvailableCommandsUpdate):
             self.commands_updated.set()
         if isinstance(update, AgentMessageChunk) and update.content.text == "Sandbox ready":
             self.sandbox_ready.set()
+        if (
+            isinstance(update, AgentMessageChunk)
+            and update.content.text == "ASTER ACP smoke test passed."
+        ):
+            self.smoke_received.set()
 
 
 def _write_protocol_skill(workspace: Path) -> None:
@@ -466,6 +478,7 @@ async def test_acp_sandbox_subprocess_runs_python_in_linux_guest(tmp_path):
             connection.prompt(session.session_id, [text_block("run smoke test")]), timeout=180
         )
         assert result.stop_reason == "end_turn"
+        await asyncio.wait_for(client.smoke_received.wait(), timeout=_HANG_TIMEOUT)
         assert any(
             isinstance(update, AgentMessageChunk)
             and update.content.text == "Interpreter platform: linux"
@@ -522,6 +535,7 @@ async def test_acp_sandbox_cancels_before_setup_then_reuses_session(tmp_path):
             await connection.cancel(session.session_id)
             result = await asyncio.wait_for(pending, timeout=_HANG_TIMEOUT)
             assert result.stop_reason == "cancelled"
+            await asyncio.wait_for(client.cancelled.wait(), timeout=_HANG_TIMEOUT)
             activity = [update for _, update in client.updates if _is_prompt_activity(update)]
             assert activity[-1].title == "Cancelled"
             assert activity[-1].status == "failed"
@@ -534,6 +548,11 @@ async def test_acp_sandbox_cancels_before_setup_then_reuses_session(tmp_path):
                 timeout=180,
             )
             assert result.stop_reason == "end_turn"
+            # ACP resolves responses before its queued notification callbacks finish.
+            await asyncio.wait_for(
+                asyncio.gather(client.smoke_received.wait(), client.response_ready.wait()),
+                timeout=_HANG_TIMEOUT,
+            )
             answers = [
                 update.content.text
                 for _, update in client.updates

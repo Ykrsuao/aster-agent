@@ -654,15 +654,14 @@ fn reverse_hunks(
             bail!("Selected hunk no longer fits the current file");
         }
         let mut normalize = checkout_crlf && before.is_empty();
-        let mut next = start;
-        for patch_line in hunk.lines.iter().filter(|line| line.kind != b'-') {
+        for (next, patch_line) in (start..).zip(hunk.lines.iter().filter(|line| line.kind != b'-'))
+        {
             if lines[next] != patch_line.bytes {
                 if normalized(lines[next]) != normalized(&patch_line.bytes) {
                     bail!("Selected hunk text changed; refresh and review again");
                 }
                 normalize |= lines[next].ends_with(b"\r\n") && !patch_line.bytes.ends_with(b"\r\n");
             }
-            next += 1;
         }
         for line in &lines[cursor..start] {
             output.extend_from_slice(line);
