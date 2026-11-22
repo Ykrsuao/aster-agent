@@ -8,16 +8,45 @@ import sys
 from pathlib import Path
 
 from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
-from acp.schema import RequestPermissionResponse, ToolCallProgress
+from acp.schema import (
+    AgentMessageChunk,
+    RequestPermissionResponse,
+    TextContentBlock,
+    ToolCallProgress,
+)
 
 
 class _Client:
     def __init__(self):
         self.updates = []
         self.permissions = []
+        self.updates_received = asyncio.Condition()
 
     async def session_update(self, session_id, update, **kwargs):
-        self.updates.append(update)
+        async with self.updates_received:
+            self.updates.append(update)
+            self.updates_received.notify_all()
+
+    async def wait_for_turn(self, tool_call_ids, reply):
+        async with self.updates_received:
+            await self.updates_received.wait_for(
+                lambda: (
+                    tool_call_ids.issubset(
+                        update.tool_call_id
+                        for update in self.updates
+                        if isinstance(update, ToolCallProgress)
+                        and update.status in {"completed", "failed"}
+                    )
+                    and any(
+                        isinstance(update, AgentMessageChunk)
+                        and isinstance(update.content, TextContentBlock)
+                        and update.content.text.strip() == reply
+                        and (update.field_meta or {}).get("aster", {}).get("messageState")
+                        == "complete"
+                        for update in self.updates
+                    )
+                )
+            )
 
     async def request_permission(self, session_id, tool_call, options, **kwargs):
         self.permissions.append(tool_call)
@@ -49,7 +78,7 @@ async def test_plan_inspects_the_checkout_over_acp_and_reopens_with_fresh_permis
     ):
         await connection.initialize(PROTOCOL_VERSION, aster={"runtimeControls": True})
         session = await connection.new_session(str(root))
-        for reopened in (False, True):
+        for round_id, reopened in enumerate((False, True)):
             if reopened:
                 await connection.load_session(str(root), session.session_id)
                 status = await connection.ext_method(
@@ -62,25 +91,33 @@ async def test_plan_inspects_the_checkout_over_acp_and_reopens_with_fresh_permis
             )
             assert status["permissionMode"] == "plan"
             client.updates.clear()
+            prefix = f"plan-wire-{round_id}-"
+            expected = {
+                f"{prefix}0": "completed",
+                f"{prefix}1": "completed",
+                f"{prefix}2": "completed",
+                f"{prefix}3": "failed",
+            }
             result = await connection.prompt(
                 session.session_id,
                 [text_block("Inspect this repository and plan; do not change files.")],
             )
             assert result.stop_reason == "end_turn"
+            # The response and tool statuses can precede output callbacks. Await the
+            # unique final reply too, so replayed updates cannot satisfy this turn.
+            await client.wait_for_turn(set(expected), f"Plan inspection round {round_id} finished.")
+            turn_updates = [
+                update
+                for update in client.updates
+                if isinstance(update, ToolCallProgress) and update.tool_call_id.startswith(prefix)
+            ]
             completed = {
                 update.tool_call_id: update.status
-                for update in client.updates
-                if isinstance(update, ToolCallProgress)
-                and update.tool_call_id.startswith("plan-wire-")
-                and update.status in {"completed", "failed"}
+                for update in turn_updates
+                if update.status in {"completed", "failed"}
             }
-            assert completed == {
-                "plan-wire-0": "completed",
-                "plan-wire-1": "completed",
-                "plan-wire-2": "completed",
-                "plan-wire-3": "failed",
-            }
-            serialized = json.dumps([update.model_dump(mode="json") for update in client.updates])
+            assert completed == expected
+            serialized = json.dumps([update.model_dump(mode="json") for update in turn_updates])
             assert "Explicit bidirectional controls reorder" in serialized
             assert "Plan mode" in serialized
             assert not client.permissions

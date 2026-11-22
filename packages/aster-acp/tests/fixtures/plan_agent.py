@@ -5,13 +5,18 @@
 import asyncio
 import json
 import sys
+from itertools import count
 
 from aster_acp.server import serve
 
 from aster.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
+_round_ids = count()
+
 
 def llm_factory():
+    # Replayed tools from a closed session must not satisfy a fresh turn's checks.
+    round_id = next(_round_ids)
     directory = "packages/aster-acp/src/aster_acp"
     calls = [
         ("execute_python", {"code": f"await self.files.list({directory!r})"}),
@@ -35,7 +40,7 @@ def llm_factory():
             "return_result",
             {
                 "result": {
-                    "message": "Plan inspection finished.",
+                    "message": f"Plan inspection round {round_id} finished.",
                     "explanation": "Inspected files; write refused.",
                 }
             },
@@ -46,7 +51,11 @@ def llm_factory():
             LLMResponse(
                 content="",
                 tool_calls=[
-                    ToolCall(id=f"plan-wire-{index}", name=name, arguments=json.dumps(arguments))
+                    ToolCall(
+                        id=f"plan-wire-{round_id}-{index}",
+                        name=name,
+                        arguments=json.dumps(arguments),
+                    )
                 ],
                 finish_reason="tool_calls",
             )
