@@ -16,6 +16,8 @@ from aster_cli.coding.agent import CodingAgent
 from aster_cli.coding.settings import load_task_budget
 from aster_cli.coding.slash_commands import CodingSlashCommandRegistry
 from aster_cli.coding.task_budget import task_budget_command
+from aster_cli.sessions import SessionStore
+from aster_cli.sessions.actions import PendingSessionActionsError
 
 from aster.agentdoc import doc
 from aster.interactive import Done, SummarizationConfig
@@ -36,6 +38,13 @@ class _BudgetSlashSkill(Skill):
     @slash_command("task-budget", output_to_agent=False)
     def hijack(self) -> str:
         return "hijacked"
+
+
+class _UserRecoverySkill(Skill):
+    @slash_command("recovery", output_to_agent=False)
+    async def recovery(self) -> str:
+        await self._agent.llm.acall([{"role": "user", "content": "user skill request"}])
+        return "user recovery"
 
 
 def settings(root, monkeypatch, limits):
@@ -186,6 +195,107 @@ async def test_python_skill_commands_share_the_budget_and_cannot_replace_its_hos
     finally:
         registry.close()
         await agent.close()
+
+
+@pytest.mark.parametrize(
+    "limit, reason", [("calls", "calls"), ("tokens", "tokens"), ("time_seconds", "time")]
+)
+async def test_stopped_budget_allows_persistent_host_recovery_without_refunding(
+    tmp_path, monkeypatch, limit, reason
+):
+    settings(tmp_path, monkeypatch, {limit: 0})
+    store = SessionStore(tmp_path / "sessions")
+    with store.create(working_directory=str(tmp_path)) as first:
+        session_id = first.id
+        agent = agent_for(tmp_path, FakeLLMClient([]), storage=first.storage)
+        try:
+            task_id = agent._task_budget.task_id
+            with pytest.raises(TaskBudgetExceeded, match=reason):
+                agent._task_budget.check()
+            action = first.actions.begin("file.write_file", "target.txt", str(tmp_path))
+        finally:
+            await agent.close()
+    with store.open(session_id) as restored:
+        llm = FakeLLMClient([])
+        agent = agent_for(tmp_path, llm, storage=restored.storage)
+        agent.bind_action_journal(restored.actions)
+        agent.skills.register("test.budget", _BudgetSlashSkill())
+        agent.skills.register("test.user_recovery", _UserRecoverySkill())
+        registry = CodingSlashCommandRegistry(agent)
+        try:
+            before = agent._task_budget.snapshot()
+            status = await registry.invoke("recovery", "")
+            assert action in str(status)
+            assert not status.output_to_agent
+            reviewed = await registry.invoke(
+                "recovery", f'{action} --note "Checked target.txt; no further action needed"'
+            )
+            assert "Recorded your review" in str(reviewed)
+            assert not restored.actions.pending()
+            assert agent._task_budget.snapshot() == before
+            assert before["task_id"] == task_id and before["stopped"] == reason
+            with pytest.raises(TaskBudgetExceeded, match=reason):
+                await registry.invoke("probe", "")
+            assert not llm.calls
+        finally:
+            registry.close()
+            await agent.close()
+    with store.open(session_id) as reopened:
+        assert not reopened.actions.pending()
+
+
+async def test_user_skill_named_recovery_still_uses_task_budget(tmp_path, monkeypatch):
+    settings(tmp_path, monkeypatch, {"calls": 0})
+    llm = FakeLLMClient([])
+    agent = agent_for(tmp_path, llm)
+    agent.skills.register("test.user_recovery", _UserRecoverySkill())
+    registry = CodingSlashCommandRegistry(agent)
+    try:
+        with pytest.raises(TaskBudgetExceeded, match="calls"):
+            await registry.invoke("recovery", "")
+        assert not llm.calls
+    finally:
+        registry.close()
+        await agent.close()
+
+
+async def test_budget_stop_during_partial_python_action_requires_review_after_save(
+    tmp_path, monkeypatch
+):
+    settings(tmp_path, monkeypatch, {"calls": 1})
+    target = tmp_path / "append.txt"
+    code = (
+        f"with open({str(target)!r}, 'a', encoding='utf-8') as stream:\n"
+        "    stream.write('once\\n')\n"
+        "await self.llm.acall([{'role': 'user', 'content': 'child request'}])\n"
+    )
+    scripted = reply()
+    tool = scripted.choices[0].message.tool_calls[0].function
+    tool.name = "execute_python"
+    tool.arguments = json.dumps({"code": code})
+    provider = AsyncMock(return_value=scripted)
+    monkeypatch.setattr(litellm, "acompletion", provider)
+    store = SessionStore(tmp_path / "sessions")
+    with store.create(working_directory=str(tmp_path)) as handle:
+        session_id = handle.id
+        agent = agent_for(tmp_path, CompletionClient("test-model"), storage=handle.storage)
+        agent.bind_action_journal(handle.actions)
+        try:
+            with pytest.raises(TaskBudgetExceeded, match="calls"):
+                await agent.handle({"user_messages": ["append then ask a child model"]})
+            assert provider.call_count == 1
+            assert target.read_text(encoding="utf-8") == "once\n"
+            handle.save_current_snapshot(agent)
+            pending = handle.actions.pending()
+            assert len(pending) == 1 and pending[0]["kind"] == "python.execute"
+            task_budget_command(agent, "new")
+            with pytest.raises(PendingSessionActionsError):
+                await agent.shell.write_file("append.txt", "repeated")
+        finally:
+            await agent.close()
+    with store.open(session_id) as restored:
+        assert restored.actions.pending()[0]["action_id"] == pending[0]["action_id"]
+        assert target.read_text(encoding="utf-8") == "once\n"
 
 
 async def test_host_deadline_cleans_up_a_real_long_shell_command(tmp_path):

@@ -269,9 +269,15 @@ class CodingSlashCommandRegistry:
         # requires that loop. Async commands can cancel cooperatively; a truly
         # blocking sync command needs the future per-agent process boundary to
         # provide a safe kill mechanism.
+        # Human recovery review must remain possible after the allowance stops.
+        # Match the host method, not the name a user skill could also register.
+        host_control = command._method == self._task_budget_command or (
+            getattr(self.agent, "_action_journal", None) is not None
+            and command._method == getattr(getattr(self.agent, "recovery", None), "_command", None)
+        )
         scope = (
             nullcontext()
-            if command.name == "task-budget"
+            if host_control
             else task_budget_activity(
                 current_task_budget() or getattr(self.agent, "_task_budget", None)
             )

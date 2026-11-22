@@ -20,6 +20,7 @@ from aster.runtime.sandbox.errors import (
 )
 from aster.skill import Skill, slash_command
 from aster.strategy_validation import InvariantError
+from aster.task_budget import TaskBudgetError
 
 if TYPE_CHECKING:
     from aster_cli.sessions.actions import SessionActions
@@ -44,6 +45,7 @@ def finish_action(
             CellTimeoutError,
             CellMemoryError,
             WorkerDiedError,
+            TaskBudgetError,
         ),
     )
     outcome = (

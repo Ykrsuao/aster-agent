@@ -27,7 +27,10 @@ The task ID is independent of a prompt's turn ID. Follow-ups, `Done`, `NeedInput
 allowance. Changing settings affects a new task, never an existing allowance.
 Python skill commands share the same task, including model calls or background
 jobs started directly by a command. Budget inspection and new-task commands
-remain available after the task stops.
+remain available after the task stops. The host's `/recovery` command also
+remains available to inspect or record a human review of interrupted actions;
+reviewing an action does not refund or restart the task allowance. User skill
+commands, including a skill that uses the same name, remain budgeted.
 
 ## Accounting
 
@@ -78,6 +81,10 @@ through recovery, including downtime; restarting cannot refund it. A normal
 host close cancels and settles local outstanding provider tasks before closing
 the store. If a clock rollback makes interrupted time unknown, recovery stops
 the task. In-memory agents retain accounting only for their process lifetime.
+
+If a budget stops a Python cell after it has already changed something, its
+action remains pending for human recovery review even after saving the session.
+Starting a new allowance does not clear that separate recovery requirement.
 
 Rewind and session forks copy the **latest** consumed ledger, even when the
 selected conversation checkpoint is older. The copied task is stopped with
