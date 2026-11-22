@@ -285,6 +285,102 @@ folder. A directory named by `ASTER_PROJECT_DIR` is always used, because the
 person starting the process chose it. Scripts that import Aster as a library are
 not affected.
 
+## Project memory
+
+Project memory is optional and off by default. From this checkout, install it
+with `uv sync --extra tui --extra memory`, then explicitly enable it in the
+trusted workspace's own `.aster/settings.yaml`:
+
+```yaml
+coding:
+  project_memory:
+    enabled: true
+    database: main
+    embedding:
+      backend: hashing
+      dim: 64
+```
+
+User settings, `ASTER_SETTINGS` and `ASTER_PROJECT_DIR` cannot opt a project in.
+The host mounts the existing `aster.memory` skill as `self.memory`; the agent
+can explicitly save useful notes with its memory tools, and relevant notes are
+retrieved on later turns. Automatic event/episode recording and background
+reflection are disabled.
+
+| Command | Effect |
+| --- | --- |
+| `/memory` or `/memory status` | Show whether project memory is available |
+| `/memory list` | Inspect saved notes, up to 100 records |
+| `/memory view ID` | Inspect one note, including archived notes |
+| `/memory delete ID` | Permanently delete the note and stop retrieving it |
+| `/memory off` | Save `enabled: false` in project settings and unload the skill |
+| `/memory reload` | Apply the project's current memory settings |
+| `/memory rebuild NEW_DATABASE` | Re-embed a consistent source snapshot into a new named database |
+
+Host commands do not send their output to the model. Turning memory off keeps
+saved notes available for explicit inspection or deletion and stays off after a
+restart, including when an older conversation snapshot is restored. Deleting a
+note prevents future retrieval; it does not redact conversation messages already
+saved. Finish background jobs before changing memory settings or records.
+
+Every session in the same canonical workspace shares its notes. Different
+workspaces, including separate Git worktrees, use separate databases; changing
+the agent's working directory does not change its memory scope. Files live under
+`<Aster user directory>/project-memory/<workspace-path hash>/<database>.sqlite`.
+The user directory defaults to `~/.config/aster` and honors `XDG_CONFIG_HOME` or
+`ASTER_USER_DIR`. Database names accept 1–64 lowercase letters, digits, underscores
+and hyphens, excluding Windows device names. Linked paths cannot redirect one
+project's database into another project's directory.
+
+For remote embeddings, use an explicitly selected model or an existing embedding
+alias. For example, a saved `.aster/llm_config.yaml` entry has this form; substitute
+your model, endpoint and existing credential environment variable:
+
+```yaml
+models:
+  notes:
+    client_type: embedding
+    model: <explicit-pinned-embedding-model>
+    endpoint: <explicit-endpoint>
+    api_key_env: <existing-environment-variable>
+```
+
+Reference it from the project memory configuration:
+
+```yaml
+coding:
+  project_memory:
+    enabled: true
+    database: main
+    embedding:
+      backend: litellm
+      alias: notes
+      dimensions: 1024  # Replace with the model's actual requested dimensions.
+```
+
+Startup requires explicit remote dimensions and does not probe the provider.
+Credentials are resolved through the existing model configuration; plaintext
+`api_key` values in memory settings are rejected. When a task budget is active,
+remote embedding calls fail before dispatch because their usage is not yet
+included in that budget. Local hashing remains available.
+
+Changing the embedding model, endpoint or dimensions requires an explicit rebuild,
+even when two models have the same dimension. After changing the embedding
+settings, use `/memory reload`; a compatibility error leaves saved text available
+to inspect and delete. Pause other writers, run `/memory rebuild next`, then set
+`database: next` and `/memory reload` in every session. Rebuilding retains the
+source and does not overwrite an existing target. Failure or interruption does
+not publish a partial target. Writes after the source snapshot are not copied,
+so keep writers paused until switching finishes. Remote rebuilding sends saved
+note text to the selected embedding provider.
+
+The offline acceptance path uses SQLite, NumPy, local hashing and a scripted
+model through real ACP process restarts on native Windows. It checks saving,
+cross-session recall, restoration, deletion and persistent opt-out. This is
+lifecycle coverage; it does not establish remote-provider compatibility or the
+real-task benefit of enabling memory. Those require separate provider and task
+evaluations.
+
 ## Interactive coding sessions
 
 Trusted hosts can require explicit checks after a coding task changes specified

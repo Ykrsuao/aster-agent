@@ -52,6 +52,7 @@ from acp.schema import (
     SessionInfo as ACPSessionInfo,
 )
 from aster_cli.coding.agent import CodingAgent
+from aster_cli.coding.project_memory import ProjectMemory
 from aster_cli.coding.reply_strategy import CodingReplyStrategy
 from aster_cli.coding.settings import load_coding_skills_dirs
 from aster_cli.coding.slash_commands import CodingSlashCommand, CodingSlashCommandRegistry
@@ -684,6 +685,8 @@ class CodingACPAdapter:
         self, session: _ACPSession, parsed: ParsedPrompt, progress: PromptProgress, turn_id: str
     ) -> PromptResponse:
         text = parsed.text
+        if session.agent._project_memory is not None:
+            session.agent._project_memory.refresh()
         session.handle.record_user_message(text, turn_id=turn_id)
         if parsed.context is not None:
             session.agent.event_manager.add(parsed.context)
@@ -873,6 +876,7 @@ class CodingACPAdapter:
                 agent.bind_action_journal(handle.actions)
                 # Saved conversations can come from another workspace or host.
                 agent.refresh_host_context()
+                memory = ProjectMemory(agent, root, session_ref=handle.id)
             with phase("session_mcp"):
                 mcp = SessionMCP(agent, root, mcp_servers)
                 await mcp.start()
@@ -919,7 +923,8 @@ class CodingACPAdapter:
                 commands,
                 mcp=mcp,
                 controls=controls,
-                startup_warnings=mcp.startup_warnings(),
+                startup_warnings=mcp.startup_warnings()
+                + ((memory.message,) if memory.state in {"blocked", "unavailable"} else ()),
                 trust_notice=workspace_trust.restricted_notice(root),
                 unsubscribe_activity=record_activity(agent.event_manager, handle),
             )

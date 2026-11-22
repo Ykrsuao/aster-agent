@@ -627,12 +627,16 @@ async def test_acp_subprocess_transcript(tmp_path, monkeypatch):
         update for _, update in client.updates if isinstance(update, AvailableCommandsUpdate)
     )
     assert [command.name for command in commands.available_commands] == [
+        "memory",
         "protocol-check",
         "protocol-text",
         "recovery",
     ]
-    assert commands.available_commands[0].input is not None
-    assert commands.available_commands[0].input.root.hint == "<value>"
+    check_command = next(
+        command for command in commands.available_commands if command.name == "protocol-check"
+    )
+    assert check_command.input is not None
+    assert check_command.input.root.hint == "<value>"
     raw_commands = incoming[commands_notification]["params"]["update"]["availableCommands"]
     text_command = next(item for item in raw_commands if item["name"] == "protocol-text")
     assert text_command["input"] == {"hint": "[task]"}

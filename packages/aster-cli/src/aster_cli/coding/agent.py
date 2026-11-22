@@ -78,6 +78,7 @@ class CodingAgent(InteractiveAgent):
             "todo",
             "libs",
             "skills",
+            "memory",
             "verify",
             "verification_status",
             "recovery",
@@ -104,6 +105,8 @@ class CodingAgent(InteractiveAgent):
     _summarizers: Annotated[list[Any], hidden, nosnapshot]
     _command_registry: Annotated[Any, hidden, nosnapshot]
     _execution_control: Annotated[Any, hidden, nosnapshot]
+    _project_memory: Annotated[Any, hidden, nosnapshot]
+    _memory: Annotated[Any, hidden, nosnapshot]
     _verification: Annotated[Verification, hidden, nosnapshot]
     _verification_state: Annotated[VerificationState, hidden]
     _action_journal: Annotated[Any, hidden, nosnapshot]
@@ -122,6 +125,7 @@ class CodingAgent(InteractiveAgent):
         super().__init__(llm=llm, **kwargs)
         self._execution_control = None
         self._action_journal = None
+        self._project_memory = None
         self._slash_commands_in = self.queue_manager.queue("slash_commands")
         self.slash_commands = self._slash_commands_in.reader
         self._system_messages_in = self.queue_manager.queue("system_messages")
@@ -357,13 +361,17 @@ class CodingAgent(InteractiveAgent):
             await self.skills.aclose()
         finally:
             try:
-                await self.queue_manager.shutdown()
+                if self._project_memory is not None:
+                    self._project_memory.close()
             finally:
                 try:
+                    await self.queue_manager.shutdown()
+                finally:
                     try:
                         if self._task_budget is not None:
                             await self._task_budget.aclose()
                     finally:
-                        await shell.close()
-                finally:
-                    await self.llm.aclose()
+                        try:
+                            await shell.close()
+                        finally:
+                            await self.llm.aclose()

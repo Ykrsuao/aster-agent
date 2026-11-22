@@ -646,6 +646,7 @@ async def test_adapter_loads_workspace_skills_and_advertises_commands(tmp_path, 
     assert len(advertised) == 1
     assert [command.name for command in advertised[0].available_commands] == [
         "diagnose",
+        "memory",
         "recovery",
         "skill-status",
     ]
@@ -1214,6 +1215,7 @@ async def test_initial_commands_are_deferred_until_new_session_returns(tmp_path,
     initial_commands = client.accepted[0][1]
     assert isinstance(initial_commands, AvailableCommandsUpdate)
     assert [command.name for command in initial_commands.available_commands] == [
+        "memory",
         "recovery",
         "triage",
     ]
@@ -1278,7 +1280,11 @@ async def test_load_session_advertises_commands_to_registered_session(tmp_path):
         update for _, update in load_client.accepted if isinstance(update, AvailableCommandsUpdate)
     ]
     assert len(advertised) == 1
-    assert [command.name for command in advertised[0].available_commands] == ["recovery", "triage"]
+    assert [command.name for command in advertised[0].available_commands] == [
+        "memory",
+        "recovery",
+        "triage",
+    ]
     triage = next(
         command for command in advertised[0].available_commands if command.name == "triage"
     )
@@ -1401,7 +1407,11 @@ async def test_adapter_republishes_commands_after_skill_activation(tmp_path):
         update for update in client.updates if isinstance(update, AvailableCommandsUpdate)
     ]
     assert len(advertised) == 2
-    assert [command.name for command in advertised[-1].available_commands] == ["later", "recovery"]
+    assert [command.name for command in advertised[-1].available_commands] == [
+        "later",
+        "memory",
+        "recovery",
+    ]
     await adapter.close()
 
 
@@ -1443,7 +1453,11 @@ async def test_adapter_replaces_advertised_commands_after_skill_reload(tmp_path,
         update for update in client.updates if isinstance(update, AvailableCommandsUpdate)
     ]
     assert len(advertised) == 1
-    assert [command.name for command in advertised[0].available_commands] == ["recovery", "repair"]
+    assert [command.name for command in advertised[0].available_commands] == [
+        "memory",
+        "recovery",
+        "repair",
+    ]
     invoked = await runtime.commands.invoke("repair", "deep")
     assert invoked.text == "Repair using deep mode (reloaded)."
     await adapter.close()
@@ -1479,6 +1493,7 @@ async def test_failed_skill_reload_keeps_previous_command_and_advertisement(tmp_
     assert not any(isinstance(update, AvailableCommandsUpdate) for update in client.updates)
     assert [command.name for command in runtime.commands.commands()] == [
         "diagnose",
+        "memory",
         "recovery",
         "skill-status",
     ]
@@ -1748,8 +1763,8 @@ async def test_adapter_routes_distinct_workspace_commands_to_their_sessions(tmp_
         for session_id, update in client.accepted
         if isinstance(update, AvailableCommandsUpdate)
     }
-    assert commands_by_session[alpha_session.session_id] == ["alpha", "recovery"]
-    assert commands_by_session[beta_session.session_id] == ["beta", "recovery"]
+    assert commands_by_session[alpha_session.session_id] == ["alpha", "memory", "recovery"]
+    assert commands_by_session[beta_session.session_id] == ["beta", "memory", "recovery"]
     messages = {
         session_id: update.content.text
         for session_id, update in client.accepted

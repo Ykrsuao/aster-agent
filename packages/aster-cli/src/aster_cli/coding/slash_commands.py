@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 _HOST_COMMANDS = frozenset(
     "new sessions drafts resume rewind tree tools changes queue steer attach attachments "
     "reconnect retry undo model effort reasoning mode plan code permissions sandbox tasks "
-    "skills mcp recovery stop search status hud context logs help cancel exit task-budget".split()
+    "skills mcp memory recovery stop search status hud context logs help cancel exit task-budget".split()
 )
 _COMMAND_NAME = re.compile(r"\w[\w.:\[\]-]*\Z")
 
@@ -97,6 +97,16 @@ class CodingSlashCommandRegistry:
                 completions=("new",),
                 output_to_agent=False,
                 _method=self._task_budget_command,
+            )
+        memory = getattr(self.agent, "_project_memory", None)
+        if memory is not None:
+            commands["memory"] = CodingSlashCommand(
+                name="memory",
+                description="Inspect and control project memory",
+                argument_hint="[status|list|view ID|delete ID|off|reload|rebuild NEW_DATABASE]",
+                completions=("status", "list", "view", "delete", "off", "reload", "rebuild"),
+                output_to_agent=False,
+                _method=memory.command,
             )
         loaded = self._loaded_skills()
         recovery = getattr(self.agent, "recovery", None)
