@@ -489,16 +489,13 @@ class BashSession:
         stdout_task = asyncio.create_task(_read_stream(proc.stdout, "stdout", stdout_queue))
         stderr_task = asyncio.create_task(_read_stream(proc.stderr, "stderr", stderr_queue))
 
-        ctrl_lines, timed_out = await self._read_control_until(sentinel, timeout)
-
-        # Sentinel received — cancel readers and drain remaining.
-        stdout_task.cancel()
-        stderr_task.cancel()
-        for task in (stdout_task, stderr_task):
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        try:
+            ctrl_lines, timed_out = await self._read_control_until(sentinel, timeout)
+        finally:
+            # Release both StreamReader consumers even when the caller cancels.
+            stdout_task.cancel()
+            stderr_task.cancel()
+            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
 
         # Drain queues
         for q in (stdout_queue, stderr_queue):
@@ -602,17 +599,13 @@ class BashSession:
         stdout_task = asyncio.create_task(accumulate(proc.stdout, stdout_buf))
         stderr_task = asyncio.create_task(accumulate(proc.stderr, stderr_buf))
 
-        ctrl_lines, timed_out = await self._read_control_until(sentinel, timeout)
-
-        # Cancel accumulators FIRST to avoid concurrent StreamReader access.
-        # StreamReader does not support multiple concurrent readers.
-        stdout_task.cancel()
-        stderr_task.cancel()
-        for task in (stdout_task, stderr_task):
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        try:
+            ctrl_lines, timed_out = await self._read_control_until(sentinel, timeout)
+        finally:
+            # Release both StreamReader consumers even when the caller cancels.
+            stdout_task.cancel()
+            stderr_task.cancel()
+            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
 
         # Now greedy-drain remaining output (sole reader per stream, safe).
         for stream, buf in [(proc.stdout, stdout_buf), (proc.stderr, stderr_buf)]:
@@ -635,28 +628,33 @@ class BashSession:
         assert ctrl is not None
         lines: list[str] = []
         timed_out = False
-        while True:
-            try:
-                raw = await asyncio.wait_for(ctrl.readline(), timeout=timeout)
-            except TimeoutError:
-                timed_out = True
-                break
-            if not raw:
-                self._diagnose_death("control_fd_eof")
-                break  # EOF — bash died
-            line = raw.decode("utf-8", errors="replace").rstrip("\n")
-            if sentinel in line:
-                break
-            lines.append(line)
-
-        if timed_out:
-            proc = self._process
-            if proc is not None:
-                recovered = await self._interrupt_and_recover(proc, sentinel, timeout)
-                if not recovered:
-                    self._diagnose_death("timeout_recovery_failed")
-                    logger.warning("Timeout recovery failed — resetting session")
-                    await self.reset()
+        cancelled = False
+        try:
+            while True:
+                try:
+                    raw = await asyncio.wait_for(ctrl.readline(), timeout=timeout)
+                except TimeoutError:
+                    timed_out = True
+                    break
+                if not raw:
+                    self._diagnose_death("control_fd_eof")
+                    break  # EOF — bash died
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if sentinel in line:
+                    break
+                lines.append(line)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            if timed_out or cancelled:
+                proc = self._process
+                if proc is not None:
+                    recovered = await self._interrupt_and_recover(proc, sentinel, timeout)
+                    if not recovered:
+                        self._diagnose_death("interrupt_recovery_failed")
+                        logger.warning("Command recovery failed — resetting session")
+                        await self.reset()
 
         return lines, timed_out
 
