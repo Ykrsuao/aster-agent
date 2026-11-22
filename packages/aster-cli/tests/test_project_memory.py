@@ -5,9 +5,7 @@
 import builtins
 import json
 import sqlite3
-import sys
 from contextlib import closing
-from types import ModuleType
 
 import pytest
 import yaml
@@ -19,10 +17,11 @@ from aster_cli.sessions import SessionStore
 from aster_memory import HashingEmbedder, MemoryStore
 
 from aster import workspace_trust
+from aster.task_budget import TaskBudgetError, TaskBudgetExceeded, task_budget_scope
 from aster.unifiedllm import FakeLLMClient
 
 
-def _configure(root, *, enabled=True, database="main", embedding=None):
+def _configure(root, *, enabled=True, database="main", embedding=None, task_budget=None):
     path = root / ".aster" / "settings.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
     settings = {
@@ -35,6 +34,8 @@ def _configure(root, *, enabled=True, database="main", embedding=None):
         },
         "unrelated": {"keep": "保留"},
     }
+    if task_budget is not None:
+        settings["coding"]["task_budget"] = task_budget
     path.write_text(yaml.safe_dump(settings, allow_unicode=True), encoding="utf-8")
     return path
 
@@ -139,6 +140,90 @@ async def test_save_close_reopen_recall_delete_and_persistently_disable(tmp_path
     assert memory.state == "disabled"
     assert not hasattr(reopened, "memory")
     assert memory.inspect() == []
+
+
+@pytest.mark.parametrize("action", ["status", "list", "view", "delete", "off"])
+async def test_memory_controls_remain_available_after_budget_stops(tmp_path, make_agent, action):
+    root = tmp_path / "workspace"
+    path = _configure(root, task_budget={"calls": 0})
+    with SessionStore(tmp_path / "sessions").create() as handle:
+        agent = make_agent(root, storage=handle.storage)
+        memory = ProjectMemory(agent, root, session_ref=handle.id)
+        memory_id = agent.memory.remember("A project note to inspect without a model call.")
+        registry = CodingSlashCommandRegistry(agent)
+        try:
+            with pytest.raises(TaskBudgetExceeded, match="calls"):
+                agent._task_budget.check()
+            before = agent._task_budget.snapshot()
+            argument = f"{action} {memory_id}" if action in {"view", "delete"} else action
+            result = await registry.invoke("memory", argument)
+            assert not result.output_to_agent
+            assert agent._task_budget.snapshot() == before
+            assert not agent.llm.calls
+            if action == "off":
+                assert not hasattr(agent, "memory")
+                saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+                assert saved["coding"]["project_memory"]["enabled"] is False
+            elif action == "delete":
+                assert not memory.inspect(memory_id)
+            else:
+                assert memory.state == "ready"
+                if action in {"list", "view"}:
+                    assert memory_id in result.text
+                else:
+                    assert "Project memory is on" in result.text
+        finally:
+            registry.close()
+            await agent.close()
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+async def test_remote_embeddings_cannot_escape_the_real_session_budget(
+    tmp_path, monkeypatch, make_agent, scoped
+):
+    calls = []
+
+    class Remote(HashingEmbedder):
+        def embed_batch(self, texts):
+            calls.append(texts)
+            return super().embed_batch(texts)
+
+    monkeypatch.setattr("aster_memory.embeddings.get_embedder", lambda config: Remote(dim=64))
+    root = tmp_path / "workspace"
+    _configure(
+        root,
+        embedding={"backend": "litellm", "model": "offline/model", "dimensions": 64},
+    )
+    agent = make_agent(root)
+    memory = ProjectMemory(agent, root)
+    memory_id = agent.memory.remember("Existing note before a budget is configured.")
+    calls.clear()
+    _configure(
+        root,
+        embedding={"backend": "litellm", "model": "offline/model", "dimensions": 64},
+        task_budget={"calls": 2},
+    )
+    registry = CodingSlashCommandRegistry(agent)
+    await registry.invoke("task-budget", "new")
+    monkeypatch.setattr("aster_memory.manager.derive_queries", lambda *args: ["Existing note"])
+    try:
+        with task_budget_scope(agent._task_budget if scoped else None):
+            for operation in (
+                lambda: agent.memory.remember("must not dispatch"),
+                lambda: agent.memory.recall("Existing note"),
+                lambda: agent._memory._on_before_turn(object()),
+                lambda: memory.rebuild("rebuilt"),
+            ):
+                with pytest.raises(TaskBudgetError, match="do not yet account"):
+                    operation()
+        with pytest.raises(TaskBudgetError, match="do not yet account"):
+            await registry.invoke("memory", "rebuild rebuilt")
+        assert not calls
+        assert [item["id"] for item in memory.inspect()] == [memory_id]
+        assert not (memory.directory / "rebuilt.sqlite").exists()
+        assert agent._task_budget.snapshot()["calls"] == 0
+    finally:
+        registry.close()
 
 
 async def test_memory_close_failure_still_closes_other_agent_resources(
@@ -419,14 +504,13 @@ def test_budget_compatibility_only_allows_an_absent_host_module(monkeypatch, mis
 async def test_remote_embeddings_refuse_unaccounted_task_budget_and_hashing_still_works(
     tmp_path, monkeypatch, make_agent, use_alias, denied_lookup
 ):
-    budget = ModuleType("aster.task_budget")
+    from aster import task_budget as budget
 
     class BudgetError(RuntimeError):
         pass
 
-    budget.TaskBudgetError = BudgetError
-    budget.current_task_budget = lambda: None
-    monkeypatch.setitem(sys.modules, "aster.task_budget", budget)
+    monkeypatch.setattr(budget, "TaskBudgetError", BudgetError)
+    monkeypatch.setattr(budget, "current_task_budget", lambda: None)
     called = []
 
     class Remote(HashingEmbedder):
@@ -459,7 +543,7 @@ async def test_remote_embeddings_refuse_unaccounted_task_budget_and_hashing_stil
             raise BudgetError("budget context unavailable")
         return object()
 
-    budget.current_task_budget = active_budget
+    monkeypatch.setattr(budget, "current_task_budget", active_budget)
     monkeypatch.setattr("aster_memory.manager.derive_queries", lambda *args: ["saved note"])
     for action in (
         lambda: agent.memory.remember("must not dispatch"),

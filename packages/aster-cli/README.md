@@ -364,6 +364,11 @@ Credentials are resolved through the existing model configuration; plaintext
 remote embedding calls fail before dispatch because their usage is not yet
 included in that budget. Local hashing remains available.
 
+The host's memory status, list, view, delete and off commands remain available
+after a task budget stops. They do not restart or refund its allowance. Reload
+and rebuild still run under the task budget, and remote embeddings are blocked
+whenever the session has an allowance, including calls made outside a model turn.
+
 Changing the embedding model, endpoint or dimensions requires an explicit rebuild,
 even when two models have the same dimension. After changing the embedding
 settings, use `/memory reload`; a compatibility error leaves saved text available

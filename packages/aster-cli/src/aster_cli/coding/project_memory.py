@@ -36,7 +36,7 @@ def _database_name(value: object) -> str:
     return value
 
 
-def _remote_budget_guard() -> None:
+def _remote_budget_guard(agent: Any = None) -> None:
     # A5 is optional in older hosts; do not hide import errors inside that module.
     try:
         from aster.task_budget import TaskBudgetError, current_task_budget
@@ -44,15 +44,18 @@ def _remote_budget_guard() -> None:
         if exc.name != "aster.task_budget":
             raise
         return
-    if current_task_budget() is not None:
+    if current_task_budget() is not None or getattr(agent, "_task_budget", None) is not None:
         raise TaskBudgetError(
             "Task budgets do not yet account for remote embeddings; use the hashing embedder."
         )
 
 
 class _GuardedEmbedder:
-    def __init__(self, delegate: Any, check: Callable[[], None], *, remote: bool) -> None:
+    def __init__(
+        self, delegate: Any, check: Callable[[], None], *, remote: bool, agent: Any
+    ) -> None:
         self._delegate, self._check, self._remote = delegate, check, remote
+        self._agent = agent
 
     @property
     def identity(self) -> str:
@@ -68,7 +71,7 @@ class _GuardedEmbedder:
     def embed_batch(self, texts: list[str]) -> Any:
         self._check()
         if self._remote:
-            _remote_budget_guard()
+            _remote_budget_guard(self._agent)
         return self._delegate.embed_batch(texts)
 
 
@@ -183,6 +186,7 @@ class ProjectMemory:
             get_embedder(config),
             self._trusted if explicit else self._require_enabled,
             remote=config.backend == "litellm",
+            agent=self.agent,
         )
 
     def _mount(self) -> None:

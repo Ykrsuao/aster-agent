@@ -281,9 +281,18 @@ class CodingSlashCommandRegistry:
         # provide a safe kill mechanism.
         # Human recovery review must remain possible after the allowance stops.
         # Match the host method, not the name a user skill could also register.
-        host_control = command._method == self._task_budget_command or (
-            getattr(self.agent, "_action_journal", None) is not None
-            and command._method == getattr(getattr(self.agent, "recovery", None), "_command", None)
+        host_control = (
+            command._method == self._task_budget_command
+            or (
+                getattr(self.agent, "_action_journal", None) is not None
+                and command._method
+                == getattr(getattr(self.agent, "recovery", None), "_command", None)
+            )
+            or (
+                command._method
+                == getattr(getattr(self.agent, "_project_memory", None), "command", None)
+                and kwargs.get("action", "status") in {"status", "list", "view", "delete", "off"}
+            )
         )
         scope = (
             nullcontext()
