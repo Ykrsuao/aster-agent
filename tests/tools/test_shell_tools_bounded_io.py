@@ -24,7 +24,6 @@ import os
 import shutil
 import threading
 import tracemalloc
-from functools import partial
 from pathlib import Path
 
 import pytest
@@ -152,15 +151,10 @@ async def test_ranged_read_matches_legacy_slice(sh, tmp_path, start, end):
 
 @pytest.mark.parametrize("breaker", list(EXOTIC_BREAKS))
 @pytest.mark.asyncio
-async def test_exotic_line_breaks_keep_legacy_numbering(sh, tmp_path, breaker, monkeypatch):
+async def test_exotic_line_breaks_keep_legacy_numbering(sh, tmp_path, breaker):
     """str.splitlines() boundaries are preserved, not \\n-only file iteration."""
     path = tmp_path / "f.txt"
     path.write_text(f"one{breaker}two\nthree{breaker}four\nfive\n", encoding="utf-8")
-    # Exercise all Unicode separators even when the host locale cannot encode them.
-    # Other tests keep the native default-codec contract; this test isolates line splitting.
-    monkeypatch.setattr(
-        "aster.tools._bounded_io.open", partial(open, encoding="utf-8"), raising=False
-    )
 
     for start, end in ((1, 1), (1, 3), (2, 4), (3, 6)):
         want_text, want_start, want_end = _legacy_read(path, start, end, encoding="utf-8")
@@ -170,13 +164,10 @@ async def test_exotic_line_breaks_keep_legacy_numbering(sh, tmp_path, breaker, m
         )
 
 
-def test_iter_lines_matches_splitlines_exactly(tmp_path, monkeypatch):
+def test_iter_lines_matches_splitlines_exactly(tmp_path):
     path = tmp_path / "f.txt"
     body = f"a{EXOTIC_BREAKS}b\nc\r\nd\re\nlast-no-newline"
     path.write_bytes(body.encode("utf-8"))
-    monkeypatch.setattr(
-        "aster.tools._bounded_io.open", partial(open, encoding="utf-8"), raising=False
-    )
 
     assert list(iter_lines_keepends(path, max_line_chars=DEFAULT_MAX_FILE_BYTES)) == (
         path.read_text(encoding="utf-8").splitlines(keepends=True)
@@ -455,11 +446,11 @@ def test_whole_file_read_is_bounded_for_fifos(tmp_path):
     thread.join(timeout=5)
 
 
-def test_whole_file_read_keeps_read_text_decoding(tmp_path):
-    """Universal newlines and the default encoding still match Path.read_text()."""
+def test_whole_file_read_keeps_universal_newlines(tmp_path):
+    """UTF-8 decoding preserves the existing universal-newline contract."""
     path = tmp_path / "mixed.txt"
-    path.write_bytes(b"a\r\nb\rc\n")
-    assert read_whole_file_checked(path, 1024, hint="") == path.read_text() == "a\nb\nc\n"
+    path.write_bytes("\u4f60\r\n\u597d\r\U0001f600\n".encode("utf-8"))
+    assert read_whole_file_checked(path, 1024, hint="") == "\u4f60\n\u597d\n\U0001f600\n"
 
 
 def test_shell_tools_rejects_nonpositive_file_budget(tmp_path):

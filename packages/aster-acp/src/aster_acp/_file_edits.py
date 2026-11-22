@@ -253,6 +253,11 @@ class FileEditExecutor:
     async def _run_operation(self) -> Match | FileWrite:
         operation = self._operation
         path = self._host_path
+        # Reject invalid text before opening or creating the target file.
+        if isinstance(operation, _Write):
+            operation.content.encode("utf-8")
+        elif isinstance(operation, _Replace):
+            operation.new.encode("utf-8")
         creating = isinstance(operation, _Write) and self._identity is None
         flags = os.O_RDONLY if isinstance(operation, _Read) else os.O_RDWR
         flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -343,14 +348,14 @@ class FileEditExecutor:
                 new_text = written = operation.content
                 if not creating:
                     try:
-                        with open(os.dup(fd)) as preview:
+                        with open(os.dup(fd), encoding="utf-8") as preview:
                             old_text = preview.read(_MAX_DIFF_INPUT_CHARS + 1)
                     except (OSError, UnicodeError):
                         pass
                     if old_text and len(old_text) <= _MAX_EVENT_TEXT_CHARS:
                         start, end = 1, _line_count(old_text)
             # Writing through the checked descriptor avoids reopening a replaced path.
-            with open(os.dup(fd), "r+b") as raw, io.TextIOWrapper(raw) as writer:
+            with open(os.dup(fd), "r+b") as raw, io.TextIOWrapper(raw, encoding="utf-8") as writer:
                 writer.seek(0)
                 writer.write(written)
                 writer.truncate()

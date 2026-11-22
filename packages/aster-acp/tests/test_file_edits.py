@@ -69,6 +69,53 @@ async def test_real_read_write_replace_return_values_and_file_activity(tmp_path,
     assert "-two" in edits[1].diff and "+three" in edits[1].diff
 
 
+async def test_utf8_reads_writes_replacements_and_previews(tmp_path, observed_events):
+    manager, events = observed_events
+    path = tmp_path / "source.txt"
+    original = "\u4f60\u597d \U0001f600\nsecond\n"
+    path.write_bytes(original.encode("utf-8"))
+    for code, expected in (
+        ("await self.shell.read('source.txt')", original),
+        ("await self.shell.read('source.txt', lines=(1, 1))", original.splitlines(True)[0]),
+    ):
+        result = await _executor(code, tmp_path, manager).run_cell(code)
+        assert result.success, result.error
+        assert result.returned_value.text == expected
+
+    replacement = "\u518d\u89c1 \U0001f642"
+    for code, expected in (
+        (
+            f"await self.shell.replace('source.txt', {ascii(original.splitlines()[0])}, "
+            f"{ascii(replacement)})",
+            replacement + "\nsecond\n",
+        ),
+        (f"await self.shell.write_file('source.txt', {ascii(original)})", original),
+    ):
+        result = await _executor(code, tmp_path, manager).run_cell(code)
+        assert result.success, result.error
+        assert path.read_bytes() == expected.replace("\n", os.linesep).encode("utf-8")
+    edits = [event for event in events if isinstance(event, FileEdit)]
+    assert edits[-1].old_text == replacement + "\nsecond\n"
+    assert edits[-1].diff_complete
+
+
+@pytest.mark.parametrize("existing", [False, True])
+async def test_encoding_failure_preserves_target(tmp_path, observed_events, existing):
+    manager, events = observed_events
+    path = tmp_path / "source.txt"
+    original = b"first\r\nsecond\n"
+    if existing:
+        path.write_bytes(original)
+    code = "await self.shell.write_file('source.txt', '\\ud800')"
+    result = await _executor(code, tmp_path, manager).run_cell(code)
+    assert isinstance(result.error, UnicodeEncodeError)
+    assert not [event for event in events if isinstance(event, FileEdit)]
+    if existing:
+        assert path.read_bytes() == original
+    else:
+        assert not path.exists()
+
+
 @pytest.mark.parametrize("operation", ["read", "write_file", "replace"])
 async def test_maps_only_the_target_and_preserves_path_looking_content(
     tmp_path, observed_events, operation
