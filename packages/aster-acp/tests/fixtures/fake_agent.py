@@ -53,7 +53,15 @@ def llm_factory() -> FakeLLMClient:
         if "--sandbox" in sys.argv
         else ""
     )
-    code += "print(sum([20, 22]))"
+    if "--mcp" in sys.argv:
+        code += (
+            "if getattr(self, 'mcp_resume_marker', None) == 'preserved':\n"
+            "    self.message('MCP durable state restored')\n"
+            "self.mcp_resume_marker = 'preserved'\n"
+            "self.message('MCP probe: ' + await self.skills['mcp.probe'].echo('wire'))"
+        )
+    else:
+        code += "print(sum([20, 22]))"
     return FakeLLMClient(
         [
             LLMResponse(
@@ -77,7 +85,7 @@ def llm_factory() -> FakeLLMClient:
                         },
                     ),
                 ]
-                * (8 if "--rewind" in sys.argv else 1)
+                * (8 if "--rewind" in sys.argv or "--mcp" in sys.argv else 1)
             )
         ],
         strict_exhaustion=True,
@@ -86,6 +94,11 @@ def llm_factory() -> FakeLLMClient:
 
 if "--pause-prefill" in sys.argv:
     pause_first_prefill()
+
+if "--enforce-trust" in sys.argv:
+    from aster import workspace_trust
+
+    workspace_trust.enforce()
 
 if "--noisy" in sys.argv:
     original_acall = FakeLLMClient.acall

@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 _HOST_COMMANDS = frozenset(
     "new sessions drafts resume rewind tree tools changes queue steer attach attachments "
     "reconnect retry undo model effort reasoning mode plan code permissions sandbox tasks "
-    "skills stop search status hud context logs help cancel exit".split()
+    "skills mcp stop search status hud context logs help cancel exit".split()
 )
 _COMMAND_NAME = re.compile(r"\w[\w.:\[\]-]*\Z")
 

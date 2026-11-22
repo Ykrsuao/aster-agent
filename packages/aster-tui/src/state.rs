@@ -166,6 +166,16 @@ pub struct SkillsBrowser {
     pub truncated: bool,
 }
 
+#[derive(Default)]
+pub struct McpBrowser {
+    pub supported: bool,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub servers: Vec<Value>,
+    pub warnings: Vec<String>,
+    pub generation: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Overlay {
     Commands,
@@ -178,6 +188,7 @@ pub enum Overlay {
     Hud,
     HudInfo,
     Skills,
+    Mcp,
     Context,
     Queue,
     Search,
@@ -415,6 +426,7 @@ pub struct State {
     pub runtime: Value,
     pub model_selection: ModelSelection,
     pub skills: SkillsBrowser,
+    pub mcp: McpBrowser,
     /// Effort changes stay local to the model picker until Enter confirms them.
     pub model_effort_drafts: HashMap<String, Option<String>>,
     pub mode: String,
@@ -515,6 +527,7 @@ impl State {
             runtime: Value::Null,
             model_selection: ModelSelection::default(),
             skills: SkillsBrowser::default(),
+            mcp: McpBrowser::default(),
             model_effort_drafts: HashMap::new(),
             mode: "code".into(),
             approval_policy: "backend".into(),
@@ -599,6 +612,7 @@ impl State {
                     | Overlay::Permissions
                     | Overlay::Sandbox
                     | Overlay::Tasks
+                    | Overlay::Mcp
                     | Overlay::Hud
             )
         ) || (self.overlay == Some(Overlay::Skills) && self.skills.detail.is_none())
@@ -623,6 +637,8 @@ impl State {
         self.skills.generation = self.skills.generation.wrapping_add(1);
         self.skills.detail = None;
         self.skills.loading = false;
+        self.mcp.generation = self.mcp.generation.wrapping_add(1);
+        self.mcp.loading = false;
         self.focus_runtime_choice();
     }
 
@@ -1008,6 +1024,28 @@ impl State {
         }
         let query = self.query.to_lowercase();
         let choices: Vec<Choice> = match self.overlay {
+            Some(Overlay::Mcp) if !self.mcp.loading && self.mcp.error.is_none() => self
+                .mcp
+                .servers
+                .iter()
+                .filter_map(|server| {
+                    let name = server["name"].as_str()?;
+                    Some(Choice {
+                        label: format!(
+                            "{} · {}",
+                            clean(name),
+                            clean(server["state"].as_str().unwrap_or("unknown"))
+                        ),
+                        detail: format!(
+                            "{} · {} · {} tools loaded",
+                            clean(server["source"].as_str().unwrap_or("unknown source")),
+                            clean(server["transport"].as_str().unwrap_or("unknown transport")),
+                            server["toolCount"].as_u64().unwrap_or(0)
+                        ),
+                        value: name.into(),
+                    })
+                })
+                .collect(),
             Some(Overlay::Skills)
                 if !self.skills.loading
                     && self.skills.error.is_none()
@@ -1564,6 +1602,10 @@ pub fn default_commands() -> Vec<Command> {
         (
             "/skills",
             "Browse available skills, active status and documentation",
+        ),
+        (
+            "/mcp",
+            "Inspect MCP servers; reconnect <name> retries discovery",
         ),
         ("/stop", "Stop a selected background job by its task ID"),
         (

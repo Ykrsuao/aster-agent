@@ -37,6 +37,7 @@ _PROJECT_DIR_ENV_VAR = "ASTER_PROJECT_DIR"
 
 # Paths inside a workspace that Aster imports, evaluates or takes settings from.
 _WORKSPACE_CONTENT = (
+    Path(".mcp.json"),
     Path(DIR_NAME) / "settings.yaml",
     Path(DIR_NAME) / "config.toml",
     Path(DIR_NAME) / "llm_config.yaml",
@@ -257,7 +258,7 @@ def restricted_notice(workspace: str | Path) -> str | None:
     names = ", ".join(path.as_posix() for path in ignored)
     return (
         f"This folder is not trusted, so its own Aster files are not used: {names}. "
-        "Skills, libraries, model settings, secrets and saved sessions from the folder "
+        "Skills, libraries, MCP servers, model settings, secrets and saved sessions from the folder "
         "are ignored. Run `aster trust` in the folder to use them."
     )
 

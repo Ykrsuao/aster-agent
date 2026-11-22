@@ -73,6 +73,57 @@ def _describe_exceptions(exceptions: Sequence[BaseException]) -> str:
     return "; ".join(deduped)
 
 
+def safe_mcp_error(exc: BaseException) -> str:
+    """Classify a failure for a host UI without copying any exception text or payload."""
+    failures: list[BaseException] = []
+    pending = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        failures.append(current)
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+        cause = current.__cause__
+        if cause is None and not current.__suppress_context__:
+            cause = current.__context__
+        if cause is not None:
+            pending.append(cause)
+
+    for failure in failures:
+        if isinstance(failure, httpx.HTTPStatusError):
+            status = failure.response.status_code
+            if type(status) is int and 100 <= status <= 599:
+                if status in {401, 403}:
+                    return f"MCP authentication failed (HTTP {status})."
+                return f"MCP server returned HTTP {status}."
+    if any(isinstance(item, (TimeoutError, httpx.TimeoutException)) for item in failures):
+        return "MCP operation timed out."
+    if any(isinstance(item, FileNotFoundError) for item in failures):
+        return "MCP server executable was not found."
+    if any(isinstance(item, PermissionError) for item in failures):
+        return "MCP connection was denied."
+    if any(isinstance(item, (ConnectionError, OSError, httpx.RequestError)) for item in failures):
+        return "MCP connection failed."
+    if any(isinstance(item, asyncio.CancelledError) for item in failures):
+        return "MCP operation cancelled."
+    return "MCP operation failed."
+
+
+@dataclass(frozen=True)
+class MCPCallEvent:
+    """The final outcome of one tool call, with safe error text for host status."""
+
+    tool_name: str
+    outcome: Literal["succeeded", "failed", "cancelled"]
+    error: str | None = None
+
+
+MCPCallObserver = Callable[[MCPCallEvent], None]
+
+
 @dataclass
 class MCPToolSpec:
     """Represents an MCP tool specification from a server.
@@ -638,11 +689,18 @@ class MCPTool:
     >>>         return await self._call_tool("definition", {"filepath": filepath, "line": line})
     """
 
+    # Hosts rebuild clients and callbacks from current configuration on resume.
+    # Their credentials and live state must never enter durable agent snapshots.
+    __nosnapshot__ = True
+
     def __init__(
         self,
         client: Any,
         server_name: str,
         refresh_ctx: dict[str, Any] | None = None,
+        *,
+        call_observer: MCPCallObserver | None = None,
+        safe_errors: bool = False,
     ) -> None:
         """Initialize with client and server name.
 
@@ -657,8 +715,41 @@ class MCPTool:
         self._client = client
         self._server_name = server_name
         self._refresh_ctx = refresh_ctx or {}
+        self._call_observer = call_observer
+        self._safe_errors = safe_errors
 
     async def _call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        _preserve_none: set[str] | frozenset[str] = frozenset(),
+    ) -> Any:
+        try:
+            result = await self._call_tool_with_refresh(
+                tool_name, arguments, _preserve_none=_preserve_none
+            )
+        except asyncio.CancelledError:
+            self._observe_call(MCPCallEvent(tool_name, "cancelled"))
+            raise
+        except Exception as exc:
+            error = safe_mcp_error(exc)
+            self._observe_call(MCPCallEvent(tool_name, "failed", error))
+            if self._safe_errors:
+                raise RuntimeError(error) from None
+            raise
+        self._observe_call(MCPCallEvent(tool_name, "succeeded"))
+        return result
+
+    def _observe_call(self, event: MCPCallEvent) -> None:
+        if self._call_observer is not None:
+            try:
+                self._call_observer(event)
+            except BaseException:
+                # Observation must never change a completed call's result or cancellation.
+                pass
+
+    async def _call_tool_with_refresh(
         self,
         tool_name: str,
         arguments: dict[str, Any] | None = None,
@@ -787,6 +878,9 @@ def _create_tool_instance(
     client: Any,
     tools_result: Any,
     refresh_ctx: dict[str, Any] | None = None,
+    *,
+    call_observer: MCPCallObserver | None = None,
+    safe_errors: bool = False,
 ) -> MCPTool:
     """Build the dynamic per-server tool class from a completed ``list_tools``.
 
@@ -811,7 +905,13 @@ def _create_tool_instance(
 
     dynamic_class = _make_dynamic_class(server_name, tool_specs, MCPTool)
     instance = object.__new__(dynamic_class)
-    instance.__init__(client, server_name, refresh_ctx=refresh_ctx)
+    instance.__init__(
+        client,
+        server_name,
+        refresh_ctx=refresh_ctx,
+        call_observer=call_observer,
+        safe_errors=safe_errors,
+    )
     return instance
 
 
@@ -975,6 +1075,10 @@ class MCPManager:
         env: dict[str, str] | None = None,
         tool_call_timeout: timedelta = timedelta(seconds=60),
         discovery_timeout: timedelta = _DEFAULT_MCP_TOOL_DISCOVERY_TIMEOUT,
+        *,
+        cwd: str | Path | None = None,
+        call_observer: MCPCallObserver | None = None,
+        safe_errors: bool = False,
     ) -> MCPTool:
         """Create an MCP tool from explicit stdio config, from inside an event loop.
 
@@ -997,6 +1101,9 @@ class MCPManager:
             env: Extra environment for the subprocess.
             tool_call_timeout: Per-call timeout for the generated methods.
             discovery_timeout: Overall timeout for connection and paginated discovery.
+            cwd: Explicit session workspace for the server process.
+            call_observer: Synchronous notification of each final tool-call outcome.
+            safe_errors: Expose only fixed error classifications to the caller.
 
         Returns:
             An MCPTool instance with one method per tool on the server.
@@ -1007,6 +1114,7 @@ class MCPManager:
             args=args,
             env=env,
             tool_call_timeout=tool_call_timeout,
+            **({"cwd": cwd} if cwd is not None else {}),
         )
         tools_result = await _list_server_tools(server_name, client, discovery_timeout)
         refresh_ctx = {
@@ -1017,7 +1125,14 @@ class MCPManager:
             "args": args,
             "env": env,
         }
-        return _create_tool_instance(server_name, client, tools_result, refresh_ctx)
+        return _create_tool_instance(
+            server_name,
+            client,
+            tools_result,
+            refresh_ctx,
+            call_observer=call_observer,
+            safe_errors=safe_errors,
+        )
 
     @staticmethod
     async def create_url_server(
@@ -1028,12 +1143,21 @@ class MCPManager:
         transport: Literal["sse", "streamable-http"] = "streamable-http",
         tool_call_timeout: timedelta = timedelta(seconds=60),
         discovery_timeout: timedelta = _DEFAULT_MCP_TOOL_DISCOVERY_TIMEOUT,
+        call_observer: MCPCallObserver | None = None,
+        allow_oauth_refresh: bool = True,
+        safe_errors: bool = False,
     ) -> MCPTool:
         """Create an HTTP or SSE MCP tool from trusted, explicit client configuration.
 
         Interactive hosts such as ACP already receive a resolved URL and headers
         from their client. This async factory connects and lists tools without
         routing through the synchronous config/OAuth wrapper.
+
+        Set ``allow_oauth_refresh=False`` when only the supplied headers may be
+        used. Such calls never enter OAuth or access its process-global cache.
+        ``call_observer`` synchronously observes the final outcome of tool calls.
+        Set ``safe_errors=True`` to omit remote payloads and exception chains
+        from errors delivered to an interactive host or model.
         """
         if transport not in ("sse", "streamable-http"):
             raise ValueError(f"Unsupported URL MCP transport {transport!r}")
@@ -1051,7 +1175,14 @@ class MCPManager:
             "headers": resolved_headers,
             "transport": transport,
         }
-        return _create_tool_instance(server_name, client, tools_result, refresh_ctx)
+        return _create_tool_instance(
+            server_name,
+            client,
+            tools_result,
+            refresh_ctx if allow_oauth_refresh else None,
+            call_observer=call_observer,
+            safe_errors=safe_errors,
+        )
 
     @staticmethod
     def create_from_server(

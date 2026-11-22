@@ -423,20 +423,19 @@ async def test_python_command_collision_keeps_qualified_text_skill_invocation(te
     assert registry.skill_mentions("Use $triage")[0].value["skill"] == "cmd.triage"
 
 
-async def test_text_skill_named_like_terminal_builtin_uses_qualified_name(
-    text_skill_runtime,
-):
+@pytest.mark.parametrize("name", ["help", "mcp"])
+async def test_text_skill_named_like_terminal_builtin_uses_qualified_name(text_skill_runtime, name):
     agent, registry, skills_root = text_skill_runtime
-    _write_text_skill(skills_root, "help", body="Explain the project terminology.")
+    _write_text_skill(skills_root, name, body="Explain the project terminology.")
     agent.skills.discover_skills_dirs([skills_root])
 
-    result = await registry.invoke("cmd.help", "explain the vocabulary")
+    result = await registry.invoke(f"cmd.{name}", "explain the vocabulary")
 
-    assert result.value["skill"] == "cmd.help"
+    assert result.value["skill"] == f"cmd.{name}"
     assert "Explain the project terminology." in result.value["instructions"]
-    assert registry.get("help") is None
-    assert "cmd.help" not in agent.skills.activated()
-    assert registry.skill_mentions("Use $help")[0].value["skill"] == "cmd.help"
+    assert registry.get(name) is None
+    assert f"cmd.{name}" not in agent.skills.activated()
+    assert registry.skill_mentions(f"Use ${name}")[0].value["skill"] == f"cmd.{name}"
     assert "cmd.triage" not in agent.skills.activated()
 
 

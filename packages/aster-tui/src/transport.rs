@@ -1139,6 +1139,135 @@ asyncio.run(main())
     }
 
     #[tokio::test]
+    async fn real_acp_mcp_browser_retries_discovery_and_survives_session_restore() {
+        use crate::state::Overlay;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        async fn inspect(controller: &mut Controller, transport: &mut Transport) {
+            let actions = controller.input("/mcp".into());
+            assert!(controller.state.mcp.loading);
+            send_actions(controller, transport, actions).await;
+            timeout(Duration::from_secs(30), async {
+                while controller.state.mcp.loading {
+                    let actions = match next(transport).await {
+                        Event::Message(value) => controller.message(value),
+                        Event::Diagnostic(text) => {
+                            controller.diagnostic(text);
+                            vec![]
+                        }
+                        Event::Closed(reason) => panic!("Backend closed: {reason}"),
+                    };
+                    assert!(!send_actions(controller, transport, actions).await);
+                }
+            })
+            .await
+            .expect("the MCP inspector receives its read-only status");
+            assert!(
+                controller.state.mcp.error.is_none(),
+                "{:?}",
+                controller.state.mcp.error
+            );
+            assert_eq!(controller.state.overlay, Some(Overlay::Mcp));
+        }
+
+        let (directory, mut transport, mut controller) =
+            real_fixture_with_args(&["--mcp", "--enforce-trust"]);
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let peer = root.join("aster-acp/tests/fixtures/controlled_mcp.py");
+        let control = directory.path().join("control.json");
+        let events = directory.path().join("events.jsonl");
+        std::fs::write(
+            &control,
+            json!({"label":"rust-fixture","mode":"offline"}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join(".mcp.json"),
+            json!({"mcpServers":{"probe":{"command":python(),"args":[peer,control,events]}}})
+                .to_string(),
+        )
+        .unwrap();
+        let user = directory.path().join("user");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(
+            user.join("trusted_workspaces.json"),
+            json!({"workspaces":[directory.path()]}).to_string(),
+        )
+        .unwrap();
+
+        let initialize = controller.initialize();
+        send_actions(&mut controller, &mut transport, vec![initialize]).await;
+        settle(&mut controller, &mut transport).await;
+        assert!(controller.state.mcp.supported);
+        let original = controller.state.session_id.clone().unwrap();
+        let discovered = std::fs::read_to_string(&events).unwrap();
+        inspect(&mut controller, &mut transport).await;
+        assert_eq!(std::fs::read_to_string(&events).unwrap(), discovered);
+        assert_eq!(controller.state.mcp.servers.len(), 1);
+        assert_eq!(controller.state.mcp.servers[0]["name"], "probe");
+        assert_eq!(controller.state.mcp.servers[0]["source"], "project");
+        assert_eq!(controller.state.mcp.servers[0]["state"], "failed");
+
+        std::fs::write(&control, json!({"label":"rust-fixture"}).to_string()).unwrap();
+        let actions = controller.key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        send_actions(&mut controller, &mut transport, actions).await;
+        settle(&mut controller, &mut transport).await;
+        assert_eq!(
+            controller.state.session_id.as_deref(),
+            Some(original.as_str())
+        );
+        assert_eq!(controller.state.mcp.servers[0]["state"], "ready");
+        assert_eq!(controller.state.mcp.servers[0]["toolCount"], 1);
+
+        controller.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let actions = controller.input("Use the controlled MCP echo tool".into());
+        send_actions(&mut controller, &mut transport, actions).await;
+        settle(&mut controller, &mut transport).await;
+        assert!(controller.state.entries.iter().any(
+            |entry| matches!(entry, Entry::Assistant(text) if text.contains("MCP probe: rust-fixture: wire"))
+        ), "{:?}", controller.state.entries);
+
+        let actions = controller.input("/new".into());
+        send_actions(&mut controller, &mut transport, actions).await;
+        settle(&mut controller, &mut transport).await;
+        assert_ne!(
+            controller.state.session_id.as_deref(),
+            Some(original.as_str())
+        );
+        let actions = controller.resume(original.clone());
+        send_actions(&mut controller, &mut transport, actions).await;
+        settle(&mut controller, &mut transport).await;
+        inspect(&mut controller, &mut transport).await;
+        assert_eq!(
+            controller.state.session_id.as_deref(),
+            Some(original.as_str())
+        );
+        assert_eq!(controller.state.mcp.servers[0]["state"], "ready");
+        let actions = controller.input("/exit".into());
+        send_actions(&mut controller, &mut transport, actions).await;
+        transport.shutdown().await.unwrap();
+        let recorded: Vec<Value> = std::fs::read_to_string(events)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let started: std::collections::HashSet<_> = recorded
+            .iter()
+            .filter(|event| event["event"] == "started")
+            .map(|event| event["pid"].as_u64().unwrap())
+            .collect();
+        let stopped: std::collections::HashSet<_> = recorded
+            .iter()
+            .filter(|event| event["event"] == "stopped")
+            .map(|event| event["pid"].as_u64().unwrap())
+            .collect();
+        assert_eq!(
+            started, stopped,
+            "every controlled MCP peer left its protocol context"
+        );
+    }
+
+    #[tokio::test]
     async fn real_acp_text_skill_commands_complete_and_reach_the_backend() {
         use crate::attachments::Attachment;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

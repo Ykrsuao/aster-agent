@@ -37,18 +37,15 @@ from acp.schema import (
     AvailableCommand,
     AvailableCommandInput,
     CloseSessionResponse,
-    HttpMcpServer,
     Implementation,
     ListSessionsResponse,
     McpCapabilities,
-    McpServerStdio,
     PromptCapabilities,
     SessionCapabilities,
     SessionCloseCapabilities,
     SessionInfoUpdate,
     SessionListCapabilities,
     SetSessionModeResponse,
-    SseMcpServer,
     UnstructuredCommandInput,
 )
 from acp.schema import (
@@ -69,7 +66,6 @@ from aster_cli.sessions import (
 from aster import workspace_trust
 from aster.config import CodeActConfig
 from aster.errors import GenerationError
-from aster.mcp import MCPManager, MCPTool
 from aster.paths import get_user_dir
 from aster.runtime.sandbox.config import SandboxConfig
 from aster.runtime.sandbox.errors import SandboxError
@@ -81,6 +77,7 @@ from aster.strategies.codeact import (
 from aster.unifiedllm import UnifiedLLM
 from aster_acp._attachments import ParsedPrompt, parse_prompt
 from aster_acp._foreground_turn import ForegroundTurns, InvalidTurnIdError
+from aster_acp._mcp import SessionMCP
 from aster_acp._prompt import PromptProgress
 from aster_acp._runtime import (
     SessionBusyError,
@@ -112,6 +109,7 @@ class _ACPSession:
     bridge: ACPEventBridge
     commands: CodingSlashCommandRegistry
     foreground: ForegroundTurns = field(init=False)
+    mcp: SessionMCP | None = None
     controls: RuntimeControls | None = None
     configuring: bool = False
     startup_warnings: tuple[str, ...] = ()
@@ -123,7 +121,13 @@ class _ACPSession:
     def __post_init__(self) -> None:
         self.foreground = ForegroundTurns(self.agent, self.handle, self.dispatcher, self.bridge)
 
+    async def prepare_close(self) -> None:
+        if self.mcp is not None:
+            await self.mcp.close()
+        await self.foreground.cancel()
+
     async def close(self) -> None:
+        await self.prepare_close()
         self.foreground.close()
         for task in self.notification_tasks:
             task.cancel()
@@ -203,6 +207,7 @@ class CodingACPAdapter:
                     "runtimeControls": True,
                     "structuredProgress": True,
                     "skills": True,
+                    "mcp": True,
                     "contextInspection": True,
                     "modelSelection": True,
                     "attachments": True,
@@ -214,7 +219,7 @@ class CodingACPAdapter:
                 # McpCapabilities defaults to all-false, and a client that
                 # honours the handshake then filters its HTTP/SSE servers out of
                 # session/new — so the agent receives no MCP servers at all,
-                # however the user configured them. _create_mcp_tools connects
+                # however the user configured them. SessionMCP connects
                 # both transports, so say so. `acp` stays off: it is unstable in
                 # the spec and not implemented here.
                 mcp_capabilities=McpCapabilities(http=True, sse=True),
@@ -397,6 +402,8 @@ class CodingACPAdapter:
             "aster/session/stop_task",
             "aster/session/context",
             "aster/session/skills",
+            "aster/session/mcp/status",
+            "aster/session/mcp/reconnect",
         }:
             raise RequestError.method_not_found(f"_{method}")
         session_id = params.get("sessionId")
@@ -407,6 +414,12 @@ class CodingACPAdapter:
             if not isinstance(name, str) or not name.strip() or len(name) > 256:
                 raise RequestError.invalid_params(
                     {"reason": "name must be a nonempty skill name of at most 256 characters"}
+                )
+        if method == "aster/session/mcp/reconnect":
+            name = params.get("name")
+            if not isinstance(name, str) or not name.strip() or len(name) > 256:
+                raise RequestError.invalid_params(
+                    {"reason": "name must be a nonempty MCP server name of at most 256 characters"}
                 )
         index = params.get("userMessageIndex")
         if method == "aster/session/rewind" and (type(index) is not int or index < 0):
@@ -468,8 +481,15 @@ class CodingACPAdapter:
                 "aster/session/stop_task",
                 "aster/session/context",
                 "aster/session/skills",
+                "aster/session/mcp/status",
             }:
                 async with runtime.access() as session:
+                    if method == "aster/session/mcp/status":
+                        return (
+                            session.mcp.snapshot()
+                            if session.mcp is not None
+                            else {"servers": [], "warnings": []}
+                        )
                     if method == "aster/session/skills":
                         try:
                             return skills_snapshot(session.agent.skills, params.get("name"))
@@ -514,6 +534,22 @@ class CodingACPAdapter:
                     except ValueError as exc:
                         raise RequestError.invalid_request({"reason": str(exc)}) from exc
             async with runtime.turn() as session:
+                if method == "aster/session/mcp/reconnect":
+                    if session.agent.queue_manager.running_handles():
+                        raise RequestError.invalid_request(
+                            {"reason": "Stop or finish background jobs before reconnecting MCP."}
+                        )
+                    if session.mcp is None:
+                        raise RequestError.resource_not_found(params["name"])
+                    try:
+                        return await session.mcp.reconnect(params["name"])
+                    except KeyError:
+                        raise RequestError.resource_not_found(params["name"]) from None
+                    except asyncio.CancelledError:
+                        task = asyncio.current_task()
+                        if session.mcp.is_closed and task is not None and not task.cancelling():
+                            raise RequestError.resource_not_found(session_id) from None
+                        raise
                 if method == "aster/session/configure":
                     if "permissionMode" in params and params.keys() - {
                         "sessionId",
@@ -806,13 +842,12 @@ class CodingACPAdapter:
             await llm.aclose()
             raise RequestError.internal_error({"reason": "ACP client is not connected"})
         agent: CodingAgent | None = None
+        mcp: SessionMCP | None = None
         commands: CodingSlashCommandRegistry | None = None
         value: _ACPSession | None = None
         try:
             with phase("session_model_metadata"):
                 await llm.refresh_model_info()
-            with phase("session_mcp"):
-                mcp, mcp_warnings = await self._create_mcp_tools(mcp_servers)
             with phase("session_agent"):
                 agent = CodingAgent(
                     llm=llm,
@@ -829,19 +864,9 @@ class CodingACPAdapter:
                 handle.storage.restore_current_snapshot(agent)
                 # Saved conversations can come from another workspace or host.
                 agent.refresh_host_context()
-            registration_warnings: list[str] = []
-            for name, tool in mcp.items():
-                registry_name = f"mcp.{name}"
-                try:
-                    agent.skills.register(registry_name, tool)
-                    agent.skills.activate([registry_name])
-                except ValueError as exc:
-                    # A server name can collide with a core agent attribute
-                    # (`shell`, `repo`) or a reserved one (`runtime`). Skipping
-                    # it keeps the session usable — the same contract the
-                    # connect path already offers for an unreachable server —
-                    # instead of failing session/new with an opaque error.
-                    registration_warnings.append(f"MCP server {name!r} was not registered: {exc}")
+            with phase("session_mcp"):
+                mcp = SessionMCP(agent, root, mcp_servers)
+                await mcp.start()
             coding_strategy = CodingReplyStrategy(
                 config=CodeActConfig(
                     cell_timeout=1800.0,
@@ -883,16 +908,23 @@ class CodingACPAdapter:
                 dispatcher,
                 bridge,
                 commands,
+                mcp=mcp,
                 controls=controls,
-                startup_warnings=(*mcp_warnings, *registration_warnings),
+                startup_warnings=mcp.startup_warnings(),
                 trust_notice=workspace_trust.restricted_notice(root),
                 unsubscribe_activity=record_activity(agent.event_manager, handle),
             )
             commands.set_on_change(
                 lambda available: bridge.publish(_available_commands_update(available)),
             )
+            mcp.on_change = bridge.refresh_usage
             try:
-                runtime = await self._sessions.add(handle.id, value, available=available)
+                runtime = await self._sessions.add(
+                    handle.id,
+                    value,
+                    available=available,
+                    before_close=lambda session: session.prepare_close(),
+                )
                 return runtime
             except ValueError:
                 raise RequestError.invalid_request(
@@ -902,58 +934,14 @@ class CodingACPAdapter:
             if value is not None:
                 await value.close()
             elif agent is not None:
+                if mcp is not None:
+                    await mcp.close()
                 if commands is not None:
                     commands.close()
                 await agent.close()
             else:
                 await llm.aclose()
             raise
-
-    async def _create_mcp_tools(
-        self,
-        mcp_servers: list[Any] | None,
-    ) -> tuple[dict[str, MCPTool], tuple[str, ...]]:
-        servers = list(mcp_servers or [])
-        supported_types = (McpServerStdio, HttpMcpServer, SseMcpServer)
-        tools: dict[str, MCPTool] = {}
-        warnings: list[str] = []
-        seen_names: set[str] = set()
-        for server in servers:
-            name = getattr(server, "name", "<unnamed>")
-            if not isinstance(server, supported_types):
-                warnings.append(
-                    f"MCP server {name!r} was not loaded: unsupported ACP server type "
-                    f"{type(server).__name__}."
-                )
-                continue
-            if name in seen_names:
-                warnings.append(
-                    f"MCP server {name!r} was not loaded: another server has the same name."
-                )
-                continue
-            seen_names.add(name)
-            try:
-                if isinstance(server, McpServerStdio):
-                    env = {item.name: item.value for item in server.env}
-                    tools[name] = await MCPManager.create_stdio_server(
-                        name,
-                        command=server.command,
-                        args=server.args,
-                        env=env,
-                    )
-                elif isinstance(server, (HttpMcpServer, SseMcpServer)):
-                    headers = {item.name: item.value for item in server.headers}
-                    tools[name] = await MCPManager.create_url_server(
-                        name,
-                        server.url,
-                        headers=headers,
-                        transport=(
-                            "streamable-http" if isinstance(server, HttpMcpServer) else "sse"
-                        ),
-                    )
-            except Exception as exc:
-                warnings.append(f"MCP server {name!r} was not loaded: {exc}")
-        return tools, tuple(warnings)
 
     async def _get_runtime(self, session_id: str) -> SessionRuntime[_ACPSession]:
         try:

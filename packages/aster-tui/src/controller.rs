@@ -105,6 +105,7 @@ pub enum RuntimeRequest {
     StopTask,
     Context { view: u64 },
     Skills { view: u64 },
+    Mcp { view: u64, reconnect: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -807,6 +808,12 @@ impl Controller {
             self.state.skills.error =
                 Some("Backend disconnected. Use /reconnect, then reopen /skills.".into());
         }
+        self.state.mcp.generation = self.state.mcp.generation.wrapping_add(1);
+        self.state.mcp.loading = false;
+        if self.state.overlay == Some(Overlay::Mcp) {
+            self.state.mcp.error =
+                Some("Backend disconnected. Use /reconnect, then reopen /mcp.".into());
+        }
         self.tree_search_request = None;
         self.tree_search_due = None;
         if self.state.overlay == Some(Overlay::Tree) {
@@ -844,6 +851,7 @@ impl Controller {
     pub fn reconnected(&mut self) -> Vec<Action> {
         self.reset_model_selection();
         self.state.skills.supported = false;
+        self.state.mcp.supported = false;
         self.pending.clear();
         self.starting = true;
         self.exiting = false;
@@ -860,6 +868,10 @@ impl Controller {
         self.state.skills = crate::state::SkillsBrowser {
             supported: self.state.skills.supported,
             generation: self.state.skills.generation.wrapping_add(1),
+            ..Default::default()
+        };
+        self.state.mcp = crate::state::McpBrowser {
+            generation: self.state.mcp.generation.wrapping_add(1),
             ..Default::default()
         };
         self.state.runtime = Value::Null;
@@ -1418,6 +1430,11 @@ impl Controller {
             generation: self.state.skills.generation.wrapping_add(1),
             ..Default::default()
         };
+        self.state.mcp = crate::state::McpBrowser {
+            supported: self.state.mcp.supported,
+            generation: self.state.mcp.generation.wrapping_add(1),
+            ..Default::default()
+        };
         self.state.runtime = Value::Null;
         self.state.mode = "code".into();
         self.state.approval_policy = "backend".into();
@@ -1673,6 +1690,24 @@ impl Controller {
                 self.state.open(Overlay::Skills);
                 self.state.query = argument.to_owned();
                 return self.request_skills(None);
+            }
+            "/mcp" => {
+                self.state.open(Overlay::Mcp);
+                let (action, name) = argument
+                    .split_once(char::is_whitespace)
+                    .unwrap_or((argument, ""));
+                if action == "reconnect" {
+                    if name.trim().is_empty() {
+                        self.state.mcp.error = Some(
+                            "Use /mcp reconnect <name>, or select a server and press Ctrl+K."
+                                .into(),
+                        );
+                        return vec![];
+                    }
+                    return self.request_mcp(Some(name.trim().to_owned()));
+                }
+                self.state.query = argument.to_owned();
+                return self.request_mcp(None);
             }
             "/stop" => {
                 return if argument.is_empty() {
@@ -2110,7 +2145,7 @@ impl Controller {
     }
 
     fn can_enqueue(&self) -> bool {
-        !self.exiting && (self.operation == "prompt" || self.state.preparing())
+        !self.exiting && (matches!(self.operation, "prompt" | "mcp") || self.state.preparing())
     }
 
     fn enqueue(&mut self, text: String) {
@@ -2622,7 +2657,9 @@ impl Controller {
             // Content belongs to the visible inspector and is never replayed.
             if matches!(
                 operation,
-                RuntimeRequest::Context { .. } | RuntimeRequest::Skills { .. }
+                RuntimeRequest::Context { .. }
+                    | RuntimeRequest::Skills { .. }
+                    | RuntimeRequest::Mcp { .. }
             ) {
                 return vec![];
             }
@@ -2660,6 +2697,32 @@ impl Controller {
     }
 
     fn apply_runtime_response(&mut self, operation: RuntimeRequest, value: &Value) -> Vec<Action> {
+        if let RuntimeRequest::Mcp { view, reconnect } = operation {
+            self.mcp_response(view, value);
+            if reconnect && self.operation == "mcp" {
+                let failed = value.get("error").is_some();
+                if failed && self.state.overlay != Some(Overlay::Mcp) {
+                    self.state.notice(
+                        "MCP retry failed. Open /mcp to inspect server status; this session is kept.",
+                        true,
+                    );
+                }
+                let mut actions = self.ready(if failed {
+                    "MCP retry failed; session kept"
+                } else {
+                    "MCP discovery finished"
+                });
+                if actions.is_empty() {
+                    if self.state.overlay == Some(Overlay::Mcp) && view != self.state.mcp.generation
+                    {
+                        actions.extend(self.request_mcp(None));
+                    }
+                    actions.extend(self.send_queued());
+                }
+                return actions;
+            }
+            return vec![];
+        }
         if let RuntimeRequest::Skills { view } = operation {
             self.skills_response(view, value);
             return vec![];
@@ -2740,7 +2803,9 @@ impl Controller {
                     false,
                 );
             }
-            RuntimeRequest::Context { .. } | RuntimeRequest::Skills { .. } => {
+            RuntimeRequest::Context { .. }
+            | RuntimeRequest::Skills { .. }
+            | RuntimeRequest::Mcp { .. } => {
                 unreachable!("inspector content is handled independently")
             }
         }
@@ -2773,6 +2838,108 @@ impl Controller {
                     .join(" · ");
             }
         }
+    }
+
+    fn request_mcp(&mut self, name: Option<String>) -> Vec<Action> {
+        self.state.mcp.generation = self.state.mcp.generation.wrapping_add(1);
+        self.state.mcp.error = None;
+        self.state.mcp.loading = false;
+        self.state.detail_scroll = 0;
+        if self.state.session_id.is_none() || self.state.preparing() {
+            self.state.mcp.error = Some("Session is preparing. Press Ctrl+R when ready.".into());
+            return vec![];
+        }
+        if !self.state.mcp.supported {
+            self.state.mcp.error = Some(
+                "This backend does not support MCP controls. Update aster-acp and reconnect."
+                    .into(),
+            );
+            return vec![];
+        }
+        if self.state.phase == Phase::Failed || self.exiting || self.opening.is_some() {
+            self.state.mcp.error = Some(
+                "Session is unavailable. Reconnect or finish switching conversations, then refresh."
+                    .into(),
+            );
+            return vec![];
+        }
+        let reconnect = name.is_some();
+        if reconnect && (self.state.busy() || self.background_running()) {
+            self.state.mcp.error = Some(
+                "Finish or stop foreground and background work before retrying MCP discovery. Ctrl+R can still read status."
+                    .into(),
+            );
+            return vec![];
+        }
+        if reconnect {
+            self.begin("mcp", "Retrying MCP discovery…");
+        }
+        self.state.mcp.loading = true;
+        self.runtime_request(
+            if reconnect {
+                "_aster/session/mcp/reconnect"
+            } else {
+                "_aster/session/mcp/status"
+            },
+            name.map_or_else(|| json!({}), |name| json!({"name": name})),
+            RuntimeRequest::Mcp {
+                view: self.state.mcp.generation,
+                reconnect,
+            },
+        )
+    }
+
+    fn mcp_response(&mut self, view: u64, value: &Value) {
+        if self.state.overlay != Some(Overlay::Mcp) || view != self.state.mcp.generation {
+            return;
+        }
+        self.state.mcp.loading = false;
+        if let Some(error) = value.get("error") {
+            let reason = error["data"]["reason"]
+                .as_str()
+                .or_else(|| error["message"].as_str())
+                .unwrap_or("Could not read MCP status.");
+            self.state.mcp.error = Some(clean(reason));
+            return;
+        }
+        let result = &value["result"];
+        let Some(servers) = result["servers"].as_array() else {
+            self.state.mcp.error = Some("Invalid MCP status. Press Ctrl+R to refresh.".into());
+            return;
+        };
+        let selected = self
+            .state
+            .choices()
+            .get(self.state.selected)
+            .map(|choice| choice.value.clone());
+        self.state.mcp.servers = servers
+            .iter()
+            .take(2000)
+            .filter(|server| server["name"].as_str().is_some_and(|name| !name.is_empty()))
+            .cloned()
+            .collect();
+        self.state.mcp.warnings = result["warnings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .take(100)
+            .map(clean)
+            .collect();
+        if servers.len() > 2000 {
+            self.state
+                .mcp
+                .warnings
+                .push("List limited to 2000 servers.".into());
+        }
+        self.state.selected = selected
+            .and_then(|name| {
+                self.state
+                    .choices()
+                    .iter()
+                    .position(|choice| choice.value == name)
+            })
+            .unwrap_or(0);
     }
 
     fn request_skills(&mut self, name: Option<String>) -> Vec<Action> {
@@ -3690,6 +3857,7 @@ impl Controller {
                     result["_meta"]["aster"]["modelSelection"] == true;
                 self.state.tasks_supported = result["_meta"]["aster"]["structuredProgress"] == true;
                 self.state.skills.supported = result["_meta"]["aster"]["skills"] == true;
+                self.state.mcp.supported = result["_meta"]["aster"]["mcp"] == true;
                 self.state.phase = Phase::Ready;
                 if self.state.model.is_empty() && self.state.model_selection.supported {
                     self.operation = "";
@@ -5166,6 +5334,23 @@ impl Controller {
     }
 
     fn overlay_key(&mut self, overlay: Overlay, key: KeyEvent) -> Vec<Action> {
+        if overlay == Overlay::Mcp && key.modifiers == KeyModifiers::CONTROL {
+            if key.code == KeyCode::Char('r') {
+                return if key.kind == KeyEventKind::Repeat {
+                    vec![]
+                } else {
+                    self.request_mcp(None)
+                };
+            }
+            if key.code == KeyCode::Char('k') {
+                if key.kind == KeyEventKind::Press {
+                    if let Some(choice) = self.state.choices().get(self.state.selected) {
+                        return self.request_mcp(Some(choice.value.clone()));
+                    }
+                }
+                return vec![];
+            }
+        }
         if overlay == Overlay::Skills {
             if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::CONTROL {
                 if key.kind == KeyEventKind::Repeat {
@@ -5586,6 +5771,10 @@ fn diff(item: &Value) -> String {
     }
     out
 }
+
+#[cfg(test)]
+#[path = "mcp_tests.rs"]
+mod mcp_tests;
 
 #[cfg(test)]
 mod tests {

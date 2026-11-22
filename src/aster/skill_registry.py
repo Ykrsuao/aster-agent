@@ -676,6 +676,41 @@ class SkillRegistry(Skill):
             self._discovered[name] = _SkillEntry(name=name, entry_point=None, category=category)
         self._refresh_host_commands()
 
+    def unregister(self, name: str, *, instance: Any) -> bool:
+        """Remove an exact registration only while it still holds *instance*.
+
+        Interactive hosts use this to withdraw tools whose configuration was
+        removed or disabled. The caller owns resource cleanup; this method
+        removes the binding, visibility and command entries without invoking
+        lifecycle hooks. A discovered entry point remains available to load
+        again. Another registration sharing the attribute is left intact.
+        """
+        attr = self._attr_map.get(name)
+        if attr is None or name not in self._loaded:
+            return False
+        if getattr(self._agent, attr, None) is not instance:
+            return False
+
+        aliases = {
+            other for other, binding in self._attr_map.items() if other != name and binding == attr
+        }
+        if not aliases.intersection(self._activated):
+            self._hide_skill(name)
+            if name in self._activated:
+                self._unregister_context_block(name)
+        if not aliases:
+            delattr(self._agent, attr)
+        self._activated.discard(name)
+        self._loaded.remove(name)
+        self._attr_map.pop(name)
+        self._load_order = [loaded for loaded in self._load_order if loaded != name]
+        self._sources.pop(name, None)
+        entry = self._discovered.get(name)
+        if entry is not None and entry.entry_point is None:
+            self._discovered.pop(name)
+        self._refresh_host_commands()
+        return True
+
     def _refresh_host_commands(self) -> None:
         """Notify an attached interactive host that loaded commands changed."""
         command_registry = getattr(self._agent, "_command_registry", None)

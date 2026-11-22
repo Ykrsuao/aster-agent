@@ -56,9 +56,10 @@
 ### U2：接通原生终端的 MCP 配置与连接生命周期
 
 - 类型：确认的能力断点与文档落差；优先级 P1。
-- 现状：TUI 新建和恢复会话均发送空 `mcpServers`；ACP 只消费客户端传入的服务器。框架已有 `.mcp.json` 读取能力，编码宿主未接入；ACP 文档却建议使用 Aster 自己的 `.mcp.json`。
+- 实施前：TUI 新建和恢复会话均发送空 `mcpServers`；ACP 只消费客户端传入的服务器。框架已有 `.mcp.json` 读取能力，编码宿主未接入；ACP 文档却建议使用 Aster 自己的 `.mcp.json`。
 - 已有能力：ACP 已支持 stdio/HTTP/SSE、重复名称处理、单服连接失败警告及部分失败容错。本项复用这些能力，重点补配置加载、优先级和终端状态呈现。
 - 完成标准：编码宿主读取受信任的项目/用户配置；明确其与 ACP 客户端转发配置的优先级；连接状态、失败原因与清理可见；用本地 stdio、显式凭据 HTTP、重复名称及断线恢复验收。OAuth 需单独验证。
+- 当前实现：ACP 会话读取用户与受信任工作区 `.mcp.json`，按客户端 > 工作区 > 用户整项覆盖；终端 `/mcp` 显示来源、工具数和安全失败原因，并可显式重试。发现和每次调用分别建立并关闭连接，`ready` 表示最近发现或调用成功；本项验收记录见文末。
 - 依据：[TUI 控制器](../packages/aster-tui/src/controller.rs)、[ACP MCP 创建路径](../packages/aster-acp/src/aster_acp/server.py)、[框架 MCPManager](../src/aster/mcp/tool.py)、[ACP 说明](../packages/aster-acp/README.md)。
 
 ### A1：项目级持续目标执行（候选方向）
@@ -179,3 +180,16 @@
 - 最终 Rust 回归 **643 passed、2 ignored**；fmt、Clippy（`-D warnings`）和 release build 通过。变更范围 11 个 Python 文件的 Ruff 与格式检查通过，全部 **1,348** 个受控 Python 文件通过 SPDX 检查；本地验收目录不属于交付源码。
 - 旧交互候选曾在已有 Windows 进程清理测试 `unexpected_backend_exit_stops_unmanaged_descendants` 中出现 `Backend processes started while cleanup was preparing`；后续完整验证通过。本项未修改 `process_tree.rs`，时序根因未证实，不把后续通过记作该竞态已修复。原始与最终日志保存在本地 `.review-temp/`，远端证据以本项最终候选 PR 检查为准。
 - 验收边界：模型使用离线替身，未调用真实模型 API；自动选用的实际质量仍需真实任务验证。Plan 模式仍限制模型生成执行，自动读取技能受该限制；显式调用继续走宿主路由。本项没有接入终端长期记忆或更换 embedding 配置。
+
+## U2 实施与验收（2026-11-22）
+
+- 实施分支：`codex/terminal-mcp-lifecycle-20261122`，基于 U1 候选 `d301a262`。质量基线、M1a 和 U1 仍由前置草稿 PR #1/#2/#3 交付；本项的本地与远端验证单独记录。
+- 新建与恢复会话读取用户和受信任工作区的 `.mcp.json`，按 ACP 客户端 > 工作区 > 用户整项覆盖。同名无效高优先级配置保留失败，不回退或混合凭据；重复名称、坏文件、禁用配置及单服失败均有可见诊断。stdio 使用会话工作区作为 cwd，参数与环境变量保持字面值，不展开 `${VAR}`。
+- 原生终端 `/mcp` 展示来源、transport、状态、工具数和安全失败原因；Ctrl+R 只读刷新，Ctrl+K 或 `/mcp reconnect NAME` 重新读取单服配置并重试。移除、禁用或发现失败会撤下旧工具；前台或后台忙碌时拒绝重试，迟到响应不覆盖新会话或视图。
+- 各服务器并发发现，每服限时 30 秒。发现与每次调用分别建立并关闭连接，`ready` 表示最近发现或调用成功，不承诺持续在线。关闭会话会取消并等待发现与调用结束；测试验证阻塞发现、阻塞调用及子进程退出。
+- 固定安全错误只暴露可理解原因和 HTTP 状态码，不包含响应正文、URL、header/env 或原始异常链。MCP 对象与回调排除持久快照，恢复按当前配置重建；真实子进程验收证明普通用户状态仍可保存、恢复。
+- 本地核心 MCP **313 passed**；registry 两文件 **75 passed**；完整 CLI **2,246 passed、41 skipped、1 deselected**；完整 ACP **964 passed、9 deselected、3 xfailed**。ACP 全套后补入不可信配置元数据读取失败的容错，最终 MCP/workspace trust **59 passed**；registry 的最后 context 清理修复由上述 75 项覆盖。各范围有重叠，不累加。
+- 真实 Python ACP → 本地 MCP wire **5 passed、14 deselected**，覆盖 stdio cwd、字面环境值、显式凭据 HTTP、401 脱敏、信任/优先级/重复名称、失败重试、快照恢复和关闭清理。模型使用 FakeLLM；没有连接真实用户服务。
+- Windows Rust 全套 **656 passed、2 ignored**；最终后端的 Rust → ACP → 本地 MCP 回归 **1 passed**。Rust fmt、Clippy（`-D warnings`）与 release build 通过；18 个变更 Python 文件的 Ruff/format、差异检查与全部 **1,354** 个受控 Python 文件的 SPDX 检查通过。
+- 本地原始证据位于 `.review-temp/u2-20261122/` 与 `.review-temp/u2-rust-20261122/`，不随源码提交。远端 CI、WSL 与 Windows bundle 安装验收须绑定本项最终候选 SHA，并记录在本分支的草稿 PR；前置 U1 成功不代替 U2 结果。Windows seed/reinstall/verify 仍只证明同版本重装。
+- 验收边界：OAuth 不在 ACP 中自动刷新，尚未端到端验收；没有调用真实模型 API、真实用户 MCP 服务或持久凭据。SSE 沿用现有支持，本项新增的完整本地 wire 旅程使用 stdio 与显式凭据 HTTP。

@@ -92,6 +92,65 @@ class TestRegistration:
         registry.register("custom.tool", skill)
         assert "custom.tool" in registry.discovered()
 
+    def test_unregister_withdraws_owned_tool_and_refreshes_commands(self, registry, agent):
+        tool = object()
+        agent._command_registry = MagicMock()
+        registry.register("mcp.lookup", tool)
+        registry.activate(["mcp.lookup"])
+        agent._command_registry.refresh_skill_commands.reset_mock()
+
+        assert registry.unregister("mcp.lookup", instance=tool)
+
+        assert not hasattr(agent, "lookup")
+        assert "mcp.lookup" not in registry.loaded()
+        assert "mcp.lookup" not in registry.activated()
+        assert "mcp.lookup" not in registry.discovered()
+        with pytest.raises(KeyError):
+            registry["mcp.lookup"]
+        agent._command_registry.refresh_skill_commands.assert_called_once_with()
+        assert not registry.unregister("mcp.lookup", instance=tool)
+
+    def test_unregister_does_not_remove_a_replacement(self, registry, agent):
+        previous, replacement = object(), object()
+        registry.register("mcp.lookup", previous)
+        registry.register("mcp.lookup", replacement)
+        registry.activate(["mcp.lookup"])
+
+        assert not registry.unregister("mcp.lookup", instance=previous)
+
+        assert registry["mcp.lookup"] is replacement
+        assert agent.lookup is replacement
+        assert "mcp.lookup" in registry.activated()
+
+    def test_unregister_preserves_another_registration_of_the_same_object(self, registry, agent):
+        tool = object()
+        registry.register("mcp.lookup", tool)
+        registry.register("custom.lookup", tool)
+        registry.activate(["mcp.lookup", "custom.lookup"])
+
+        assert registry.unregister("mcp.lookup", instance=tool)
+
+        assert agent.lookup is tool
+        assert registry.loaded() == ["custom.lookup"]
+        assert registry.activated() == ["custom.lookup"]
+        assert registry["custom.lookup"] is tool
+
+    def test_unregister_keeps_a_discovered_entry_point_reloadable(self, agent):
+        ep = MagicMock()
+        ep.name = "aster.fake"
+        ep.load.return_value = FakeSkill
+        with patch("aster.skill_registry.entry_points", return_value=[ep]):
+            registry = SkillRegistry(agent)
+        registry.load(["aster.fake"])
+        previous = registry["aster.fake"]
+
+        assert registry.unregister("aster.fake", instance=previous)
+        assert registry.discovered() == ["aster.fake"]
+        registry.load(["aster.fake"])
+
+        assert isinstance(registry["aster.fake"], FakeSkill)
+        assert registry["aster.fake"] is not previous
+
 
 # ---------------------------------------------------------------------------
 # Tests: Loading
@@ -223,6 +282,29 @@ def registry_ctx(agent_ctx):
 
 
 class TestContextBlockRegistration:
+    def test_unregister_removes_an_active_context_block(self, registry_ctx, agent_ctx):
+        skill = SkillWithContextBlock()
+        registry_ctx.register("aster.my_skill", skill)
+        registry_ctx.activate(["aster.my_skill"])
+
+        assert registry_ctx.unregister("aster.my_skill", instance=skill)
+
+        assert "my_status" not in agent_ctx.context_manager
+        assert not hasattr(agent_ctx, "my_skill")
+
+    def test_unregister_inactive_skill_preserves_another_skills_context(
+        self, registry_ctx, agent_ctx
+    ):
+        active, inactive = SkillWithContextBlock(), SkillWithContextBlock()
+        registry_ctx.register("aster.my_skill", active)
+        registry_ctx.register("aster.other", inactive)
+        registry_ctx.activate(["aster.my_skill"])
+
+        assert registry_ctx.unregister("aster.other", instance=inactive)
+
+        assert "my_status" in agent_ctx.context_manager
+        assert registry_ctx["aster.my_skill"] is active
+
     def test_activate_registers_context_block(self, registry_ctx, agent_ctx):
         skill = SkillWithContextBlock()
         registry_ctx.register("aster.my_skill", skill)

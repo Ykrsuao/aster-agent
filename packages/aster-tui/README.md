@@ -298,6 +298,30 @@ The standard ACP cost field remains a complete session total; the HUD's known
 USD subtotal travels separately in Aster metadata so other clients do not mistake
 partial accounting for a complete total.
 
+## MCP servers
+
+Use `/mcp` to inspect configured MCP servers. The list shows each server's
+configuration source, transport, readiness, tool count and failure reason.
+Type to filter, use Up/Down to select, and Enter to inspect details. Ctrl+R
+refreshes the displayed state without launching a server. Ctrl+K retries the
+selected server; `/mcp reconnect NAME` retries a server directly after you fix
+its configuration or restore the service. Reconnection requires an idle session.
+
+The backend reads user `.mcp.json`, workspace `.mcp.json`, and client-supplied
+definitions, with client > workspace > user priority. Same-name entries are
+replaced as a whole. The panel's empty state shows the applicable file locations.
+Workspace definitions require the existing workspace trust approval. Stdio
+programs run in that workspace; HTTP and SSE accept explicit headers. See the
+[configuration examples and rules](../aster-acp/README.md#mcp-configuration-and-recovery).
+
+`ready` means tools were discovered or the last call succeeded. Connections are
+opened and closed for each discovery or call. Failures are visible without
+blocking the conversation, and status omits credentials and response bodies.
+Deleting a server or setting `disabled: true` takes effect when you reconnect
+that name or reopen the session. Status refresh alone does not apply edits.
+New and restored sessions read the current configuration; closing a session
+cancels in-flight MCP work and cleans up its transports.
+
 ## Context and cost
 
 The HUD's usage row is present from startup. Before the first response, a known
@@ -513,7 +537,7 @@ Commands: `/new`, `/sessions`, `/resume ID`, `/drafts`, `/tree`, `/rewind`, `/se
 `/steer TEXT`, `/attach [PATH]`, `/attachments`, `/retry`, `/reconnect`, `/model [ALIAS]`,
 `/effort [LEVEL|auto|status]`, `/reasoning [LEVEL|default]`, `/mode [code|plan]`,
 `/permissions [auto|manual|accept_edits|plan]`, `/sandbox [on|off]`, `/tasks`, `/stop JOB-ID`, `/tools`,
-`/changes`, `/undo`, `/status`, `/context [all]`, `/skills`, `/hud`, `/logs`, `/help`, `/cancel`, `/exit` and commands
+`/changes`, `/undo`, `/status`, `/context [all]`, `/skills`, `/mcp [reconnect NAME]`, `/hud`, `/logs`, `/help`, `/cancel`, `/exit` and commands
 advertised by the agent.
 The interface follows the layout observed in Grok Build 1.0.77: a grayscale
 canvas, full-width conversation, compact bordered composer and session title on

@@ -10,7 +10,7 @@ import threading
 from contextlib import suppress
 from pathlib import Path
 from typing import Literal
-from unittest.mock import AsyncMock, Mock, call, patch
+from unittest.mock import ANY, AsyncMock, Mock, call, patch
 
 import pytest
 from acp import PROTOCOL_VERSION, RequestError, resource_link_block, text_block
@@ -1524,7 +1524,7 @@ async def test_adapter_connects_baseline_stdio_mcp_servers(tmp_path):
     )
 
     with patch(
-        "aster_acp.server.MCPManager.create_stdio_server",
+        "aster_acp._mcp.MCPManager.create_stdio_server",
         new=AsyncMock(return_value=_MCPTools()),
     ) as create:
         session = await adapter.new_session(str(tmp_path), mcp_servers=[server])
@@ -1534,6 +1534,9 @@ async def test_adapter_connects_baseline_stdio_mcp_servers(tmp_path):
         command="lookup-server",
         args=["--stdio"],
         env={"TOKEN": "test"},
+        cwd=str(tmp_path.resolve()),
+        call_observer=ANY,
+        safe_errors=True,
     )
     runtime = await _session(adapter, session.session_id)
     assert "mcp.lookup" in runtime.agent.skills.loaded()
@@ -1561,7 +1564,7 @@ async def test_adapter_connects_forwarded_http_and_sse_mcp_servers(tmp_path):
     ]
 
     with patch(
-        "aster_acp.server.MCPManager.create_url_server",
+        "aster_acp._mcp.MCPManager.create_url_server",
         new=AsyncMock(side_effect=[_MCPTools(), _MCPTools()]),
     ) as create:
         session = await adapter.new_session(str(tmp_path), mcp_servers=servers)
@@ -1572,12 +1575,18 @@ async def test_adapter_connects_forwarded_http_and_sse_mcp_servers(tmp_path):
             "https://mcp.example.test/mcp",
             headers={"Authorization": "Bearer test"},
             transport="streamable-http",
+            call_observer=ANY,
+            allow_oauth_refresh=False,
+            safe_errors=True,
         ),
         call(
             "remote-sse",
             "https://mcp.example.test/sse",
             headers={},
             transport="sse",
+            call_observer=ANY,
+            allow_oauth_refresh=False,
+            safe_errors=True,
         ),
     ]
     runtime = await _session(adapter, session.session_id)
@@ -1594,11 +1603,11 @@ async def test_adapter_skips_forwarded_acp_transport_mcp_server(tmp_path):
 
     with (
         patch(
-            "aster_acp.server.MCPManager.create_stdio_server",
+            "aster_acp._mcp.MCPManager.create_stdio_server",
             new=AsyncMock(),
         ) as create_stdio,
         patch(
-            "aster_acp.server.MCPManager.create_url_server",
+            "aster_acp._mcp.MCPManager.create_url_server",
             new=AsyncMock(),
         ) as create_url,
     ):
@@ -1640,7 +1649,7 @@ async def test_adapter_loads_healthy_mcp_when_another_server_fails(tmp_path):
     ]
 
     with patch(
-        "aster_acp.server.MCPManager.create_url_server",
+        "aster_acp._mcp.MCPManager.create_url_server",
         new=AsyncMock(
             side_effect=[
                 RuntimeError("Could not connect: ConnectionRefusedError: refused"),
@@ -1662,7 +1671,7 @@ async def test_adapter_loads_healthy_mcp_when_another_server_fails(tmp_path):
         if isinstance(update, AgentMessageChunk)
     )
     assert "MCP server 'offline' was not loaded" in warning
-    assert "ConnectionRefusedError: refused" in warning
+    assert "ConnectionRefusedError: refused" not in warning
     await adapter.close()
 
 
@@ -1679,7 +1688,7 @@ async def test_adapter_allows_independent_session_creation(tmp_path):
         await release.wait()
         return _MCPTools()
 
-    with patch("aster_acp.server.MCPManager.create_stdio_server", side_effect=create_mcp):
+    with patch("aster_acp._mcp.MCPManager.create_stdio_server", side_effect=create_mcp):
         first_session = asyncio.create_task(
             adapter.new_session(str(tmp_path), mcp_servers=[server])
         )
@@ -1971,7 +1980,7 @@ async def test_adapter_loads_durable_session_when_forwarded_mcp_is_unavailable(t
         type="http",
     )
     with patch(
-        "aster_acp.server.MCPManager.create_url_server",
+        "aster_acp._mcp.MCPManager.create_url_server",
         new=AsyncMock(
             side_effect=RuntimeError(
                 "Could not connect to MCP server 'offline': ConnectionRefusedError: refused"
@@ -1990,7 +1999,7 @@ async def test_adapter_loads_durable_session_when_forwarded_mcp_is_unavailable(t
         if isinstance(update, AgentMessageChunk)
     )
     assert "session is still usable" in warning
-    assert "ConnectionRefusedError: refused" in warning
+    assert "ConnectionRefusedError: refused" not in warning
     await load_adapter.close()
 
 
@@ -2041,11 +2050,11 @@ async def test_adapter_skips_duplicate_mcp_names_without_failing_startup(tmp_pat
 
     with (
         patch(
-            "aster_acp.server.MCPManager.create_stdio_server",
+            "aster_acp._mcp.MCPManager.create_stdio_server",
             new=AsyncMock(return_value=_MCPTools()),
         ) as create_stdio,
         patch(
-            "aster_acp.server.MCPManager.create_url_server",
+            "aster_acp._mcp.MCPManager.create_url_server",
             new=AsyncMock(return_value=_MCPTools()),
         ) as create_url,
     ):
@@ -2255,7 +2264,7 @@ async def test_mcp_server_named_like_a_core_tool_cannot_replace_it(tmp_path):
     server = McpServerStdio(name="shell", command="lookup-server", args=[], env=[])
 
     with patch(
-        "aster_acp.server.MCPManager.create_stdio_server",
+        "aster_acp._mcp.MCPManager.create_stdio_server",
         new=AsyncMock(return_value=_MCPTools()),
     ):
         created = await adapter.new_session(str(tmp_path), mcp_servers=[server])
@@ -2274,7 +2283,7 @@ async def test_mcp_server_with_a_reserved_name_does_not_kill_the_session(tmp_pat
     server = McpServerStdio(name="runtime", command="lookup-server", args=[], env=[])
 
     with patch(
-        "aster_acp.server.MCPManager.create_stdio_server",
+        "aster_acp._mcp.MCPManager.create_stdio_server",
         new=AsyncMock(return_value=_MCPTools()),
     ):
         created = await adapter.new_session(str(tmp_path), mcp_servers=[server])
@@ -2297,7 +2306,7 @@ async def test_a_skipped_mcp_server_is_reported_to_the_client(tmp_path):
     server = McpServerStdio(name="shell", command="lookup-server", args=[], env=[])
 
     with patch(
-        "aster_acp.server.MCPManager.create_stdio_server",
+        "aster_acp._mcp.MCPManager.create_stdio_server",
         new=AsyncMock(return_value=_MCPTools()),
     ):
         await adapter.new_session(str(tmp_path), mcp_servers=[server])

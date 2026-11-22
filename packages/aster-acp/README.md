@@ -95,9 +95,10 @@ This is a known Zed limitation, tracked in
 plumbing largely exists and the work is queued, but as of this writing it is
 unresolved.
 
-Configure the MCP server directly for Aster instead — through Aster's own
-`.mcp.json` — and it works normally, because the agent then owns the
-connection and its credentials rather than borrowing Zed's.
+Configure servers with explicit credentials in Aster's own
+[`.mcp.json`](#mcp-configuration-and-recovery). The adapter supports stdio,
+HTTP and SSE and does not borrow Zed's OAuth tokens. Interactive OAuth login
+and automatic OAuth refresh are not enabled by this terminal integration.
 
 ## Launching the server yourself
 
@@ -475,8 +476,9 @@ one-process-per-agent daemon will make that isolation an OS process boundary.
 
 Installed `aster.skills` entry points are loaded into the shared skill registry
 but remain opt-in. The agent can activate a relevant skill with
-`self.skills.activate(["name"])`. Stdio MCP servers supplied by an ACP client
-are registered and activated as `mcp.<name>` skills for that session.
+`self.skills.activate(["name"])`. MCP servers selected from Aster configuration
+or supplied by an ACP client are registered and activated as `mcp.<name>` skills
+for that session.
 
 Workspace and user skill roots are shared with the terminal host through
 layered `settings.yaml`. New configuration should use:
@@ -539,7 +541,89 @@ PNG/JPEG/GIF/WebP images. Images are forwarded to the selected model without
 requiring `media_inputs` configuration; image-only prompts are supported. Provider
 rejections are returned with their error message.
 
-Stdio, HTTP, and SSE MCP servers forwarded by an ACP client are supported.
+## MCP configuration and recovery
+
+New and restored sessions read these sources, in increasing priority:
+
+1. User `.mcp.json` in `ASTER_USER_DIR`, or `$XDG_CONFIG_HOME/aster/`, or
+   `~/.config/aster/` when neither variable is set.
+2. `.mcp.json` directly inside the session workspace, after workspace trust.
+3. The ACP client's `mcpServers` supplied with `session/new` or `session/load`.
+
+A higher-priority server replaces the complete lower-priority entry with the
+same name. Headers, environment variables and endpoints are never combined
+across sources. An invalid higher-priority entry fails visibly instead of
+falling back to a different server. Within an ACP client list, the first entry
+with a name wins and duplicates produce a warning. Duplicate JSON server keys
+are rejected for that name. Server names contain 1–256 printable characters,
+without surrounding whitespace. Malformed files and individual server failures
+do not prevent a session from opening.
+
+For example, point the stdio entry at your own MCP program and supply explicit
+headers for a remote HTTP service:
+
+```json
+{
+  "mcpServers": {
+    "local": {
+      "command": "uv",
+      "args": ["run", "python", "tools/mcp_server.py"],
+      "env": {"SERVICE_MODE": "development"}
+    },
+    "remote": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp",
+      "headers": {"Authorization": "Bearer <your-token>"}
+    },
+    "optional": {"disabled": true}
+  }
+}
+```
+
+`type` (or `transport`) accepts `stdio`, `http`/`streamable-http`, or `sse`.
+Without it, a `url` selects HTTP; otherwise the entry is stdio. Stdio programs
+always run in the session workspace, including those configured in the user
+file. Arguments, environment values and headers stay literal: `${VAR}` is not
+expanded. User configuration can hold explicit credentials outside the project;
+stdio wrappers can obtain their own credentials. OAuth requires separate setup
+and verification and is not started automatically on an HTTP 401.
+
+The regular terminal trust screen covers `.mcp.json`. Other ACP clients can
+trust a workspace with `aster trust` run in that folder. Until then, project MCP
+configuration is skipped with a warning; user and client configuration remain
+available. This gate does not change ordinary file-reading permissions.
+
+In the terminal, `/mcp` shows source, transport, state, tool count and a safe
+failure reason. `ready` means discovery or the last call succeeded, not that a
+permanent connection is open. Discovery and each tool call own and close their
+transport independently. Servers are discovered concurrently, with a 30-second
+bound per server. Failed calls update status; a later successful call restores
+`ready`.
+
+Use `/mcp reconnect NAME` after correcting a configuration or restoring a
+service. It rereads configuration for that name and discovers the tools again.
+Removing the entry or setting `disabled: true` withdraws its old registration;
+failed discovery also leaves the previous tools withdrawn. A read-only status
+refresh does not reread files or launch a server. Reconnection requires an idle
+session, including background jobs. Closing a session cancels and waits for
+in-flight discovery and calls before releasing its tools.
+
+Clients may use the optional extension advertised by `initialize` as
+`_meta.aster.mcp: true`:
+
+| Request | Parameters | Result |
+| --- | --- | --- |
+| `_aster/session/mcp/status` | `sessionId` | Current in-memory state; no network or configuration reads |
+| `_aster/session/mcp/reconnect` | `sessionId`, `name` | Recheck one server and return updated state |
+
+Both return `{servers: [{name, source, transport, state, toolCount, error}],
+warnings: [...]}`. States include `connecting`, `ready`, `failed`, `disabled`
+and `closed`. They omit command arguments, environment values, headers and URLs.
+HTTP failures expose status codes and fixed explanations, not response bodies.
+Clients must resend their own MCP definitions on session load. Live MCP tools,
+clients, credentials and callbacks are excluded from agent snapshots and rebuilt
+from current configuration, so they do not prevent ordinary agent state from
+being saved and restored.
+
 ACP-transport MCP proxies and additional workspace directories are not advertised
-yet. An unavailable, duplicate, or unsupported MCP server is skipped with a session
-warning so it cannot prevent a new or restored Aster session from opening.
+yet. Unsupported client servers are skipped with a warning.

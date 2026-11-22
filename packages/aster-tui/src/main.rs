@@ -524,6 +524,7 @@ fn handle_mouse(
                         overlay,
                         Overlay::Context
                             | Overlay::Tools
+                            | Overlay::Mcp
                             | Overlay::Changes
                             | Overlay::Attachments
                             | Overlay::Tasks

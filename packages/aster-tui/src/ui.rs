@@ -2068,8 +2068,9 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
             | Overlay::Hud
     ) || (kind == Overlay::Skills && state.skills.detail.is_none());
     let choices = state.choices();
-    if kind != Overlay::Skills
-        || (!state.skills.loading && state.skills.error.is_none() && state.skills.detail.is_none())
+    if (kind != Overlay::Skills
+        || (!state.skills.loading && state.skills.error.is_none() && state.skills.detail.is_none()))
+        && (kind != Overlay::Mcp || (!state.mcp.loading && state.mcp.error.is_none()))
     {
         state.selected = state.selected.min(choices.len().saturating_sub(1));
     }
@@ -2213,6 +2214,7 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
         Overlay::Approval => " Review execution ",
         Overlay::Tasks => " Task progress ",
         Overlay::Skills => " Skills · /skills ",
+        Overlay::Mcp => " MCP servers · /mcp ",
         Overlay::Rollback => " Choose rollback scope ",
         Overlay::RollbackConfirm => " Review file rollback ",
         Overlay::UndoConfirm => " Undo file rollback ",
@@ -2330,6 +2332,7 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
             Overlay::Hud => "Find a HUD setting…",
             Overlay::Tasks => "Find a plan step or background job…",
             Overlay::Skills => "Find a skill by name or description…",
+            Overlay::Mcp => "Find an MCP server by name, source or state…",
             _ => "What would you like to do?",
         };
         line_at(
@@ -2507,6 +2510,8 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
         Overlay::Skills if state.skills.detail.is_some() => "PgUp/PgDn scroll · Esc back",
         Overlay::Skills if content.width < 48 => "↑↓ · Enter view · Ctrl+R refresh",
         Overlay::Skills => "↑↓ choose · Enter view details · Ctrl+R refresh",
+        Overlay::Mcp if content.width < 48 => "Ctrl+K retry · Ctrl+R refresh",
+        Overlay::Mcp => "↑↓ choose · Ctrl+K retry · Ctrl+R refresh · PgDn scroll",
         Overlay::Hud => "↑↓ choose · Enter apply · Esc close",
         Overlay::Rollback => "↑↓ scope · Enter preview · Esc cancel",
         Overlay::RollbackConfirm | Overlay::UndoConfirm => {
@@ -2522,6 +2527,7 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
         && !choices.is_empty()
         && (kind != Overlay::Models || content.width >= 38)
         && (kind != Overlay::Skills || content.width >= 64)
+        && (kind != Overlay::Mcp || content.width >= 72)
         && (!matches!(
             kind,
             Overlay::Modes | Overlay::Permissions | Overlay::Sandbox
@@ -2549,6 +2555,51 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
     }
     content.height = content.height.saturating_sub(1);
     if content.height == 0 {
+        return;
+    }
+    if kind == Overlay::Mcp
+        && (state.mcp.loading || state.mcp.error.is_some() || choices.is_empty())
+    {
+        let text = if let Some(error) = state.mcp.error.as_deref() {
+            format!(
+                "{}\nCtrl+R refreshes status; Esc closes this panel.",
+                clean(error)
+            )
+        } else if state.mcp.loading {
+            "Loading MCP status…".to_owned()
+        } else if !state.mcp.servers.is_empty() {
+            "No MCP servers match this search. Clear or change the search.".to_owned()
+        } else {
+            let user = crate::hud::config::user_directory()
+                .map(|path| clean(&path.join(".mcp.json").to_string_lossy()))
+                .unwrap_or_else(|| "~/.config/aster/.mcp.json".into());
+            let project = clean(
+                &std::path::Path::new(&state.workspace)
+                    .join(".mcp.json")
+                    .to_string_lossy(),
+            );
+            format!(
+                "No MCP servers configured for this session.\n\nUser: {user}\nProject: {project}\n\nAdd entries under mcpServers, then start a new session. Project configuration requires workspace trust."
+            )
+        };
+        let mut rows = Vec::new();
+        for warning in &state.mcp.warnings {
+            append(
+                &mut rows,
+                Line::styled(format!("Warning: {}", clean(warning)), panel.fg(p.amber)),
+                content.width as usize,
+                None,
+            );
+        }
+        for line in text.lines() {
+            append(
+                &mut rows,
+                Line::styled(line.to_owned(), panel),
+                content.width as usize,
+                None,
+            );
+        }
+        render_detail(frame, state, content, rows, p, hits);
         return;
     }
     if kind == Overlay::Skills {
@@ -2911,6 +2962,7 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
         | Overlay::Sandbox
         | Overlay::Tasks
         | Overlay::Skills
+        | Overlay::Mcp
         | Overlay::Hud
         | Overlay::Changes
             if searchable =>
@@ -3113,7 +3165,11 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
             }
             let tools = matches!(
                 kind,
-                Overlay::Tools | Overlay::Changes | Overlay::Tasks | Overlay::Attachments
+                Overlay::Tools
+                    | Overlay::Changes
+                    | Overlay::Tasks
+                    | Overlay::Attachments
+                    | Overlay::Mcp
             );
             if kind == Overlay::Changes && content.height < 4 {
                 line_at(
@@ -3468,6 +3524,43 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
                                 }
                             }
                         }
+                    }
+                } else if kind == Overlay::Mcp {
+                    if let Some(choice) = choices.get(state.selected) {
+                        for text in [
+                            choice.label.clone(),
+                            choice.detail.clone(),
+                            "ready = tools loaded at last discovery.".into(),
+                        ] {
+                            append(
+                                &mut rows,
+                                Line::styled(text, panel),
+                                detail.width as usize,
+                                None,
+                            );
+                        }
+                        if let Some(error) = state
+                            .mcp
+                            .servers
+                            .iter()
+                            .find(|server| server["name"] == choice.value)
+                            .and_then(|server| server["error"].as_str())
+                        {
+                            append(
+                                &mut rows,
+                                Line::styled(clean(error), panel.fg(p.amber)),
+                                detail.width as usize,
+                                None,
+                            );
+                        }
+                    }
+                    for warning in &state.mcp.warnings {
+                        append(
+                            &mut rows,
+                            Line::styled(format!("Warning: {}", clean(warning)), panel.fg(p.amber)),
+                            detail.width as usize,
+                            None,
+                        );
                     }
                 } else if kind == Overlay::Tasks {
                     if let Some(choice) = choices.get(state.selected) {
@@ -5046,6 +5139,91 @@ mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
     use std::time::Instant;
+
+    fn mcp_state() -> State {
+        let mut state = State::new("C:/workspace".into(), "model".into(), false);
+        state.phase = Phase::Ready;
+        state.editor.insert_str("keep this 中文 draft");
+        state.mcp.supported = true;
+        state.mcp.servers = vec![
+            serde_json::json!({"name":"local", "source":"project", "transport":"stdio", "state":"ready", "toolCount":2, "error":null,
+                "env":{"TOKEN":"secret-not-for-display"}, "url":"https://secret-not-for-display", "headers":{"Authorization":"secret-not-for-display"}}),
+            serde_json::json!({"name":"broken", "source":"user", "transport":"http", "state":"failed", "toolCount":0, "error":"Discovery timed out.\u{1b}[2J"}),
+            serde_json::json!({"name":"off", "source":"client", "transport":"stdio", "state":"disabled", "toolCount":0, "error":null}),
+        ];
+        state.open(Overlay::Mcp);
+        state
+    }
+
+    #[test]
+    fn mcp_browser_shows_safe_status_details_and_searches_at_narrow_widths() {
+        for columns in [48, 80, 120] {
+            let mut state = mcp_state();
+            let draft = state.editor.lines().to_vec();
+            let cursor = state.editor.cursor();
+            let (text, hits) = snapshot(&mut state, columns, 24);
+            assert!(text.contains("MCP servers · /mcp"), "{text}");
+            assert!(text.contains("local · ready"), "{text}");
+            assert!(text.contains("off · disabled"), "{text}");
+            assert!(text.contains("project · stdio · 2 tools loaded"), "{text}");
+            assert!(text.contains("Ctrl+K retry"), "{text}");
+            assert!(text.contains("Ctrl+R refresh"), "{text}");
+            assert!(!text.contains("secret-not-for-display"), "{text}");
+            assert_eq!(hits.choice_rows.len(), 3);
+            assert!(hits.query.is_some());
+            assert!(hits
+                .choice_rows
+                .iter()
+                .all(|(area, _)| area.right() <= columns));
+            state.selected = 1;
+            let (error, _) = snapshot(&mut state, columns, 24);
+            assert!(error.contains("Discovery timed out."), "{error}");
+            assert!(!error.contains('\u{1b}'));
+            state.query = "client".into();
+            let (filtered, hits) = snapshot(&mut state, columns, 24);
+            assert!(filtered.contains("off · disabled"), "{filtered}");
+            assert!(!filtered.contains("local · ready"), "{filtered}");
+            assert_eq!(hits.choice_rows.len(), 1);
+            assert_eq!(state.editor.lines(), draft);
+            assert_eq!(state.editor.cursor(), cursor);
+        }
+    }
+
+    #[test]
+    fn mcp_empty_and_error_states_show_configuration_and_trust_guidance() {
+        for columns in [48, 80, 120] {
+            let mut state = mcp_state();
+            state.mcp.servers.clear();
+            state.mcp.warnings = vec!["Project configuration requires trust.".into()];
+            let (top, hits) = snapshot(&mut state, columns, 24);
+            assert!(top.contains("Warning:"), "{top}");
+            assert!(top.contains("No MCP servers"), "{top}");
+            assert!(hits.choice_rows.is_empty());
+            state.detail_scroll = u16::MAX;
+            let (bottom, _) = snapshot(&mut state, columns, 24);
+            let all = format!("{top}\n{bottom}");
+            assert!(all.contains("User:") && all.contains("Project:"), "{all}");
+            assert!(all.contains(".mcp.json"), "{all}");
+            assert!(all.contains("mcpServers"), "{all}");
+            assert!(all.contains("workspace trust"), "{all}");
+            state.mcp.warnings.clear();
+            state.detail_scroll = 0;
+            state.mcp.loading = true;
+            assert!(snapshot(&mut state, columns, 24)
+                .0
+                .contains("Loading MCP status"));
+            state.mcp.loading = false;
+            state.mcp.error =
+                Some("Backend does not support MCP controls. Update aster-acp.".into());
+            let (error, hits) = snapshot(&mut state, columns, 24);
+            assert!(
+                error.contains("Update") && error.contains("aster-acp"),
+                "{error}"
+            );
+            assert!(error.contains("Ctrl+R refreshes"), "{error}");
+            assert!(hits.choice_rows.is_empty());
+        }
+    }
 
     fn skills_state() -> State {
         let mut state = State::new("workspace".into(), "model".into(), false);

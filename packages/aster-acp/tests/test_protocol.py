@@ -190,6 +190,358 @@ class _RecordingClient:
             self.smoke_received.set()
 
 
+def _mcp_stdio_config(workspace: Path, *, label: str = "project"):
+    fixture = Path(__file__).parent / "fixtures" / "controlled_mcp.py"
+    control = workspace / f"{label}-control.json"
+    events = workspace / f"{label}-events.jsonl"
+    control.write_text(json.dumps({"label": label}), encoding="utf-8")
+    return (
+        {
+            "command": sys.executable,
+            "args": [str(fixture), str(control), str(events)],
+            "env": {"ASTER_MCP_TEST_LITERAL": "${UNCHANGED_MCP_TEST_VALUE}"},
+        },
+        control,
+        events,
+    )
+
+
+def _mcp_events(path: Path):
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines(keepends=True)
+        if line.endswith("\n")
+    ]
+
+
+def _mcp_process_alive(pid: int) -> bool:
+    import os
+
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        kernel.OpenProcess.restype = ctypes.c_void_p
+        kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        kernel.WaitForSingleObject.restype = ctypes.c_uint32
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = kernel.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE, never terminate.
+        if not handle:
+            if ctypes.get_last_error() == 87:  # No such process.
+                return False
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            state = kernel.WaitForSingleObject(handle, 0)
+            if state == 0xFFFFFFFF:
+                raise ctypes.WinError(ctypes.get_last_error())
+            return state == 258  # WAIT_TIMEOUT: still running.
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+async def _mcp_status(connection, session_id: str, *, reconnect: bool = False):
+    params = {"sessionId": session_id}
+    if reconnect:
+        params["name"] = "probe"
+    return await asyncio.wait_for(
+        connection.ext_method(
+            "aster/session/mcp/reconnect" if reconnect else "aster/session/mcp/status", params
+        ),
+        timeout=_HANG_TIMEOUT,
+    )
+
+
+async def test_acp_subprocess_mcp_stdio_reload_resume_and_cleanup(tmp_path, monkeypatch):
+    """A real peer follows the session cwd, reconnects, and is closed after every operation."""
+    monkeypatch.setenv("ASTER_USER_DIR", str(tmp_path / "user-config"))
+    config, control, events = _mcp_stdio_config(tmp_path)
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"probe": config}}), encoding="utf-8"
+    )
+    client = _RecordingClient()
+    fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
+    # Deliberately start the backend outside the session workspace.
+    backend_cwd = tmp_path / "backend"
+    backend_cwd.mkdir()
+    async with spawn_agent_process(
+        client, sys.executable, str(fixture), "--mcp", cwd=backend_cwd
+    ) as (connection, _process):
+        initialized = await connection.initialize(PROTOCOL_VERSION)
+        assert initialized.field_meta["aster"]["mcp"] is True
+        session = await connection.new_session(str(tmp_path))
+        status = await _mcp_status(connection, session.session_id)
+        assert [(row["name"], row["source"], row["state"]) for row in status["servers"]] == [
+            ("probe", "project", "ready")
+        ]
+        assert status["servers"][0]["toolCount"] == 1
+        await connection.prompt(session.session_id, [text_block("call the MCP probe")])
+        assert any(
+            isinstance(update, AgentMessageChunk)
+            and update.content.text == "MCP probe: project: wire"
+            for _, update in client.updates
+        )
+
+        control.write_text(json.dumps({"label": "project", "mode": "offline"}), encoding="utf-8")
+        failed = await _mcp_status(connection, session.session_id, reconnect=True)
+        assert failed["servers"][0]["state"] == "failed"
+        assert failed["servers"][0]["error"]
+        control.write_text(json.dumps({"label": "recovered"}), encoding="utf-8")
+        recovered = await _mcp_status(connection, session.session_id, reconnect=True)
+        assert recovered["servers"][0]["state"] == "ready"
+        await connection.close_session(session.session_id)
+
+        await connection.load_session(str(tmp_path), session.session_id)
+        assert (await _mcp_status(connection, session.session_id))["servers"][0]["state"] == "ready"
+        await connection.prompt(session.session_id, [text_block("call again after resume")])
+        assert any(
+            isinstance(update, AgentMessageChunk)
+            and update.content.text == "MCP probe: recovered: wire"
+            for _, update in client.updates
+        )
+        assert any(
+            isinstance(update, AgentMessageChunk)
+            and update.content.text == "MCP durable state restored"
+            for _, update in client.updates
+        )
+        await connection.close_session(session.session_id)
+
+    recorded = _mcp_events(events)
+    started = [event for event in recorded if event["event"] == "started"]
+    assert len(started) >= 6
+    assert {event["pid"] for event in started} == {
+        event["pid"] for event in recorded if event["event"] == "stopped"
+    }
+    assert all(Path(event["cwd"]).resolve() == tmp_path.resolve() for event in started)
+    assert all(event["literal"] == "${UNCHANGED_MCP_TEST_VALUE}" for event in started)
+
+
+async def test_acp_subprocess_mcp_trust_and_client_precedence(tmp_path, monkeypatch):
+    from acp.schema import EnvVariable, McpServerStdio
+
+    from aster import workspace_trust
+
+    user_dir = tmp_path / "user-config"
+    user_dir.mkdir()
+    monkeypatch.setenv("ASTER_USER_DIR", str(user_dir))
+    monkeypatch.delenv("ASTER_TRUST_ALL_WORKSPACES", raising=False)
+    user, _, user_events = _mcp_stdio_config(tmp_path, label="user")
+    project, _, project_events = _mcp_stdio_config(tmp_path, label="project")
+    forwarded, _, client_events = _mcp_stdio_config(tmp_path, label="client")
+    (user_dir / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"probe": user}}), encoding="utf-8"
+    )
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"probe": project}}), encoding="utf-8"
+    )
+    fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
+    async with spawn_agent_process(
+        _RecordingClient(), sys.executable, str(fixture), "--enforce-trust", cwd=tmp_path
+    ) as (connection, _process):
+        await connection.initialize(PROTOCOL_VERSION)
+        session = await connection.new_session(str(tmp_path))
+        status = await _mcp_status(connection, session.session_id)
+        assert status["servers"][0]["source"] == "user"
+        assert status["servers"][0]["state"] == "ready"
+        assert status["warnings"]
+        assert not project_events.exists()
+        await connection.close_session(session.session_id)
+
+        client_server = McpServerStdio(
+            name="probe",
+            command=forwarded["command"],
+            args=forwarded["args"],
+            env=[EnvVariable(name=key, value=value) for key, value in forwarded["env"].items()],
+        )
+        duplicate = client_server.model_copy(update={"args": project["args"]})
+        session = await connection.new_session(
+            str(tmp_path), mcp_servers=[client_server, duplicate]
+        )
+        status = await _mcp_status(connection, session.session_id)
+        assert status["servers"][0]["source"] == "client"
+        assert status["servers"][0]["state"] == "ready"
+        assert status["warnings"]
+        assert not project_events.exists()
+        await connection.close_session(session.session_id)
+
+        workspace_trust.trust(tmp_path)
+        session = await connection.new_session(str(tmp_path))
+        status = await _mcp_status(connection, session.session_id)
+        assert status["servers"][0]["source"] == "project"
+        assert status["servers"][0]["state"] == "ready"
+        await connection.close_session(session.session_id)
+
+    for path in (user_events, project_events, client_events):
+        assert any(event["event"] == "started" for event in _mcp_events(path))
+
+
+@pytest.mark.parametrize("operation", ["call", "reconnect"])
+async def test_acp_subprocess_mcp_close_cancels_inflight_work(tmp_path, monkeypatch, operation):
+    monkeypatch.setenv("ASTER_USER_DIR", str(tmp_path / "user-config"))
+    config, control, events = _mcp_stdio_config(tmp_path)
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"probe": config}}), encoding="utf-8"
+    )
+    fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
+    async with spawn_agent_process(
+        _RecordingClient(), sys.executable, str(fixture), "--mcp", cwd=tmp_path
+    ) as (connection, _process):
+        await connection.initialize(PROTOCOL_VERSION)
+        session = await connection.new_session(str(tmp_path))
+        before = len(_mcp_events(events))
+        control.write_text(
+            json.dumps(
+                {"label": "project", "mode": "block_call" if operation == "call" else "block_start"}
+            ),
+            encoding="utf-8",
+        )
+        pending = asyncio.create_task(
+            connection.prompt(session.session_id, [text_block("call a blocked MCP peer")])
+            if operation == "call"
+            else _mcp_status(connection, session.session_id, reconnect=True)
+        )
+        try:
+            async with asyncio.timeout(_HANG_TIMEOUT):
+                while not any(
+                    event["event"] == ("call" if operation == "call" else "started")
+                    for event in _mcp_events(events)[before:]
+                ):
+                    await asyncio.sleep(0.02)
+                await connection.close_session(session.session_id)
+                result = (await asyncio.gather(pending, return_exceptions=True))[0]
+                while any(
+                    _mcp_process_alive(event["pid"])
+                    for event in _mcp_events(events)
+                    if event["event"] == "started"
+                ):
+                    await asyncio.sleep(0.02)
+            if operation == "call":
+                assert result.stop_reason == "cancelled"
+            else:
+                assert isinstance(result, Exception)
+        finally:
+            if not pending.done():
+                pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+
+async def test_acp_subprocess_mcp_http_credentials_errors_and_recovery(tmp_path, monkeypatch):
+    """Use real HTTP with explicit headers; a rejected credential never reaches status or turns."""
+    import socket
+
+    import uvicorn
+    from mcp.server.fastmcp import FastMCP
+    from starlette.responses import PlainTextResponse
+
+    monkeypatch.setenv("ASTER_USER_DIR", str(tmp_path / "user-config"))
+    mcp = FastMCP("http-probe", stateless_http=True, json_response=True, log_level="ERROR")
+    calls = []
+
+    @mcp.tool()
+    async def echo(value: str) -> str:
+        calls.append(value)
+        return f"http: {value}"
+
+    app = mcp.streamable_http_app()
+    accepted = True
+    credential = "Bearer fixture-token-never-real"
+    rejected_body = "fixture-response-body-secret"
+
+    async def authenticated(scope, receive, send):
+        if scope["type"] == "http":
+            authorization = dict(scope["headers"]).get(b"authorization", b"").decode()
+            if not accepted or authorization != credential:
+                await PlainTextResponse(f"{rejected_body}: {credential}", status_code=401)(
+                    scope, receive, send
+                )
+                return
+        await app(scope, receive, send)
+
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        server = uvicorn.Server(
+            uvicorn.Config(authenticated, log_level="error", access_log=False, lifespan="on")
+        )
+        serving = asyncio.create_task(server.serve(sockets=[listener]))
+        try:
+            async with asyncio.timeout(_HANG_TIMEOUT):
+                while not server.started:
+                    if serving.done():
+                        await serving
+                    await asyncio.sleep(0.02)
+
+            config_path = tmp_path / ".mcp.json"
+            config = {
+                "type": "http",
+                "url": f"http://127.0.0.1:{port}/mcp?credential=fixture-url-secret",
+                "headers": {"Authorization": "Bearer rejected-test-token"},
+            }
+
+            def write_config():
+                config_path.write_text(
+                    json.dumps({"mcpServers": {"probe": config}}), encoding="utf-8"
+                )
+
+            write_config()
+            client = _RecordingClient()
+            fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
+            async with spawn_agent_process(
+                client, sys.executable, str(fixture), "--mcp", cwd=tmp_path
+            ) as (connection, _process):
+                await connection.initialize(PROTOCOL_VERSION)
+                session = await connection.new_session(str(tmp_path))
+                failed = await _mcp_status(connection, session.session_id)
+                assert failed["servers"][0]["state"] == "failed"
+                assert "401" in failed["servers"][0]["error"]
+
+                config["headers"]["Authorization"] = credential
+                write_config()
+                restored = await _mcp_status(connection, session.session_id, reconnect=True)
+                assert restored["servers"][0]["state"] == "ready"
+                await connection.prompt(session.session_id, [text_block("call HTTP MCP")])
+                assert calls == ["wire"]
+
+                accepted = False
+                await connection.prompt(session.session_id, [text_block("observe an HTTP failure")])
+                call_failed = await _mcp_status(connection, session.session_id)
+                assert call_failed["servers"][0]["state"] == "failed"
+                assert "401" in call_failed["servers"][0]["error"]
+
+                accepted = True
+                await _mcp_status(connection, session.session_id, reconnect=True)
+                await connection.close_session(session.session_id)
+                await connection.load_session(str(tmp_path), session.session_id)
+                assert (await _mcp_status(connection, session.session_id))["servers"][0][
+                    "state"
+                ] == "ready"
+                await connection.prompt(
+                    session.session_id, [text_block("call HTTP MCP after resume")]
+                )
+                assert calls == ["wire", "wire"]
+                await connection.close_session(session.session_id)
+
+            wire = json.dumps(
+                {
+                    "status": [failed, call_failed, restored],
+                    "updates": [update.model_dump(mode="json") for _, update in client.updates],
+                }
+            )
+            for secret in (credential, rejected_body, "rejected-test-token", "fixture-url-secret"):
+                assert secret not in wire
+        finally:
+            server.should_exit = True
+            await asyncio.wait_for(serving, timeout=_HANG_TIMEOUT)
+
+
 def _write_protocol_skill(workspace: Path) -> None:
     skills_root = workspace / "external-skills"
     package = skills_root / "protocol_skill"
