@@ -1139,6 +1139,184 @@ asyncio.run(main())
     }
 
     #[tokio::test]
+    async fn real_acp_text_skill_commands_complete_and_reach_the_backend() {
+        use crate::attachments::Attachment;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use tui_textarea::{CursorMove, TextArea};
+
+        for inline in [false, true] {
+            let (directory, mut transport, mut controller) = real_fixture(false);
+            let skill = directory.path().join(".agents/skills/u1-terminal-source");
+            std::fs::create_dir_all(&skill).unwrap();
+            std::fs::write(
+                skill.join("SKILL.md"),
+                "---\nname: u1-terminal\ndescription: Inspect the supplied task.\n---\nRead the task before replying.\n",
+            )
+            .unwrap();
+            let user = directory.path().join("user");
+            std::fs::create_dir_all(&user).unwrap();
+            std::fs::write(
+                user.join("trusted_workspaces.json"),
+                json!({"workspaces": [directory.path()]}).to_string(),
+            )
+            .unwrap();
+
+            let attachment = Attachment::Text {
+                name: "notes.txt".into(),
+                uri: "file:///notes.txt".into(),
+                text: "Keep this attached text unchanged.".into(),
+            };
+            controller.add_attachment(
+                controller.state.conversation_generation,
+                Ok(attachment.clone()),
+            );
+            controller.paste("/u1-terminal wait for the command list".into());
+            assert!(!controller.state.commands_received);
+            assert!(controller
+                .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .is_empty());
+            assert_eq!(
+                controller.state.editor.lines(),
+                &["/u1-terminal wait for the command list"]
+            );
+            assert_eq!(
+                controller.state.attachments.as_slice(),
+                std::slice::from_ref(&attachment)
+            );
+            controller.state.editor = TextArea::default();
+
+            let initialize = controller.initialize();
+            send_actions(&mut controller, &mut transport, vec![initialize]).await;
+            let mut advertised = None;
+            // The session response can mark the controller ready before the
+            // command notification; observe both without sending a prompt.
+            timeout(Duration::from_secs(30), async {
+                while controller.state.busy() || advertised.is_none() {
+                    let actions = match next(&mut transport).await {
+                        Event::Message(value) => {
+                            let update = &value["params"]["update"];
+                            if update["sessionUpdate"] == "available_commands_update" {
+                                advertised = update["availableCommands"]
+                                    .as_array()
+                                    .and_then(|commands| {
+                                        commands
+                                            .iter()
+                                            .find(|command| command["name"] == "u1-terminal")
+                                    })
+                                    .cloned();
+                            }
+                            controller.message(value)
+                        }
+                        Event::Diagnostic(text) => {
+                            controller.diagnostic(text);
+                            vec![]
+                        }
+                        Event::Closed(reason) => panic!("Backend closed: {reason}"),
+                    };
+                    send_actions(&mut controller, &mut transport, actions).await;
+                }
+            })
+            .await
+            .expect("the real backend advertises skills before the first prompt");
+            let advertised = advertised.unwrap();
+            assert_eq!(advertised["description"], "Inspect the supplied task.");
+            assert_eq!(advertised["input"]["hint"], "[task]");
+            assert_eq!(advertised["_meta"]["aster"]["kind"], "skill");
+            assert!(controller.state.commands_received);
+            let command = controller
+                .state
+                .commands
+                .iter()
+                .find(|command| command.name == "/u1-terminal")
+                .unwrap();
+            assert_eq!(command.argument_hint, "[task]");
+            assert!(command.is_skill);
+            assert!(!controller
+                .state
+                .commands
+                .iter()
+                .any(|command| command.name == "/skill"));
+            assert!(!controller
+                .state
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::User(_))));
+
+            controller.paste("/unknown-missing-skill inspect".into());
+            assert!(controller
+                .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .is_empty());
+            assert_eq!(
+                controller.state.editor.lines(),
+                &["/unknown-missing-skill inspect"]
+            );
+            assert_eq!(
+                controller.state.attachments.as_slice(),
+                std::slice::from_ref(&attachment)
+            );
+            controller.state.editor = TextArea::default();
+
+            let task = "inspect \"two words\" C:\\repo\\file.py\n    literal = {value}\n";
+            let expected = if inline {
+                controller.paste(format!("Keep this prefix.\nApply $u1- to {task}"));
+                controller.state.editor.move_cursor(CursorMove::Jump(1, 10));
+                format!("Keep this prefix.\nApply $u1-terminal to {task}")
+            } else {
+                controller.paste("/u1-".into());
+                "/u1-terminal ".into()
+            };
+            assert!(controller
+                .key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+                .is_empty());
+            assert_eq!(controller.state.editor.lines().join("\n"), expected);
+            assert_eq!(
+                controller.state.attachments.as_slice(),
+                std::slice::from_ref(&attachment)
+            );
+            assert!(!controller
+                .state
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::User(_))));
+            if inline {
+                controller.state.editor.move_cursor(CursorMove::Bottom);
+                controller.state.editor.move_cursor(CursorMove::End);
+            } else {
+                controller.paste(task.into());
+            }
+
+            let text = controller.state.editor.lines().join("\n");
+            let actions = controller.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            let prompt = actions
+                .iter()
+                .find_map(|action| match action {
+                    Action::Request {
+                        method: "session/prompt",
+                        params,
+                        ..
+                    } => Some(&params["prompt"]),
+                    _ => None,
+                })
+                .expect("the completed draft sends a real ACP prompt");
+            assert_eq!(
+                prompt,
+                &json!([
+                    {"type": "text", "text": text},
+                    attachment.content_block()
+                ])
+            );
+            send_actions(&mut controller, &mut transport, actions).await;
+            settle(&mut controller, &mut transport).await;
+            assert!(controller.state.entries.iter().any(
+                |entry| matches!(entry, Entry::Assistant(text) if text.contains("ASTER ACP smoke test passed"))
+            ));
+            assert!(controller.state.overlay.is_none());
+            assert!(controller.state.attachments.is_empty());
+            transport.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn real_acp_backend_prompt_replay_and_close_use_the_existing_python_runtime() {
         let (_directory, mut transport, mut controller) = real_fixture(false);
         let initialize = controller.initialize();

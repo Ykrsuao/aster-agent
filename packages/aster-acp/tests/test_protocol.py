@@ -214,12 +214,21 @@ def _write_protocol_skill(workspace: Path) -> None:
     (config_dir / "settings.yaml").write_text(
         f"coding:\n  additional_skills_dirs:\n    - {skills_root}\n"
     )
+    text_skill = workspace / ".agents" / "skills" / "protocol-text"
+    text_skill.mkdir(parents=True)
+    (text_skill / "SKILL.md").write_text(
+        "---\nname: protocol-text\ndescription: Test the text command protocol\n---\n"
+        "Inspect the supplied task.",
+        encoding="utf-8",
+    )
 
 
 async def test_acp_subprocess_transcript(tmp_path, monkeypatch):
     client = _RecordingClient()
     fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
     monkeypatch.setenv("ASTER_USER_DIR", str(tmp_path / "user-config"))
+    monkeypatch.setenv("HOME", str(tmp_path / "isolated-home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "isolated-home"))
     monkeypatch.delenv("ASTER_SETTINGS", raising=False)
     _write_protocol_skill(tmp_path)
     incoming: list[dict[str, object]] = []
@@ -265,9 +274,17 @@ async def test_acp_subprocess_transcript(tmp_path, monkeypatch):
     commands = next(
         update for _, update in client.updates if isinstance(update, AvailableCommandsUpdate)
     )
-    assert [command.name for command in commands.available_commands] == ["protocol-check"]
+    assert [command.name for command in commands.available_commands] == [
+        "protocol-check",
+        "protocol-text",
+    ]
     assert commands.available_commands[0].input is not None
     assert commands.available_commands[0].input.root.hint == "<value>"
+    raw_commands = incoming[commands_notification]["params"]["update"]["availableCommands"]
+    text_command = next(item for item in raw_commands if item["name"] == "protocol-text")
+    assert text_command["input"] == {"hint": "[task]"}
+    assert text_command["_meta"]["aster"]["kind"] == "skill"
+    assert text_command["_meta"]["aster"]["aliases"] == ["cmd.protocol-text"]
     started = next(
         update
         for _, update in client.updates
@@ -308,6 +325,8 @@ async def test_acp_subprocess_dispatches_advertised_slash_command(tmp_path, monk
     client = _RecordingClient()
     fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
     monkeypatch.setenv("ASTER_USER_DIR", str(tmp_path / "user-config"))
+    monkeypatch.setenv("HOME", str(tmp_path / "isolated-home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "isolated-home"))
     monkeypatch.delenv("ASTER_SETTINGS", raising=False)
     _write_protocol_skill(tmp_path)
 

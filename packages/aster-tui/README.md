@@ -194,6 +194,40 @@ execute skill code, or make a model call. Unloaded plugins may have only their
 registered metadata available, which is shown explicitly instead of loading
 them to obtain documentation. Display limits are marked when data is truncated.
 
+Invoke a loaded `SKILL.md` skill with `/name [task]`, or mention `$name` in
+normal task text:
+
+```text
+/aster-agent-authoring Add an agent that classifies support requests.
+Use $aster-agent-authoring to add an agent that classifies support requests.
+```
+
+Type `/` to choose a command, or `$` followed by part of a skill name to choose a
+skill in your message. For skill suggestions, Tab or Enter completes the selected
+token without sending; finish your task and press Enter to send. Completion
+preserves the surrounding text, line breaks, and attachments. `/skills` opens the
+read-only browser.
+The picker uses a valid frontmatter `name`; if it is invalid, it tries the
+directory ID. An unusable or conflicting choice falls back to a qualified
+registry name such as `cmd.aster-agent-authoring`. Each skill appears once in
+the menu. Safe directory IDs and qualified names advertised by the backend also
+work as aliases: type an alias directly, or part of it to complete that alias.
+
+The skill catalog initially exposes names, descriptions, and source directories.
+Explicit invocation loads the selected instructions into the current task. The
+agent can also select a relevant skill from your task and read its instructions
+when needed; supporting files are read as needed. See the
+[ACP skill policy](../aster-acp/README.md#sessions-and-skills) for settings that
+control explicit and automatic invocation.
+
+Invoking a skill preserves the literal task text and attachments in the current
+conversation. Unknown mentions such as `$PATH`, escaped mentions, and mentions
+inside code remain literal. Quoted paths, line
+breaks, and placeholders such as `$ARGUMENTS` are not expanded by the host.
+Reading and selecting a skill does not run its scripts; work the agent carries
+out uses the session's normal execution permissions. Esc cancels the turn as
+usual. Reopening a saved session discovers skills again from their current files.
+
 The `reasoning` row shows the current runtime reasoning level, falling back to
 the level reported by the backend. With no reported level it shows `model default`;
 the provider's exact default effort remains unknown. `/hud show reasoning` enables

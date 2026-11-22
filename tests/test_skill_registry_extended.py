@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from aster.skill import Skill
+from aster.skill import Skill, TextSkill
 from aster.skill_registry import SkillRegistry
 
 
@@ -153,6 +153,70 @@ class TestDiscoverSkillsDirs:
         )
         registry.discover_skills_dirs([tmp_path])
         assert "cmd.my-cmd" in registry.loaded()
+
+    @pytest.mark.parametrize("entry_names", [("a_b", "a-b"), ("a-b", "a_b")])
+    def test_normalized_text_skill_collision_is_stable_across_directory_order(
+        self, registry, tmp_path, monkeypatch, caplog, entry_names
+    ):
+        for name in entry_names:
+            skill_dir = tmp_path / name
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: Test {name}.\n---\nUse {name}.\n",
+                encoding="utf-8",
+            )
+        original_iterdir = Path.iterdir
+
+        def ordered_entries(path):
+            if path == tmp_path:
+                return iter(tmp_path / name for name in entry_names)
+            return original_iterdir(path)
+
+        with monkeypatch.context() as patcher:
+            patcher.setattr(Path, "iterdir", ordered_entries)
+            with caplog.at_level("WARNING", logger="aster.skill_registry"):
+                registry.discover_skills_dirs([tmp_path])
+
+        selected = registry["cmd.a-b"]
+        assert isinstance(selected, TextSkill)
+        assert selected.source_dir == (tmp_path / "a-b").resolve()
+        assert "Use a-b." in type(selected).__doc__
+        assert registry.loaded() == ["cmd.a-b"]
+        assert len(caplog.records) == 1
+        message = caplog.records[0].getMessage()
+        assert "cmd.a-b" in message
+        assert str((tmp_path / "a-b").resolve()) in message
+        assert str((tmp_path / "a_b").resolve()) in message
+
+    @pytest.mark.parametrize("root_names", [("z-user", "a-project"), ("a-project", "z-user")])
+    def test_duplicate_text_skill_roots_keep_declared_priority_and_warn(
+        self, registry, tmp_path, caplog, root_names
+    ):
+        roots = [tmp_path / name for name in root_names]
+        for root in roots:
+            skill_dir = root / "triage"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                f"---\nname: triage\ndescription: From {root.name}.\n---\nUse {root.name}.\n",
+                encoding="utf-8",
+            )
+
+        with caplog.at_level("WARNING", logger="aster.skill_registry"):
+            registry.discover_skills_dirs(roots)
+
+        selected = registry["cmd.triage"]
+        assert isinstance(selected, TextSkill)
+        assert selected.source_dir == (roots[0] / "triage").resolve()
+        assert f"Use {roots[0].name}." in type(selected).__doc__
+        assert len(caplog.records) == 1
+        message = caplog.records[0].getMessage()
+        assert "cmd.triage" in message
+        assert str((roots[0] / "triage").resolve()) in message
+        assert str((roots[1] / "triage").resolve()) in message
+
+        caplog.clear()
+        registry.discover_skills_dirs([roots[0]])
+        assert not caplog.records
 
     def test_nonexistent_dir_skipped(self, registry):
         """Non-existent directories are silently skipped."""

@@ -112,10 +112,7 @@ def test_read_skill_properties_missing_description(tmp_path):
 # ---------------------------------------------------------------------------
 # Lenient argument-hint parsing (via _parse_frontmatter)
 #
-# _SkillProperties only carries the fields actually consumed in production
-# (name, description; see issue #331). The lenient frontmatter parser still
-# handles these optional keys, so coverage lives at the _parse_frontmatter
-# layer where the behaviour actually matters.
+# The lenient parser accepts argument-hint values found in existing skills.
 # ---------------------------------------------------------------------------
 
 

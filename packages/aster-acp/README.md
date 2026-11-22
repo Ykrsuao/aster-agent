@@ -495,6 +495,45 @@ Loaded `@slash_command` methods are advertised through ACP and matching
 `/command arguments` prompts are dispatched through the shared typed command
 router. Command discovery is refreshed when loaded skills change.
 
+Text skills are advertised as individual commands. Use `/aster-agent-authoring
+Add a classifier`, or mention `$aster-agent-authoring` anywhere in a task.
+The command uses a valid frontmatter `name`, falling back to the directory ID;
+the directory ID also remains an alias. Duplicate aliases and names occupied by
+terminal or Python commands use the full registry name, such as `/cmd.review`.
+A qualified missing name, an
+ambiguous alias, or a disabled user invocation produces an error before a model
+call. Unknown `$variables`, escaped mentions, and Markdown code are kept as
+literal text.
+
+Several mentions supply their instructions and source directories to one
+cancellable task, with the complete original request preserved. Repeated aliases
+for the same skill are included once. Arguments are literal: there is no shell
+parsing or `$ARGUMENTS` substitution. Skill selection does not execute scripts or
+change execution permissions. Session restoration reloads current skills from disk.
+
+For automatic selection, the agent initially sees only names, descriptions, and
+source directories. It chooses relevant skills for the current task and reads
+their full instructions through `self.skills.read_text_skill(name)`. Reading does
+not activate the skill or add its whole body to the persistent context. This
+generated read follows the session's execution policy; Plan mode still disables
+generated execution.
+
+SKILL.md may set `argument-hint`, `user-invocable: false` (hide and reject explicit
+invocations), or `disable-model-invocation: true` (allow only explicit use).
+`policy.allow_implicit_invocation: false` in `agents/openai.yaml` also disables
+automatic selection. If either automatic-use setting disables it, explicit use
+is required. Malformed boolean settings reject discovery or preserve the previous
+skill on a failed reload.
+
+`available_commands_update` includes the command's standard `input.hint` and
+`_meta.aster.kind: "skill"` for text-skill commands. Their optional
+`_meta.aster.aliases` array supplies valid alternate command names without
+duplicating the menu entry. Python commands can also
+provide a `_meta.aster.completions` array for first-argument completion. Clients
+that ignore this metadata can still send commands and mentions as text.
+Text-skill requests preserve file and image attachments in the task context;
+Python slash commands retain their existing text-only dispatch behavior.
+
 The current adapter accepts text, resource links, embedded text resources, and
 PNG/JPEG/GIF/WebP images. Images are forwarded to the selected model without
 requiring `media_inputs` configuration; image-only prompts are supported. Provider

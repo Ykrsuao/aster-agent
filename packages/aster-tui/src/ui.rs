@@ -4800,7 +4800,20 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
             &[
                 ("↑↓", "select"),
                 ("Tab", "complete"),
-                ("Enter", "run"),
+                (
+                    "Enter",
+                    if state.slash_choice_fills_draft(
+                        &choices[state.slash_selected.min(choices.len() - 1)],
+                    ) {
+                        "complete"
+                    } else if state.slash_choice_is_exact(
+                        &choices[state.slash_selected.min(choices.len() - 1)],
+                    ) {
+                        "run"
+                    } else {
+                        "send"
+                    },
+                ),
                 ("Esc", "close"),
             ],
             p,

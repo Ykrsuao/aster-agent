@@ -41,10 +41,16 @@ class InteractiveSessionDispatcher:
             self._active_task is not None and not self._active_task.done()
         )
 
-    async def submit(self, text: str) -> TurnResult | None:
-        self._ensure_idle()
-        self.agent.queue_manager.get_channel("user_messages").put(text)
-        return await self._run_active(self._dispatch())
+    async def submit(
+        self, text: str, *, skill_results: tuple[SlashCommandResult, ...] = ()
+    ) -> TurnResult | None:
+        async def _submit() -> TurnResult:
+            self.agent.queue_manager.get_channel("user_messages").put(text)
+            for result in skill_results:
+                self.agent.queue_manager.get_channel("slash_commands").put(result)
+            return await self._dispatch()
+
+        return await self._run_active(_submit())
 
     async def invoke_slash(
         self,
@@ -55,17 +61,24 @@ class InteractiveSessionDispatcher:
         """Invoke and, when requested, dispatch a slash command as one cancellable turn."""
 
         async def _invoke() -> tuple[SlashCommandResult, TurnResult | None]:
+            command = commands.get(name)
+            # Validate every explicit text-skill selection before putting any
+            # context in the queue. Python command arguments remain literal.
+            mentions = (
+                commands.skill_mentions(raw_args)
+                if command is not None and command.skill_name is not None
+                else ()
+            )
             result = await commands.invoke(name, raw_args)
             if not result.output_to_agent:
                 return result, None
             self.agent.queue_manager.get_channel("slash_commands").put(result)
+            for mention in mentions:
+                if mention.value["skill"] != result.value["skill"]:
+                    self.agent.queue_manager.get_channel("slash_commands").put(mention)
             return result, await self._dispatch()
 
         return await self._run_active(_invoke())
-
-    def _ensure_idle(self) -> None:
-        if self.active:
-            raise RuntimeError("A prompt is already running")
 
     async def set_execution_backend(self, backend: str) -> None:
         """Prepare and commit one session's Python backend while the host owns its turn."""

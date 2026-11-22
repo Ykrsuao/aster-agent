@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -661,11 +662,20 @@ class CodingACPAdapter:
                 session.bridge.publish(
                     SessionInfoUpdate(session_update="session_info_update", title=title)
                 )
-            slash = (
-                None if parsed.has_attachments else self._slash_invocation(session.commands, text)
-            )
+            # Text skills consume a user task, so attachments stay in the
+            # Task context already recorded above. Never parse their rendered
+            # manifest as command text or opt Python commands into attachments.
+            slash = self._slash_invocation(session.commands, parsed.user_text)
+            if parsed.has_attachments and slash is not None:
+                command = session.commands.get(slash[0])
+                if command is None or command.skill_name is None:
+                    slash = None
             if slash is None:
-                result = await session.dispatcher.submit(text)
+                skill_results = session.commands.skill_mentions(parsed.user_text)
+                if skill_results:
+                    result = await session.dispatcher.submit(text, skill_results=skill_results)
+                else:
+                    result = await session.dispatcher.submit(text)
             else:
                 name, raw_args = slash
                 try:
@@ -703,6 +713,10 @@ class CodingACPAdapter:
                         if message:
                             session.agent.message(message)
                         return PromptResponse(stop_reason="end_turn")
+        except CoercionError as exc:
+            progress.stop("command_error")
+            session.agent.message(f"Skill selection: {exc.message}")
+            return PromptResponse(stop_reason="end_turn")
         except GenerationError as exc:
             # An interrupted strategy may have announced a tool without an output.
             await session.bridge.fail_open_tools("Did not finish.", title="Unfinished")
@@ -1039,15 +1053,17 @@ class CodingACPAdapter:
         commands: CodingSlashCommandRegistry,
         text: str,
     ) -> tuple[str, str] | None:
-        stripped = text.strip()
-        if not stripped.startswith("/"):
+        match = re.fullmatch(r"/(\S+)(?:\s(.*))?", text.lstrip(), flags=re.DOTALL)
+        if match is None:
             return None
-        command_text = stripped[1:]
-        parts = command_text.split(maxsplit=1)
-        name = parts[0].lower() if parts else ""
-        if not name or commands.get(name) is None:
+        name = match.group(1).casefold()
+        command = commands.get(name)
+        if command is None:
             return None
-        return name, parts[1] if len(parts) == 2 else ""
+        raw_args = match.group(2) or ""
+        # Preserve the literal task supplied to a text skill. Keep existing
+        # Python command parsing unchanged, including trailing-space trimming.
+        return name, raw_args if command.skill_name is not None else raw_args.strip()
 
     async def close(self) -> None:
         try:
@@ -1095,6 +1111,13 @@ async def serve(
 def _available_commands_update(commands: tuple[CodingSlashCommand, ...]):
     available: list[AvailableCommand] = []
     for command in commands:
+        metadata: dict[str, Any] = {}
+        if command.completions:
+            metadata["completions"] = list(command.completions)
+        if command.skill_name is not None:
+            metadata["kind"] = "skill"
+            if command.aliases:
+                metadata["aliases"] = list(command.aliases)
         input_spec = (
             AvailableCommandInput(
                 UnstructuredCommandInput(hint=command.argument_hint),
@@ -1107,6 +1130,7 @@ def _available_commands_update(commands: tuple[CodingSlashCommand, ...]):
                 name=command.name,
                 description=command.description,
                 input=input_spec,
+                field_meta={"aster": metadata} if metadata else None,
             )
         )
     return update_available_commands(available)

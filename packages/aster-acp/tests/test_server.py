@@ -3,6 +3,7 @@
 """Tests for the ACP server surface."""
 
 import asyncio
+import json
 import os
 import sys
 import threading
@@ -19,6 +20,7 @@ from acp.schema import (
     AvailableCommandsUpdate,
     ContentToolCallContent,
     CurrentModeUpdate,
+    EmbeddedResourceContentBlock,
     EnvVariable,
     HttpHeader,
     HttpMcpServer,
@@ -27,6 +29,7 @@ from acp.schema import (
     RequestPermissionResponse,
     SseMcpServer,
     TextContentBlock,
+    TextResourceContents,
     ToolCallProgress,
     UsageUpdate,
     UserMessageChunk,
@@ -44,7 +47,13 @@ from aster.runtime.sandbox.errors import SandboxError, SandboxUnavailable, Worke
 from aster.skill import Skill, slash_command
 from aster.slash_dispatch import SlashCommandResult
 from aster.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUSTED_MESSAGE
-from aster.unifiedllm import AdmissionControl, AdmissionControlConfig, FakeLLMClient
+from aster.unifiedllm import (
+    AdmissionControl,
+    AdmissionControlConfig,
+    FakeLLMClient,
+    LLMResponse,
+    ToolCall,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -311,6 +320,24 @@ def _write_external_workflow_skill(workspace, skills_root) -> None:
     (config_dir / "settings.yaml").write_text(
         f"tui:\n  additional_skills_dirs:\n    - {skills_root}\n"
     )
+
+
+def _write_workspace_text_skill(
+    workspace: Path,
+    instructions: str,
+    *,
+    name: str = "triage",
+    skill_id: str | None = None,
+    metadata: str = "",
+) -> Path:
+    directory = workspace / ".agents" / "skills" / (skill_id or name)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "SKILL.md"
+    path.write_text(
+        f"---\nname: {name}\ndescription: Triage the supplied task\n{metadata}---\n" + instructions,
+        encoding="utf-8",
+    )
+    return path
 
 
 def _write_standalone_command_skill(workspace, command: str, value: str) -> None:
@@ -684,6 +711,404 @@ async def test_adapter_dispatches_agent_facing_skill_command(tmp_path, monkeypat
     await adapter.close()
 
 
+async def test_adapter_sends_complete_text_skill_and_raw_arguments_to_model(tmp_path):
+    instructions = (
+        "TEXT_SKILL_BEGIN: Follow the selected skill.\n"
+        + "Collect evidence before answering. " * 80
+        + "\nTEXT_SKILL_MIDDLE: Preserve this instruction in the live result.\n"
+        + "Check the requested result. " * 80
+        + "\nTEXT_SKILL_END: Report the evidence."
+    )
+    skill_path = _write_workspace_text_skill(tmp_path, instructions)
+    task_args = '  Inspect "quoted input"\n  keep {literal} and trailing spaces  '
+    prompt = f"/cmd.triage {task_args}"
+    llm = _completed_llm()
+    adapter = CodingACPAdapter(lambda: llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    runtime = await _session(adapter, created.session_id)
+
+    with patch.object(runtime.agent, "handle", wraps=runtime.agent.handle) as handle:
+        response = await adapter.prompt(created.session_id, [text_block(prompt)])
+
+    notification = handle.call_args.args[0]
+    result = notification["slash_commands"][0]
+    assert isinstance(result, SlashCommandResult)
+    assert result.command == "cmd.triage"
+    assert result.args == task_args
+    assert result.output_to_agent is True
+    assert result.value["skill"] == "cmd.triage"
+    assert result.value["arguments"] == task_args
+    assert result.value["source_dir"] == str(skill_path.parent)
+    assert instructions in result.value["instructions"]
+    assert response.stop_reason == "end_turn"
+    assert len(llm.calls) == 1
+    model_input = str(llm.calls[0].messages)
+    assert "TEXT_SKILL_BEGIN" in model_input
+    assert "TEXT_SKILL_END" in model_input
+    assert "quoted input" in model_input
+    assert "keep {literal} and trailing spaces" in model_input
+    assert runtime.handle.turns()[0].content == prompt
+    await adapter.close()
+
+
+@pytest.mark.parametrize(
+    ("prompt", "detail"),
+    [("/cmd.nonexistent", "nonexistent"), ("/cmd.nonexistent task", "nonexistent")],
+)
+async def test_missing_text_skill_is_reported_without_model_call(tmp_path, prompt, detail):
+    llm = _completed_llm()
+    client = _RecordingClient()
+    adapter = CodingACPAdapter(lambda: llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    runtime = await _session(adapter, created.session_id)
+
+    response = await adapter.prompt(created.session_id, [text_block(prompt)])
+    await runtime.bridge.flush()
+
+    assert response.stop_reason == "end_turn"
+    assert not llm.calls
+    messages = "\n".join(
+        update.content.text for update in client.updates if isinstance(update, AgentMessageChunk)
+    )
+    assert "/cmd.nonexistent" in messages
+    assert detail in messages.lower()
+    assert runtime.handle.turns()[0].content == prompt
+    assert runtime.agent.queue_manager.get_channel("slash_commands").drain() == []
+    await adapter.close()
+
+
+@pytest.mark.parametrize("attachment_kind", ["text", "image"])
+@pytest.mark.parametrize("invocation", ["slash", "mention"])
+async def test_text_skill_uses_user_text_and_keeps_attachment_context(
+    tmp_path, image_input, attachment_kind, invocation
+):
+    instructions = "TEXT_SKILL_ATTACHMENT: Inspect the supplied reference."
+    _write_workspace_text_skill(tmp_path, instructions)
+    attachment = (
+        image_input
+        if attachment_kind == "image"
+        else EmbeddedResourceContentBlock(
+            type="resource",
+            resource=TextResourceContents(
+                uri="file:///workspace/evidence.txt",
+                mime_type="text/plain",
+                text="TEXT_ATTACHMENT_EVIDENCE: the complete file snapshot.",
+            ),
+        )
+    )
+    task_args = "Review the attached evidence."
+    prompt = f"/triage {task_args}" if invocation == "slash" else f"Use $triage. {task_args}"
+    expected_args = task_args if invocation == "slash" else prompt
+    llm = _completed_llm()
+    adapter = CodingACPAdapter(lambda: llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    runtime = await _session(adapter, created.session_id)
+
+    with patch.object(runtime.agent, "handle", wraps=runtime.agent.handle) as handle:
+        response = await adapter.prompt(created.session_id, [text_block(prompt), attachment])
+
+    result = handle.call_args.args[0]["slash_commands"][0]
+    assert isinstance(result, SlashCommandResult)
+    assert result.args == expected_args
+    assert result.value["arguments"] == expected_args
+    assert response.stop_reason == "end_turn"
+    assert len(llm.calls) == 1
+    model_input = str(llm.calls[0].messages)
+    assert instructions in model_input
+    assert task_args in model_input
+    if attachment_kind == "image":
+        assert "data:image/png;base64," + image_input.data in model_input
+        assert "[Image]" in runtime.handle.turns()[0].content
+    else:
+        assert "TEXT_ATTACHMENT_EVIDENCE" in model_input
+        assert "[File] evidence.txt" in runtime.handle.turns()[0].content
+    assert prompt in runtime.handle.turns()[0].content
+    await adapter.close()
+
+
+async def test_text_skill_attachment_route_keeps_python_commands_as_ordinary_prompts(
+    tmp_path, image_input
+):
+    class PythonSkill(Skill):
+        @slash_command("python-work")
+        def run(self, args: str) -> str:
+            raise AssertionError("An attachment must not invoke an ordinary Python slash command.")
+
+    llm = _completed_llm()
+    adapter = CodingACPAdapter(lambda: llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    runtime = await _session(adapter, created.session_id)
+    runtime.agent.skills.register("test.python", PythonSkill())
+
+    with patch.object(runtime.agent, "handle", wraps=runtime.agent.handle) as handle:
+        response = await adapter.prompt(
+            created.session_id, [text_block("/python-work review image"), image_input]
+        )
+
+    notification = handle.call_args.args[0]
+    assert set(notification) == {"user_messages"}
+    assert "/python-work review image" in notification["user_messages"][0]
+    assert response.stop_reason == "end_turn"
+    assert len(llm.calls) == 1
+    assert "data:image/png;base64," + image_input.data in str(llm.calls[0].messages)
+    await adapter.close()
+
+
+@pytest.mark.parametrize("slash", [False, True])
+async def test_multiple_skill_mentions_share_one_model_turn(tmp_path, slash):
+    _write_workspace_text_skill(tmp_path, "TRIAGE_BODY: Inspect evidence.")
+    _write_workspace_text_skill(tmp_path, "REPORT_BODY: Summarize evidence.", name="report")
+    task = "Use $triage and $report, then $cmd.triage. Keep C:\\Work\\a.py literal.  "
+    prompt = f"/triage {task}" if slash else task
+    llm = _completed_llm()
+    adapter = CodingACPAdapter(lambda: llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    runtime = await _session(adapter, created.session_id)
+
+    with patch.object(runtime.agent, "handle", wraps=runtime.agent.handle) as handle:
+        response = await adapter.prompt(created.session_id, [text_block(prompt)])
+
+    handle.assert_awaited_once()
+    notification = handle.call_args.args[0]
+    assert [item.value["skill"] for item in notification["slash_commands"]] == [
+        "cmd.triage",
+        "cmd.report",
+    ]
+    assert all(item.value["arguments"] == task for item in notification["slash_commands"])
+    if slash:
+        assert "user_messages" not in notification
+    else:
+        assert notification["user_messages"] == [prompt]
+    assert len(llm.calls) == 1
+    assert response.stop_reason == "end_turn"
+    assert runtime.handle.turns()[0].content == prompt
+    await adapter.close()
+
+
+async def test_invalid_later_mention_does_not_submit_a_partial_task(tmp_path):
+    _write_workspace_text_skill(tmp_path, "VALID_SKILL_BODY_MARKER")
+    _write_workspace_text_skill(
+        tmp_path,
+        "HIDDEN_SKILL_BODY_MARKER",
+        name="internal",
+        metadata="user-invocable: false\n",
+    )
+    llm = _completed_llm()
+    client = _RecordingClient()
+    adapter = CodingACPAdapter(lambda: llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    runtime = await _session(adapter, created.session_id)
+
+    response = await adapter.prompt(created.session_id, [text_block("Use $triage and $internal")])
+    await runtime.bridge.flush()
+
+    assert response.stop_reason == "end_turn"
+    assert not llm.calls
+    for channel in ("user_messages", "slash_commands"):
+        assert runtime.agent.queue_manager.get_channel(channel).drain() == []
+    assert any(
+        isinstance(update, AgentMessageChunk) and "internal" in update.content.text
+        for update in client.updates
+    )
+    with patch.object(runtime.agent, "handle", wraps=runtime.agent.handle) as handle:
+        await adapter.prompt(created.session_id, [text_block("Hello")])
+    assert set(handle.call_args.args[0]) == {"user_messages"}
+    assert "VALID_SKILL_BODY_MARKER" not in str(llm.calls[0].messages)
+    assert "HIDDEN_SKILL_BODY_MARKER" not in str(llm.calls[0].messages)
+    await adapter.close()
+
+
+async def test_implicit_skill_catalog_and_full_read_reach_the_model_progressively(tmp_path):
+    body = "AUTOMATIC_SKILL_BODY_MARKER: Collect diagnostic evidence before fixing."
+    _write_workspace_text_skill(tmp_path, body)
+    _write_workspace_text_skill(
+        tmp_path,
+        "EXPLICIT_ONLY_BODY_MARKER",
+        name="manual",
+        metadata="disable-model-invocation: true\n",
+    )
+    llm = FakeLLMClient(
+        [
+            LLMResponse(
+                raw_response=None,
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="read-skill",
+                        name="execute_python",
+                        arguments=json.dumps(
+                            {
+                                "code": "instructions = self.skills.read_text_skill('cmd.triage')\nprint(instructions)"
+                            }
+                        ),
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                raw_response=None,
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="done",
+                        name="return_result",
+                        arguments=json.dumps(
+                            {
+                                "result": {
+                                    "message": "Evidence reviewed.",
+                                    "explanation": "Review complete",
+                                }
+                            }
+                        ),
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+        ],
+        strict_exhaustion=True,
+    )
+    adapter = CodingACPAdapter(lambda: llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    runtime = await _session(adapter, created.session_id)
+
+    response = await adapter.prompt(
+        created.session_id, [text_block("Investigate the reported failure.")]
+    )
+
+    assert response.stop_reason == "end_turn"
+    assert len(llm.calls) == 2
+    initial_context = str(llm.calls[0].messages)
+    assert "Triage the supplied task" in initial_context
+    assert "read_text_skill" in initial_context
+    assert body not in initial_context
+    assert body in str(llm.calls[1].messages)
+    assert "EXPLICIT_ONLY_BODY_MARKER" not in str(llm.calls[1].messages)
+    assert "cmd.triage" not in runtime.agent.skills.activated()
+    await adapter.close()
+
+
+async def test_cancelled_mentions_clear_both_task_and_skill_queues(tmp_path):
+    _write_workspace_text_skill(tmp_path, "MENTION_CANCEL_BODY")
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    runtime = await _session(adapter, created.session_id)
+    started = asyncio.Event()
+
+    async def blocked(notification, *, _strategy):
+        assert set(notification) == {"user_messages", "slash_commands"}
+        started.set()
+        await asyncio.Event().wait()
+
+    with patch.object(runtime.agent, "handle", side_effect=blocked):
+        pending = asyncio.create_task(
+            adapter.prompt(created.session_id, [text_block("Use $triage now")])
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await adapter.cancel(created.session_id)
+        response = await asyncio.wait_for(pending, timeout=5)
+
+    assert response.stop_reason == "cancelled"
+    for channel in ("user_messages", "slash_commands"):
+        assert runtime.agent.queue_manager.get_channel(channel).drain() == []
+    with patch.object(runtime.agent, "handle", wraps=runtime.agent.handle) as handle:
+        await adapter.prompt(created.session_id, [text_block("Hello again")])
+    assert set(handle.call_args.args[0]) == {"user_messages"}
+    await adapter.close()
+
+
+async def test_cancelled_text_skill_does_not_leak_into_next_invocation(tmp_path):
+    _write_workspace_text_skill(tmp_path, "TEXT_SKILL_CANCEL: Follow this task.")
+    llm = _completed_llm()
+    adapter = CodingACPAdapter(lambda: llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    runtime = await _session(adapter, created.session_id)
+    started = asyncio.Event()
+
+    async def blocking_handle(notification, *, _strategy):
+        result = notification["slash_commands"][0]
+        assert result.value["arguments"] == "cancelled_task_marker"
+        started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    with patch.object(runtime.agent, "handle", side_effect=blocking_handle):
+        pending = asyncio.create_task(
+            adapter.prompt(created.session_id, [text_block("/triage cancelled_task_marker")])
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+        await adapter.cancel(created.session_id)
+        cancelled = await asyncio.wait_for(pending, timeout=1)
+
+    assert cancelled.stop_reason == "cancelled"
+    assert runtime.agent.queue_manager.get_channel("slash_commands").drain() == []
+
+    with patch.object(runtime.agent, "handle", wraps=runtime.agent.handle) as handle:
+        response = await adapter.prompt(
+            created.session_id, [text_block("/triage fresh_task_marker")]
+        )
+
+    notification = handle.call_args.args[0]
+    assert set(notification) == {"slash_commands"}
+    assert len(notification["slash_commands"]) == 1
+    result = notification["slash_commands"][0]
+    assert result.args == "fresh_task_marker"
+    assert result.value["arguments"] == "fresh_task_marker"
+    assert "cancelled_task_marker" not in str(result)
+    assert response.stop_reason == "end_turn"
+    assert len(llm.calls) == 1
+    await adapter.close()
+
+
+async def test_load_session_rebuilds_text_skill_commands_from_workspace(tmp_path):
+    _write_workspace_text_skill(tmp_path, "TEXT_SKILL_BEFORE_CLOSE: Original instructions.")
+    create_adapter = CodingACPAdapter(_completed_llm)
+    create_adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await create_adapter.new_session(str(tmp_path))
+    first = await create_adapter.prompt(
+        created.session_id, [text_block("/cmd.triage before_close")]
+    )
+    assert first.stop_reason == "end_turn"
+    await create_adapter.close()
+
+    instructions = "TEXT_SKILL_AFTER_LOAD: Read the current workspace instructions."
+    _write_workspace_text_skill(tmp_path, instructions)
+    llm = _completed_llm()
+    client = _RecordingClient()
+    load_adapter = CodingACPAdapter(lambda: llm)
+    load_adapter.on_connect(client)  # type: ignore[arg-type]
+    await load_adapter.load_session(str(tmp_path), created.session_id)
+    runtime = await _session(load_adapter, created.session_id)
+
+    with patch.object(runtime.agent, "handle", wraps=runtime.agent.handle) as handle:
+        response = await load_adapter.prompt(created.session_id, [text_block("/triage after_load")])
+    await runtime.bridge.flush()
+
+    result = handle.call_args.args[0]["slash_commands"][0]
+    assert result.value["skill"] == "cmd.triage"
+    assert result.value["arguments"] == "after_load"
+    assert instructions in result.value["instructions"]
+    assert "TEXT_SKILL_BEFORE_CLOSE" not in result.value["instructions"]
+    assert response.stop_reason == "end_turn"
+    assert len(llm.calls) == 1
+    assert instructions in str(llm.calls[0].messages)
+    assert any(
+        command.name == "triage"
+        for update in client.updates
+        if isinstance(update, AvailableCommandsUpdate)
+        for command in update.available_commands
+    )
+    await load_adapter.close()
+
+
 async def test_adapter_renders_user_only_skill_command_without_llm_turn(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     skills_root = tmp_path / "aster-skills"
@@ -769,12 +1194,15 @@ async def test_unknown_slash_command_is_forwarded_as_an_ordinary_prompt(tmp_path
     await adapter.close()
 
 
-async def test_initial_commands_are_deferred_until_new_session_returns(tmp_path):
+@pytest.mark.parametrize("prepared", [False, True])
+async def test_initial_commands_are_deferred_until_new_session_returns(tmp_path, prepared):
+    _write_workspace_text_skill(tmp_path, "Advertise this skill before the first request.")
+    llm = _completed_llm()
     client = _RegistrationAwareClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(lambda: llm)
     adapter.on_connect(client)  # type: ignore[arg-type]
 
-    created = await adapter.new_session(str(tmp_path))
+    created = await adapter.new_session(str(tmp_path), aster={"prepare": prepared})
     client.registered.add(created.session_id)
     await asyncio.sleep(0)
     runtime = await _session(adapter, created.session_id)
@@ -782,7 +1210,13 @@ async def test_initial_commands_are_deferred_until_new_session_returns(tmp_path)
 
     assert client.dropped == []
     assert len(client.accepted) == 3
-    assert isinstance(client.accepted[0][1], AvailableCommandsUpdate)
+    initial_commands = client.accepted[0][1]
+    assert isinstance(initial_commands, AvailableCommandsUpdate)
+    assert [command.name for command in initial_commands.available_commands] == ["triage"]
+    assert initial_commands.available_commands[0].field_meta == {
+        "aster": {"kind": "skill", "aliases": ["cmd.triage"]}
+    }
+    assert not llm.calls
     assert isinstance(client.accepted[1][1], CurrentModeUpdate)
     initial_usage = client.accepted[2][1]
     assert isinstance(initial_usage, UsageUpdate)
@@ -817,23 +1251,33 @@ async def test_first_prompt_resends_commands_if_initial_update_was_dropped(tmp_p
 
 
 async def test_load_session_advertises_commands_to_registered_session(tmp_path):
+    _write_workspace_text_skill(tmp_path, "Advertise this skill immediately after loading.")
     create_client = _RecordingClient()
     create_adapter = CodingACPAdapter(_completed_llm)
     create_adapter.on_connect(create_client)  # type: ignore[arg-type]
     created = await create_adapter.new_session(str(tmp_path))
     await create_adapter.close()
 
+    llm = _completed_llm()
     load_client = _RegistrationAwareClient()
-    load_client.registered.add(created.session_id)
-    load_adapter = CodingACPAdapter(_completed_llm)
+    load_adapter = CodingACPAdapter(lambda: llm)
     load_adapter.on_connect(load_client)  # type: ignore[arg-type]
     await load_adapter.load_session(str(tmp_path), created.session_id)
+    load_client.registered.add(created.session_id)
     await asyncio.sleep(0)
     runtime = await _session(load_adapter, created.session_id)
     await runtime.bridge.flush()
 
     assert load_client.dropped == []
-    assert any(isinstance(update, AvailableCommandsUpdate) for _, update in load_client.accepted)
+    advertised = [
+        update for _, update in load_client.accepted if isinstance(update, AvailableCommandsUpdate)
+    ]
+    assert len(advertised) == 1
+    assert [command.name for command in advertised[0].available_commands] == ["triage"]
+    assert advertised[0].available_commands[0].field_meta == {
+        "aster": {"kind": "skill", "aliases": ["cmd.triage"]}
+    }
+    assert not llm.calls
     await load_adapter.close()
 
 
