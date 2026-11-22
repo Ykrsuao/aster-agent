@@ -679,6 +679,16 @@ class EventManager:
         if not tags_to_collapse:
             raise ValueError(f"No active events in range '{start_tag}'..'{end_tag}'")
 
+        if len(tags_to_collapse) == 1:
+            tag = tags_to_collapse[0]
+            existing = self._backend.get(tag)
+            if isinstance(existing, Summary):
+                # Reusing its tag must preserve the archive tree and active position.
+                self._backend.update(tag, summary_text=summary_text)
+                existing.summary_text = summary_text
+                self._emit(existing)
+                return tag
+
         # Archive the events and remove from active list
         for tag in tags_to_collapse:
             self._backend.set_status(tag, EventStatus.ARCHIVED)

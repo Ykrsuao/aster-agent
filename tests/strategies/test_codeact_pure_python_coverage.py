@@ -2303,25 +2303,21 @@ class TestCodeActPrefillError:
 
 
 class TestCreateReturnModel:
-    """Tests for _create_return_model."""
+    """Tests for runtime validation independent of JSON schema support."""
 
-    def test_pydantic_compatible_type_returns_true(self):
-        """Pydantic-compatible types should return is_pydantic_validated=True."""
-
+    def test_pydantic_model_is_constructed(self):
         class MyModel(BaseModel):
             x: int
 
-        strat = CodeActStrategy()
-        model, is_validated = strat._create_return_model(MyModel, "compute")
-        assert is_validated is True
+        model = CodeActStrategy()._create_return_model(MyModel, "compute")
+        assert model(result={"x": 1}).result == MyModel(x=1)
 
-    def test_non_pydantic_type_returns_false(self):
-        """Non-Pydantic types should return is_pydantic_validated=False."""
+    def test_non_pydantic_instance_is_preserved(self):
         import io
 
-        strat = CodeActStrategy()
-        model, is_validated = strat._create_return_model(io.BytesIO, "compute")
-        assert is_validated is False
+        model = CodeActStrategy()._create_return_model(io.BytesIO, "compute")
+        value = io.BytesIO(b"data")
+        assert model(result=value).result is value
 
 
 # ---------------------------------------------------------------------------
@@ -2619,43 +2615,28 @@ class TestReturnResultDirectFields:
 
 
 # ---------------------------------------------------------------------------
-# CodeActStrategy - double-quote unwrap (line 1317)
+# CodeActStrategy - preserve valid string results
 # ---------------------------------------------------------------------------
 
 
-class TestReturnResultDoubleQuoteUnwrap:
-    """Tests for GPT-4o-mini double-quoting bug fix (line 1317)."""
+class TestReturnResultStringPreservation:
+    """A valid string result keeps its quotes, escapes, and Unicode characters."""
 
+    @pytest.mark.parametrize(
+        "value", ['"hello\\nworld"', '"中文\\n下一行"', '"café\\n🚀"', '"C:\\new\\name"']
+    )
+    @pytest.mark.parametrize("inline", [False, True])
     @pytest.mark.asyncio
-    async def test_double_quoted_string_with_newlines_unwrapped(self):
-        """String with extra quotes and \\n should be unwrapped (line 1317)."""
-
+    async def test_preserves_string_result(self, value, inline):
         class TestAgent(Agent, llm=_TEST_LLM):
             @strategy(CodeActStrategy(config=CodeActConfig()))
             async def compute(self) -> str:
                 """Return a string."""
                 ...
 
-        # This simulates GPT-4o-mini double-quoting: result = "\"code\\n\""
-        double_quoted = '"hello\\nworld"'
-        fake_llm = FakeLLMClient(
-            scripted_responses=[
-                _resp(
-                    "",
-                    tool_calls=[
-                        ToolCall(
-                            id="ret1",
-                            name="return_result",
-                            arguments=json.dumps({"result": double_quoted}),
-                        )
-                    ],
-                ),
-            ]
-        )
-        agent = TestAgent(llm=fake_llm)
-        result = await agent.compute()
-        # Should be unwrapped: "hello\nworld"
-        assert result == "hello\nworld"
+        call = _tool_call(f"return_result({value!r})") if inline else _return_result(result=value)
+        fake_llm = FakeLLMClient(scripted_responses=[_resp("", tool_calls=[call])])
+        assert await TestAgent(llm=fake_llm).compute() == value
 
 
 # ---------------------------------------------------------------------------

@@ -23,6 +23,7 @@ import json
 import logging
 import types
 import typing
+import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -36,8 +37,10 @@ from typing import (
 )
 from uuid import uuid4
 
-from pydantic import BaseModel, create_model
+from pydantic import BaseModel, ConfigDict, PydanticUserError, create_model
 from pydantic import ValidationError as PydanticValidationError
+from pydantic.warnings import ArbitraryTypeWarning
+from pydantic_core import SchemaError
 
 from aster.agentdoc._structured import format_type as _format_type
 from aster.context_blocks import DynamicContext, EventBase, ResultStatus, ToolCallEvent, ToolResult
@@ -2296,8 +2299,8 @@ Standard Python builtins and agent instance (`self`) are available."""
             # Normalize args to always have "result" key
             # ── Return result normalization ──────────────────────────
             # Intercept point: normalizes return_result args before
-            # Pydantic validation. Handles args wrapping, GPT-4o
-            # double-quote fix, variable ref resolution, JSON parsing.
+            # Pydantic validation. Handles args wrapping, variable reference
+            # resolution, JSON parsing, and constructor-call coercion.
             # Consider making extensible in the future.
 
             # Be flexible: accept both return_result(result=...) and return_result(field1=..., field2=...)
@@ -2310,21 +2313,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # Already has "result" key, use as-is
                 normalized_args = args
 
-            # Fix GPT-4o-mini double-quoting bug: LLM sometimes wraps string in extra quotes
-            # with escaped newlines. Detect and unwrap: "\"code\\n\"" -> "code\n"
-            # Safe because legitimate code never starts/ends with " AND contains \\n
-            if "result" in normalized_args and isinstance(normalized_args["result"], str):
-                result_val = normalized_args["result"]
-                if result_val.startswith('"') and result_val.endswith('"') and "\\n" in result_val:
-                    # Unwrap the extra quotes and decode escaped characters
-                    get_harness_metrics().gpt4o_double_quote_fix(result_val)
-                    normalized_args["result"] = result_val[1:-1].encode().decode("unicode_escape")
-
-            # Create wrapper model: class ReturnResultModel(BaseModel): result: T
-            # For non-Pydantic types (e.g. pd.DataFrame), falls back to Any in the model
-            ReturnResultModel, is_pydantic_validated = self._create_return_model(
-                return_type, method_name
-            )
+            ReturnResultModel = self._create_return_model(return_type, method_name)
 
             # Handle case where LLM passes a string instead of actual object.
             # Don't transform if the expected return type IS str — the string should stay as-is.
@@ -2363,19 +2352,6 @@ Standard Python builtins and agent instance (`self`) are available."""
             validated_model = ReturnResultModel(**normalized_args)
             validated = getattr(validated_model, "result")  # noqa: B009
 
-            # For non-Pydantic types, Pydantic accepted Any — do isinstance check.
-            # Unwrap Annotated[T, ...] first; isinstance() can't take Annotated as 2nd arg.
-            if not is_pydantic_validated and validated is not None:
-                base_type, _ = self._extract_annotated_description(return_type)
-                if not isinstance(validated, base_type):
-                    type_name = getattr(base_type, "__name__", str(base_type))
-                    raise TypeError(
-                        f"Expected an instance of {type_name}, "
-                        f"but got {type(validated).__name__}.\n"
-                        f"Hint: Use {self._python_tool_name()}() to construct the {type_name} object, "
-                        f"then call return_result(variable) from within the code."
-                    )
-
             # Method-local postconditions: deterministic invariants declared on
             # the strategy config that Pydantic return-type validation can't
             # express (e.g. live agent state). An ``InvariantError`` is caught by
@@ -2387,6 +2363,9 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         except (
             PydanticValidationError,
+            PydanticUserError,
+            SchemaError,
+            ArbitraryTypeWarning,
             InvariantError,
             ValueError,
             TypeError,
@@ -2400,6 +2379,13 @@ Standard Python builtins and agent instance (`self`) are available."""
             error_msg = format_validation_error(
                 e, return_type, actual_value, runtime.truncation_config
             )
+            if isinstance(e, PydanticValidationError) and any(
+                error["type"] == "is_instance_of" for error in e.errors()
+            ):
+                error_msg += (
+                    f"\nHint: Use {self._python_tool_name()}() to construct the required Python "
+                    "objects, then call return_result(variable) from within the code."
+                )
             logger.debug(f"[CODEACT] return_result validation failed: {e}")
 
             if session.is_exhausted():
@@ -2788,11 +2774,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     return (True, None)
                 return (False, None)
 
-            # Create wrapper model: class ReturnResultModel(BaseModel): result: T
-            # For non-Pydantic types, falls back to Any in the model
-            ReturnResultModel, is_pydantic_validated = self._create_return_model(
-                return_type, method_name
-            )
+            ReturnResultModel = self._create_return_model(return_type, method_name)
 
             # Handle case where value is a JSON string
             # BUT: Don't parse if the expected return type IS str - the string should stay as-is
@@ -2803,16 +2785,17 @@ Standard Python builtins and agent instance (`self`) are available."""
             validated_model = ReturnResultModel(result=value)
             validated = getattr(validated_model, "result")  # noqa: B009
 
-            # For non-Pydantic types, do isinstance check instead.
-            # Unwrap Annotated[T, ...] first; isinstance() can't take Annotated as 2nd arg.
-            if not is_pydantic_validated and validated is not None:
-                base_type, _ = self._extract_annotated_description(return_type)
-                if not isinstance(validated, base_type):
-                    return (False, None)
-
             return (True, validated)
 
-        except (PydanticValidationError, ValueError, TypeError, json.JSONDecodeError):
+        except (
+            PydanticValidationError,
+            PydanticUserError,
+            SchemaError,
+            ArbitraryTypeWarning,
+            ValueError,
+            TypeError,
+            json.JSONDecodeError,
+        ):
             return (False, None)
 
     def _build_execute_python_tool(self) -> Tool:
@@ -2871,27 +2854,15 @@ Standard Python builtins and agent instance (`self`) are available."""
         except Exception:  # noqa: BLE001 — feasibility probe; any failure → fall back to Any
             return False
 
-    def _create_return_model(self, return_type: Any, method_name: str) -> tuple[Any, bool]:
-        """Create a Pydantic model for return_result validation.
-
-        Returns:
-            Tuple of (model_class, is_pydantic_validated).
-            If the return type is Pydantic-compatible, returns the proper model and True.
-            If not, returns a model with Any and False (caller should do isinstance check).
-        """
-        if self._is_pydantic_compatible(return_type):
-            model = create_model(
+    def _create_return_model(self, return_type: Any, method_name: str) -> type[BaseModel]:
+        """Validate the real return type independently of the tool's JSON schema."""
+        # Pydantic otherwise widens unsupported annotations such as Never to Any.
+        with warnings.catch_warnings(action="error", category=ArbitraryTypeWarning):
+            return create_model(
                 f"{method_name.title().replace('_', '')}ReturnResult",
+                __config__=ConfigDict(arbitrary_types_allowed=True),
                 result=(return_type, ...),
             )
-            return model, True
-        else:
-            # Fall back to Any — accept any value, let caller do isinstance check
-            model = create_model(
-                f"{method_name.title().replace('_', '')}ReturnResult",
-                result=(Any, ...),
-            )
-            return model, False
 
     def _extract_annotated_description(self, type_hint: Any) -> tuple[Any, str | None]:
         """Extract the base type and first string metadata from Annotated.
