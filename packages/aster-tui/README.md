@@ -738,7 +738,7 @@ does not infer them from a model name.
 | Auto | Permit generated code and file changes, including deletion, without asking. |
 | Manual | Ask before executing generated code or making changes. |
 | Accept edits | Automatically allow supported file reads and edits; ask before commands and other code. |
-| Plan | Plan from supplied context with generated code and tool execution disabled. |
+| Plan | Read, list and search workspace files for planning; generated code and changes are disabled. |
 
 Use `/permissions auto`, `/permissions manual`, `/permissions accept_edits`, or
 `/permissions plan` to select a mode directly. Choosing Auto, Manual, or Accept edits
@@ -771,10 +771,23 @@ Ordinary conversation can return a written answer without executing code or
 requesting approval. A greeting combined with a coding task still follows the
 normal tool and approval flow. Native Windows shell commands use PowerShell.
 
-Plan mode disables all generated Python and tool execution. It can reason from
-conversation context and supplied file/image snapshots, and cannot inspect new
-workspace files through tools. Native and sandbox execution keep their existing
-backend behavior; choosing Plan does not create a separate read-only filesystem.
+Plan mode can inspect new workspace files through bounded host read, directory-list
+and literal-text-search operations. It continues to reject generated Python, shell
+commands, external tools and file changes. The model submits one literal
+`await self.files.read(...)`, `await self.files.list(...)`, or
+`await self.files.search(...)` request per cell; the host handles the request without
+evaluating Python or consulting mutable REPL bindings.
+
+Inspection stays inside the current workspace on Linux and Windows. Symbolic links,
+junctions, multiply linked files and special files are refused. Reads require UTF-8
+text of at most 2 MiB, and return at most 500 lines and 64K characters. Searches use
+literal, case-sensitive text and report truncated or skipped results; they inspect
+at most 2000 entries and 16 MiB per request, skipping common build/dependency
+directories. Narrow the directory or filename glob when a search is incomplete.
+
+This policy applies to model requests. User-entered slash commands retain their
+own host permissions. Native and sandbox backends retain their existing behavior;
+Plan does not turn the Python interpreter or the whole session into an OS sandbox.
 
 ## Reviewing and undoing file changes
 

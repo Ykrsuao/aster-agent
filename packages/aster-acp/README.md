@@ -215,7 +215,7 @@ Runtime status also reports `permissionMode`. Set it through
 | `auto` | Allow generated code and file changes for this live session. |
 | `manual` | Request approval before generated execution. |
 | `accept_edits` | Automatically handle supported file reads and edits; request approval for commands and other code. |
-| `plan` | Use supplied context to plan, with generated execution disabled. |
+| `plan` | Inspect workspace files through bounded host reads, listing and search; generated execution and changes remain disabled. |
 
 Selecting the first three modes also enters Code mode. The legacy `mode` and
 `approval` fields remain available; do not combine them with `permissionMode`
@@ -228,6 +228,18 @@ subsequent generated execution without cancelling the current task. An open appr
 must still be resolved or cancelled first: changing modes never approves that request.
 Requests combined with model, reasoning, or other settings retain the idle-session
 requirement.
+
+Plan recognizes one literal `await self.files.read(path, start_line=1, end_line=200)`,
+`await self.files.list(path='.')`, or `await self.files.search(query, path='.', glob='*')`
+request per cell. These requests use a host-owned reader, never Python evaluation or
+the agent's mutable `files` binding. The runtime retains validation, middleware,
+hooks and normal tool output; changed source or permission invalidates a prepared
+request. Arbitrary code, shell, MCP calls, assignments and mixed cells are refused.
+The fixed boundary is the selected workspace, including when the Python backend
+uses a sandbox. Links, junctions, multiple hard links and special files are refused.
+UTF-8 reads and literal searches are bounded and report incomplete results. See the
+[terminal inspection limits](../aster-tui/README.md#session-settings-and-approvals).
+Explicit user slash commands retain their separate host permission contract.
 
 Accept edits recognizes a single direct `await self.shell.read(...)`,
 `await self.shell.write_file(...)`, or path-based `await self.shell.replace(...)`

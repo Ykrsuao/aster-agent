@@ -73,7 +73,8 @@
 ### A2：让 Plan 能执行受限的仓库调查
 
 - 类型：当前明确限制；优先级 P1，按编程工作台目标补全。
-- 现状：Plan 拒绝模型生成的 Python/工具执行，因此模型不能自主列目录、搜索或读新文件。用户显式 slash 命令仍经独立宿主路由执行；不能据此把整个会话描述为绝对只读沙箱。
+- 实施前：Plan 拒绝模型生成的 Python/工具执行，因此模型不能自主列目录、搜索或读新文件。用户显式 slash 命令仍经独立宿主路由执行；不能据此把整个会话描述为绝对只读沙箱。
+- 当前实现：宿主处理字面量 `self.files.read/list/search` 请求，可调查工作区内的新文件；继续拒绝模型任意 Python、shell、外部工具和写入。真实 ACP 子进程已验证当前仓库调查、关闭与重开；模型响应为离线脚本，真实模型自主选用效果仍需单独验收。见文末 A2 实施记录。
 - 完成标准：为模型提供宿主实现的 read/list/search 路径，继续拒绝模型任意 Python、shell 和写入；明确用户显式命令的独立权限合同；验证越界、链接、权限切换与写入拒绝；可完成一次真实仓库调研。
 - 依据：[RuntimeControls](../packages/aster-acp/src/aster_acp/runtime_controls.py)、[Plan 范围说明](../packages/aster-tui/README.md)。
 
@@ -196,3 +197,15 @@
 - 第二轮 Windows 在 `test_reconsolidation_allows_reconciler_to_mutate_input_copy` 捕获另一条既有测试的顺序假设：重整按 `(created_at, id)` 排序，测试却把插入首项当作排序首项。同时间戳且 ID 反序的受控探针 5/5 复现，其余三格 15/15 通过。测试现明确输入先后时间，并覆盖两种 ID 顺序；保留更新原 ID、未归档及计数断言，生产排序不变。修后探针 20/20、reflection 回归 32 passed，完整记忆包 **483 passed、13 skipped、1 deselected**。失败与修复验证单独保留，不把第二轮结果当最终候选成功。
 - 验收边界：OAuth 不在 ACP 中自动刷新，尚未端到端验收；没有调用真实模型 API、真实用户 MCP 服务或持久凭据。SSE 沿用现有支持，本项新增的完整本地 wire 旅程使用 stdio 与显式凭据 HTTP。
 - 用户入口补验复现了忙碌时 `/mcp` 被编辑器提交白名单拦截：此前测试直接调用命令路由，未经过按 Enter 的路径。现放行只读 MCP 列表，新增空闲/忙碌的真实提交入口回归，并让前台/后台忙碌重连拒绝测试也经过该入口。修前用例失败，修后 14 项 MCP 定向测试、fmt 与 Clippy 通过；该修改须以其后续候选 CI 验收，先前成功不覆盖本次修正。
+
+## A2 实施与验收（2026-11-22）
+
+- 实施分支：`codex/plan-readonly-20261122`，基于 U2 候选 `a6deb132`。本项沿用前置草稿 PR #4 的能力与质量基线，独立提交 Plan 调查，不把审计 PR #5 的验证计入本项。
+- Plan 每个 cell 接受一个参数为字面量的 `await self.files.read/list/search(...)`。宿主直接派发操作，不解释执行模型 Python、不使用可变的 `agent.files` 或 REPL 绑定；保留原验证、middleware、hooks 和工具输出。源请求或权限版本在准备后变化即拒绝，切回 Manual 后恢复审批。
+- 文件边界固定为会话工作区。Linux 保留逐层打开的目录 fd，Windows 保留不允许删除共享的句柄；检查文件身份、实际路径与类型，拒绝越界、符号链接、junction、硬链接文件和特殊文件。Sandbox 路径只映射到本工作区，额外挂载不扩大 Plan 调查范围。
+- 读取要求 UTF-8、文件不超过 2 MiB，每次至多 500 行/64K 字符；列表至多 500 项。搜索为区分大小写的字面文本，支持文件 glob，至多 200 个匹配、2000 个条目、16 MiB、64K 输出和 5 秒预算，跳过常见依赖/构建目录。`truncated` 或 `skipped` 代表结果不完整，不能据此断言内容不存在。
+- 旧版/新版对照：相同真实 CodeAct 调查用例在 U2 基线拒绝读新文件，在本实现成功返回内容且没有文件修改。真实 ACP 子进程验收使用当前仓库，完成 list/search/read、拒绝写入、关闭与重开；恢复后权限先回到 Manual，再显式切到 Plan 重新调查。
+- Windows 完整 CLI **2,277 passed、43 skipped、1 deselected**；最终完整 ACP **990 passed、9 deselected、3 xfailed**。初轮 ACP 发现输入历史测试依赖相邻写入有不同时间戳，已保留真实记录路径、显式设置时间并参数化相反 session ID 顺序，生产排序未改动。另有一次模型会话初始化 30 秒超时，单独复验及上述完整 ACP 复验通过，未放宽超时；根因未证实。
+- Linux 定向回归 **182 passed、1 skipped、1 deselected**；补入真实 ACP wire 与输入历史用例后的相关范围 **51 passed、1 skipped**。这些范围有重叠，不相加。Windows 缺少符号链接创建权限及 POSIX FIFO 的用例跳过；独立硬链接与 junction 用例通过，Linux 覆盖符号链接、硬链接和 FIFO，条件跳过 Windows junction。
+- Windows Rust 会话控制回归 **61 passed**，fmt check 通过；全仓 Ruff 与格式检查通过，全部 **1,360** 个源码 Python 文件通过 SPDX 检查，差异检查通过。日志与 JUnit 位于本机临时目录 `aster-audit-delivery-da31de6dc7`，不随源码提交；远端结果须绑定本分支最终候选，记录于草稿 PR。
+- 验收边界：用户显式 slash 命令保留独立宿主权限合同，Plan 不把整个会话或 Python 解释器变成操作系统只读沙箱。模型使用 `FakeLLMClient`，没有调用真实模型 API；真实模型自主调查质量不由这些离线测试证明。A3/A4/A5、M1b 和 R1/R2 仍待推进，A1 保持候选方向。

@@ -1165,7 +1165,7 @@ impl State {
                 },
                 Choice {
                     label: "Plan".into(),
-                    detail: "Plan from supplied context without running tools".into(),
+                    detail: "Inspect workspace files and plan without changing files".into(),
                     value: "plan".into(),
                 },
             ],
@@ -1591,7 +1591,7 @@ pub fn default_commands() -> Vec<Command> {
             "Choose reasoning effort; default restores model defaults",
         ),
         ("/mode", "Choose Code or Plan mode"),
-        ("/plan", "Enter planning mode with execution disabled"),
+        ("/plan", "Plan with read-only workspace inspection"),
         ("/code", "Return to Code mode"),
         ("/permissions", "Choose Auto, Manual, Accept edits or Plan"),
         (

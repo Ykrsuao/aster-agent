@@ -4,8 +4,8 @@
 
 The gate is deliberately at the Python execution seam. A shell-only check
 cannot control CodeAct, whose generated Python can open files and processes
-directly. Planning disables generated execution entirely; it is not a claim
-that the host Python interpreter has become a read-only sandbox.
+directly. Planning dispatches bounded host file requests and disables generated
+execution; the host Python interpreter is not a read-only sandbox.
 """
 
 from __future__ import annotations
@@ -70,8 +70,8 @@ _MODES = (
     ),
     SessionMode(
         id="plan",
-        name="Plan (no execution)",
-        description="Reason from supplied context; generated code and tool execution are disabled.",
+        name="Plan (read-only)",
+        description="Inspect workspace files and plan; generated code and file changes are disabled.",
     ),
 )
 
@@ -176,14 +176,25 @@ class RuntimeControls:
         self.approval = "ask"
         self._pending = 0
         self._approval_lock = asyncio.Lock()
+        from aster_cli.tools.workspace_files import WorkspaceFiles
+
+        self._plan_files = WorkspaceFiles(agent.cwd)
+        self._permission_revision = 0
 
     def instructions(self) -> str:
         if self.mode == "plan":
             return (
-                "The user selected Plan mode. Generated Python and tool execution are disabled. "
-                "Reason from the conversation and supplied file/image context. Explain any missing "
-                "information and present the plan with the separate return_result JSON tool. "
-                "Do not claim to have inspected or changed files that were not supplied."
+                "The user selected Plan mode. Inspect the workspace using one direct literal "
+                "request per execute_python cell: await self.files.list(path='.'), "
+                "await self.files.search('literal text', path='.', glob='*.py'), or "
+                "await self.files.read('path', start_line=1, end_line=200). The host handles "
+                "these requests without executing Python; results are shown directly. Do not "
+                "assign or print them, compute arguments, combine calls, or use other tools. "
+                "Only files in this workspace are accessible; links are refused and results "
+                "are bounded. A truncated or skipped search is incomplete evidence. Arbitrary "
+                "Python, shell commands, external tools and file changes remain disabled. "
+                "Present the plan with the separate return_result JSON tool, grounded in "
+                "the supplied context and files actually inspected."
             )
         if self.approval == "session":
             return "The user has allowed generated execution for this live session."
@@ -265,6 +276,7 @@ class RuntimeControls:
         if self._pending:
             raise ValueError("Resolve or cancel the pending approval before changing settings.")
         self.mode, self.approval = _PERMISSION_MODES[permission_mode]
+        self._permission_revision += 1
         self.publish()
         return self.status()
 
@@ -372,6 +384,8 @@ class RuntimeControls:
                 self.approval = "ask"
         if approval is not None:
             self.approval = approval
+        if mode is not None or approval is not None:
+            self._permission_revision += 1
         # Publish all effective settings before asynchronous cleanup. If that
         # await is cancelled, the UI still sees the configuration in use.
         self.publish()
@@ -390,7 +404,18 @@ class RuntimeControls:
         timeout: float | None = None,
         host_path: Callable[[str], str] | None = None,
     ) -> Any:
-        """Prepare a file request without granting permission to run its Python source."""
+        """Prepare a host file request without granting execution of its Python spelling."""
+        if self.mode == "plan":
+            from aster_acp._plan_files import plan_file_executor
+
+            revision = self._permission_revision
+            return plan_file_executor(
+                code,
+                files=self._plan_files,
+                allowed=lambda: self.mode == "plan" and self._permission_revision == revision,
+                timeout=timeout,
+                host_path=host_path,
+            )
         if self.mode != "code" or self.approval != "accept_edits":
             return None
         from aster_acp._file_edits import file_edit_executor
@@ -417,7 +442,8 @@ class RuntimeControls:
         if self.mode == "plan":
             return (
                 "Plan mode disables generated execution. This code was not run. "
-                "Use the separate return_result JSON tool to present your plan."
+                "Use one literal self.files.read/list/search request to inspect the workspace, "
+                "or the separate return_result JSON tool to present your plan."
             )
         if self.approval == "session":
             return None

@@ -32,6 +32,7 @@ from aster_cli.coding.reply_strategy import CodingReplyStrategy
 from aster_cli.coding.settings import load_required_checks
 from aster_cli.coding.verification import Verification
 from aster_cli.tools.repo_tools import RepoTools
+from aster_cli.tools.workspace_files import WorkspaceFiles
 
 with hidden:
     import json
@@ -67,7 +68,9 @@ class CodingAgent(InteractiveAgent):
     # a later skill — a workspace SKILL.md, a client-forwarded MCP server —
     # take one over, which would remove the tool while the model is still told
     # it has it.
-    __protected_skill_attrs__ = frozenset({"shell", "repo", "todo", "libs", "skills", "verify"})
+    __protected_skill_attrs__ = frozenset(
+        {"shell", "repo", "files", "todo", "libs", "skills", "verify"}
+    )
 
     cwd: Annotated[Path, nosnapshot]
     # Host-driven input channels. These live here rather than on
@@ -80,6 +83,7 @@ class CodingAgent(InteractiveAgent):
     system_messages: Annotated[Any, nosnapshot]
     shell: Annotated[ActivityShellTools, nosnapshot]
     repo: Annotated[RepoTools, nosnapshot]
+    files: Annotated[WorkspaceFiles, nosnapshot]
     todo: TodoManager
     libs: Annotated[SkillWriting, nosnapshot]
     skills: Annotated[SkillRegistry, nosnapshot]
@@ -110,6 +114,7 @@ class CodingAgent(InteractiveAgent):
         self._base_shell = ShellTools(cwd=str(self.cwd))
         self.shell = ActivityShellTools(self._base_shell, self.event_manager)
         self.repo = RepoTools(root=self.cwd, session=self.shell.session)
+        self.files = WorkspaceFiles(self.cwd)
         self.todo = TodoManager()
         self.skills = SkillRegistry(self)
         self.skills.register("aster.shell", self.shell)
@@ -144,7 +149,7 @@ class CodingAgent(InteractiveAgent):
             self.skills.discover_skills_dirs(skills_dirs)
 
         self.context["python_tools"] = Context(
-            doc(RepoTools, ActivityShellTools),
+            doc(RepoTools, ActivityShellTools, WorkspaceFiles),
             prefix=True,
         )
         self.refresh_host_context()
