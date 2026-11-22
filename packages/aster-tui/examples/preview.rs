@@ -794,7 +794,13 @@ fn main() {
             controller.paste("看看这张图片的界面，有什么可以改善？".into());
         }
         let actions = controller.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(actions.as_slice(), [Action::Request { method: "session/prompt", .. }]));
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::Request {
+                method: "session/prompt",
+                ..
+            }]
+        ));
         state = controller.state;
     }
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();

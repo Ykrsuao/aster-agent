@@ -275,7 +275,10 @@ fn project_controls(
 fn project(state: &State, columns: usize, theme: &Theme<'_>, inline_effort: bool) -> Row {
     let cfg = &state.hud.config;
     let controls = project_controls(state, columns, theme, inline_effort);
-    let model = fit(project_model(state), columns.saturating_sub(controls.width() + 2));
+    let model = fit(
+        project_model(state),
+        columns.saturating_sub(controls.width() + 2),
+    );
     let mut spans = vec![
         Span::styled("[", theme.style("muted")),
         Span::styled(model, theme.style("model").add_modifier(Modifier::BOLD)),
@@ -807,7 +810,10 @@ fn element(state: &State, name: &str, columns: usize, theme: &Theme<'_>, now: f6
                             .join(", "),
                         theme.style("muted"),
                     ));
-                    let hidden = environment.skills.len().saturating_sub(hud.config.activity_limit);
+                    let hidden = environment
+                        .skills
+                        .len()
+                        .saturating_sub(hud.config.activity_limit);
                     if hidden > 0 {
                         details.push(Span::styled(format!(" +{hidden}"), theme.style("muted")));
                     }
@@ -975,7 +981,10 @@ pub fn rows(state: &State, columns: usize, max_rows: usize) -> Vec<Row> {
         if budget == 1 && rows.iter().any(|row| row.element == "usage") {
             return false;
         }
-        let visible = rows.len().saturating_sub(usize::from(merged)).min(budget)
+        let visible = rows
+            .len()
+            .saturating_sub(usize::from(merged))
+            .min(budget)
             .saturating_sub(usize::from(state.hud.problem.is_some()));
         rows.iter()
             .filter(|row| !merged || row.element != "usage")
@@ -994,7 +1003,9 @@ pub fn rows(state: &State, columns: usize, max_rows: usize) -> Vec<Row> {
         ) {
             let project_width = columns.saturating_sub(rows[usage_index].line.width() + 3);
             let permission_reserve = if state.runtime_supported {
-                "Accept edits".width().saturating_sub(clean(state.permission_label()).width())
+                "Accept edits"
+                    .width()
+                    .saturating_sub(clean(state.permission_label()).width())
             } else {
                 0
             };

@@ -83,7 +83,20 @@ Aster currently supports Linux and native Windows. Host features must provide na
 - Import platform-specific modules inside the implementation that uses them.
 - Keep microsandbox initialization and virtualization requirements confined to sandbox execution; in-process execution must work without its runtime.
 
-CI checks native Windows imports, CLI, scripted agents, persistent shells and file-backed storage in `windows-core-smoke`. Tests in `tests/test_native_windows.py` exercise the public interfaces on Windows, and the existing WSL workflow supplies additional Linux regression coverage.
+The default root `uv run pytest` collection includes the CLI, ACP, bench and memory packages. Linux unit CI runs this offline suite; `windows-core-smoke` also runs the memory package explicitly and keeps its JUnit results. Optional vector backends and live provider tests remain separate from that offline baseline.
+
+`linux-terminal` and `windows-core-smoke` run Rust formatting, Clippy, tests and a release build. The Linux job also runs the Python terminal launcher and real ACP subprocess protocol regressions; Rust transport tests cover backend startup and process-tree cleanup using the synced Python environment. Windows additionally checks installed wheels and the complete terminal bundle. Tests in `tests/test_native_windows.py` exercise public interfaces on Windows, and WSL supplies additional Linux coverage.
+
+For terminal development, install Python dependencies before running Rust tests:
+
+```sh
+uv sync --extra tui --extra mcp --extra tracing --extra viewer
+uv run --no-sync pytest packages/aster-memory/tests packages/aster-cli/tests/test_tui_command.py packages/aster-acp/tests/test_protocol.py
+cargo fmt --manifest-path packages/aster-tui/Cargo.toml -- --check
+cargo clippy --locked --manifest-path packages/aster-tui/Cargo.toml --all-targets -- -D warnings
+cargo test --locked --manifest-path packages/aster-tui/Cargo.toml
+cargo build --locked --release --manifest-path packages/aster-tui/Cargo.toml
+```
 
 ## Automated AI Agents
 

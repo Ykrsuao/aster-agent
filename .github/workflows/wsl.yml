@@ -1,7 +1,8 @@
 name: WSL
 
-# WSL 2 is the supported way to run aster on Windows: a quick check on every PR,
-# the full suite nightly, on manual runs, and on PRs labelled `wsl-full`.
+# Additional Linux host coverage inside WSL 2: quick checks on every PR,
+# the full host suite nightly, on manual runs, and on PRs labelled `wsl-full`.
+# Native Windows and real microVM containment are covered separately in ci.yml.
 # No third-party actions (the org's action allow-list blocks setup-wsl): import
 # a pinned Ubuntu WSL rootfs with `wsl --import` and run scripts/wsl_ci.sh in it.
 

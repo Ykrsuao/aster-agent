@@ -299,7 +299,10 @@ fn pasted_image_without_text_sends_one_image_block() {
     let Some(Entry::User(shown)) = client.controller.state.entries.first() else {
         panic!("sent image must have a visible user message");
     };
-    assert!(shown.starts_with("[Image] clipboard.png · PNG · "), "{shown}");
+    assert!(
+        shown.starts_with("[Image] clipboard.png · PNG · "),
+        "{shown}"
+    );
     assert_eq!(shown.lines().count(), 1);
     assert!(client
         .answer(id, json!({"stopReason": "end_turn"}))
@@ -831,7 +834,11 @@ fn shift_tab_ignores_repeated_modified_keys_and_open_overlays() {
                 .is_empty());
         }
         assert_eq!(client.controller.state.editor.lines(), draft);
-        for extra in [KeyModifiers::CONTROL, KeyModifiers::ALT, KeyModifiers::SUPER] {
+        for extra in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::SUPER,
+        ] {
             assert!(client
                 .controller
                 .key(KeyEvent::new(code, KeyModifiers::SHIFT | extra))
@@ -1354,7 +1361,10 @@ fn permissions_can_change_during_a_prompt_without_replacing_or_finishing_it() {
         assert_eq!(client.controller.state.active_turn_id, turn);
         assert_eq!(client.controller.state.started, started);
         assert_eq!(client.controller.state.permission_mode(), "manual");
-        assert!(client.controller.input("/permissions auto".into()).is_empty());
+        assert!(client
+            .controller
+            .input("/permissions auto".into())
+            .is_empty());
 
         let actions = if rejected {
             client.controller.message(json!({
@@ -1368,14 +1378,25 @@ fn permissions_can_change_during_a_prompt_without_replacing_or_finishing_it() {
         assert_eq!(client.controller.state.phase, Phase::Busy);
         assert_eq!(client.controller.state.active_turn_id, turn);
         assert_eq!(client.controller.state.status, status);
-        assert_eq!(client.controller.state.editor.lines(), &["next instruction"]);
+        assert_eq!(
+            client.controller.state.editor.lines(),
+            &["next instruction"]
+        );
         assert_eq!(
             client.controller.state.permission_mode(),
             if rejected { "manual" } else { "accept_edits" }
         );
         let cancellation = client.controller.cancel();
-        assert!(matches!(cancellation.as_slice(), [Action::Notify { method: "session/cancel", .. }]));
-        assert!(client.answer(prompt, json!({"stopReason": "cancelled"})).is_empty());
+        assert!(matches!(
+            cancellation.as_slice(),
+            [Action::Notify {
+                method: "session/cancel",
+                ..
+            }]
+        ));
+        assert!(client
+            .answer(prompt, json!({"stopReason": "cancelled"}))
+            .is_empty());
         assert_eq!(client.controller.state.phase, Phase::Ready);
     }
 }
@@ -1386,15 +1407,21 @@ fn a_late_permission_reply_does_not_complete_the_next_prompt() {
     let first = client.start_prompt();
     let actions = client.controller.input("/permissions plan".into());
     let (configuration, _) = client.register(actions, "_aster/session/configure");
-    assert!(client.answer(first, json!({"stopReason": "end_turn"})).is_empty());
+    assert!(client
+        .answer(first, json!({"stopReason": "end_turn"}))
+        .is_empty());
     assert!(client.controller.input("/model model-b".into()).is_empty());
     let second = client.start_prompt();
     let turn = client.controller.state.active_turn_id.clone();
-    assert!(client.answer(configuration, runtime("model-a", "plan", "ask")).is_empty());
+    assert!(client
+        .answer(configuration, runtime("model-a", "plan", "ask"))
+        .is_empty());
     assert_eq!(client.controller.state.phase, Phase::Busy);
     assert_eq!(client.controller.state.active_turn_id, turn);
     assert_eq!(client.controller.state.permission_mode(), "plan");
-    assert!(client.answer(second, json!({"stopReason": "end_turn"})).is_empty());
+    assert!(client
+        .answer(second, json!({"stopReason": "end_turn"}))
+        .is_empty());
     assert_eq!(client.controller.state.phase, Phase::Ready);
 }
 
@@ -1408,7 +1435,9 @@ fn permissions_can_change_while_background_work_continues() {
     let actions = client.controller.input("/permissions plan".into());
     let (configuration, params) = client.register(actions, "_aster/session/configure");
     assert_eq!(params["permissionMode"], "plan");
-    assert!(client.answer(configuration, runtime("model-a", "plan", "ask")).is_empty());
+    assert!(client
+        .answer(configuration, runtime("model-a", "plan", "ask"))
+        .is_empty());
     assert_eq!(client.controller.state.tasks, tasks);
     assert_eq!(client.controller.state.permission_mode(), "plan");
     assert_eq!(client.controller.state.phase, Phase::Ready);
@@ -1441,10 +1470,15 @@ fn skills_browser_reads_and_searches_during_a_task_without_changing_the_draft() 
     let actions = key(&mut client.controller, KeyCode::Enter);
     let (detail, params) = client.register(actions, "_aster/session/skills");
     assert_eq!(params["name"], "aster.shell");
-    assert!(client.answer(detail, json!({"skill":{
-        "name":"aster.shell", "text":"Run commands.\nKeeps shell state.",
-        "active":true, "loaded":true, "kind":"python", "truncated":false
-    }})).is_empty());
+    assert!(client
+        .answer(
+            detail,
+            json!({"skill":{
+                "name":"aster.shell", "text":"Run commands.\nKeeps shell state.",
+                "active":true, "loaded":true, "kind":"python", "truncated":false
+            }})
+        )
+        .is_empty());
     key(&mut client.controller, KeyCode::PageDown);
     assert!(client.controller.state.detail_scroll > 0);
     key(&mut client.controller, KeyCode::Esc);
@@ -1457,9 +1491,14 @@ fn skills_browser_reads_and_searches_during_a_task_without_changing_the_draft() 
     assert_eq!(client.controller.state.phase, Phase::Busy);
     assert_eq!(client.controller.state.active_turn_id, turn);
     assert_eq!(client.controller.state.status, status);
-    assert_eq!(client.controller.state.editor.lines(), &["keep this 中文 draft"]);
+    assert_eq!(
+        client.controller.state.editor.lines(),
+        &["keep this 中文 draft"]
+    );
     assert_eq!(client.controller.state.editor.cursor(), cursor);
-    assert!(client.answer(prompt, json!({"stopReason":"end_turn"})).is_empty());
+    assert!(client
+        .answer(prompt, json!({"stopReason":"end_turn"}))
+        .is_empty());
 }
 
 #[test]
@@ -1467,7 +1506,9 @@ fn skills_browser_ignores_old_replies_after_refresh_back_close_or_conversation_c
     let mut client = Client::ready();
     let actions = client.controller.input("/skills".into());
     let (old, _) = client.register(actions, "_aster/session/skills");
-    let actions = client.controller.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    let actions = client
+        .controller
+        .key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
     let (current, _) = client.register(actions, "_aster/session/skills");
     client.answer(current, skill_list());
     client.answer(old, json!({"skills":[],"total":0}));
@@ -1476,16 +1517,27 @@ fn skills_browser_ignores_old_replies_after_refresh_back_close_or_conversation_c
     let actions = key(&mut client.controller, KeyCode::Enter);
     let (detail, _) = client.register(actions, "_aster/session/skills");
     key(&mut client.controller, KeyCode::Esc);
-    client.answer(detail, json!({"skill":{"name":"aster.shell","text":"Late text"}}));
+    client.answer(
+        detail,
+        json!({"skill":{"name":"aster.shell","text":"Late text"}}),
+    );
     assert!(client.controller.state.skills.detail.is_none());
     assert_eq!(client.controller.state.selected, 1);
-    let actions = client.controller.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    let actions = client
+        .controller
+        .key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
     let (refresh, _) = client.register(actions, "_aster/session/skills");
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-    terminal.draw(|frame| { aster_tui::ui::draw(frame, &mut client.controller.state); }).unwrap();
+    terminal
+        .draw(|frame| {
+            aster_tui::ui::draw(frame, &mut client.controller.state);
+        })
+        .unwrap();
     client.answer(refresh, skill_list());
     assert_eq!(client.controller.state.selected, 1);
-    let actions = client.controller.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    let actions = client
+        .controller
+        .key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
     let (closed, _) = client.register(actions, "_aster/session/skills");
     key(&mut client.controller, KeyCode::Esc);
     client.answer(closed, json!({"skills":[],"total":0}));
@@ -1503,14 +1555,34 @@ fn skills_browser_reports_unsupported_and_failed_requests_with_a_retry() {
     client.controller.paste("draft".into());
     client.controller.state.skills.supported = false;
     assert!(client.controller.input("/skills".into()).is_empty());
-    assert!(client.controller.state.skills.error.as_ref().unwrap().contains("Update aster-acp"));
+    assert!(client
+        .controller
+        .state
+        .skills
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("Update aster-acp"));
     client.controller.state.skills.supported = true;
-    let actions = client.controller.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    let actions = client
+        .controller
+        .key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
     let (failed, _) = client.register(actions, "_aster/session/skills");
-    client.controller.message(json!({"id":failed,"error":{"code":-32603,"message":"Read failed"}}));
+    client
+        .controller
+        .message(json!({"id":failed,"error":{"code":-32603,"message":"Read failed"}}));
     assert!(!client.controller.state.skills.loading);
-    assert!(client.controller.state.skills.error.as_ref().unwrap().contains("Ctrl+R"));
-    let actions = client.controller.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    assert!(client
+        .controller
+        .state
+        .skills
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("Ctrl+R"));
+    let actions = client
+        .controller
+        .key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
     let (retry, _) = client.register(actions, "_aster/session/skills");
     client.answer(retry, skill_list());
     assert!(client.controller.state.skills.error.is_none());

@@ -2242,7 +2242,10 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
             Line::styled(
                 if kind == Overlay::Skills && state.skills.detail.is_some() {
                     " Esc back "
-                } else if kind == Overlay::Context && state.context_view.is_some() && panel_width >= 66 {
+                } else if kind == Overlay::Context
+                    && state.context_view.is_some()
+                    && panel_width >= 66
+                {
                     " Drag select · release to copy · PgUp/PgDn scroll · Esc back "
                 } else if kind == Overlay::Context
                     && state.context_view.is_some()
@@ -2563,11 +2566,24 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
             if !state.skills.loading && state.skills.error.is_none() {
                 let status = format!(
                     "{} · {} · {} · Read-only",
-                    if skill["active"] == true { "Active" } else { "Inactive" },
-                    if skill["loaded"] == true { "Loaded" } else { "Not loaded" },
+                    if skill["active"] == true {
+                        "Active"
+                    } else {
+                        "Inactive"
+                    },
+                    if skill["loaded"] == true {
+                        "Loaded"
+                    } else {
+                        "Not loaded"
+                    },
                     clean(skill["kind"].as_str().unwrap_or("skill"))
                 );
-                append(&mut rows, Line::styled(status, muted), content.width as usize, None);
+                append(
+                    &mut rows,
+                    Line::styled(status, muted),
+                    content.width as usize,
+                    None,
+                );
             }
             append(&mut rows, Line::from(""), content.width as usize, None);
             let text = if let Some(error) = state.skills.error.as_deref() {
@@ -2583,7 +2599,12 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
                 }
             };
             for line in text.lines() {
-                append(&mut rows, Line::styled(line.to_owned(), panel), content.width as usize, None);
+                append(
+                    &mut rows,
+                    Line::styled(line.to_owned(), panel),
+                    content.width as usize,
+                    None,
+                );
             }
             if skill["truncated"] == true {
                 append(
@@ -2596,12 +2617,20 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
             render_detail(frame, state, content, rows, p, hits);
             return;
         }
-        let active = state.skills.items.iter().filter(|skill| skill["active"] == true).count();
+        let active = state
+            .skills
+            .items
+            .iter()
+            .filter(|skill| skill["active"] == true)
+            .count();
         line_at(
             frame,
             content,
             Line::styled(
-                fit(&format!("{active} active · {} total · Read-only", state.skills.total), content.width as usize),
+                fit(
+                    &format!("{active} active · {} total · Read-only", state.skills.total),
+                    content.width as usize,
+                ),
                 muted,
             ),
         );
@@ -2611,7 +2640,13 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
             line_at(
                 frame,
                 content,
-                Line::styled(fit("List limited; some skills are not shown.", content.width as usize), panel.fg(p.amber)),
+                Line::styled(
+                    fit(
+                        "List limited; some skills are not shown.",
+                        content.width as usize,
+                    ),
+                    panel.fg(p.amber),
+                ),
             );
             content.y += 1;
             content.height -= 1;
@@ -2624,7 +2659,12 @@ fn overlay(frame: &mut Frame, state: &mut State, p: Palette, hits: &mut HitAreas
             };
             let mut rows = Vec::new();
             for line in text.lines() {
-                append(&mut rows, Line::styled(line.to_owned(), muted), content.width as usize, None);
+                append(
+                    &mut rows,
+                    Line::styled(line.to_owned(), muted),
+                    content.width as usize,
+                    None,
+                );
             }
             render_detail(frame, state, content, rows, p, hits);
             return;
@@ -4483,7 +4523,11 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
             .flatten()
             .filter(|step| step["status"] == "completed")
             .count();
-        let total = if plan_in_hud { 0 } else { steps.map_or(0, Vec::len) };
+        let total = if plan_in_hud {
+            0
+        } else {
+            steps.map_or(0, Vec::len)
+        };
         let running = state.tasks["jobs"]
             .as_array()
             .into_iter()
@@ -4853,7 +4897,11 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
             items.push(("Alt+S", "steer"));
         }
         if !state.attachments.is_empty() {
-            items.extend([("Click", "preview"), ("×", "remove"), ("Alt+Backspace", "remove last")]);
+            items.extend([
+                ("Click", "preview"),
+                ("×", "remove"),
+                ("Alt+Backspace", "remove last"),
+            ]);
         } else {
             items.push(("Alt+Enter", "newline"));
         }
@@ -5017,7 +5065,10 @@ mod tests {
             assert!(text.contains("Ctrl+R refresh"), "{text}");
             assert_eq!(hits.choice_rows.len(), 3);
             assert!(hits.query.is_some());
-            assert!(hits.choice_rows.iter().all(|(area, _)| area.right() <= columns));
+            assert!(hits
+                .choice_rows
+                .iter()
+                .all(|(area, _)| area.right() <= columns));
             state.query = "guidance".into();
             let (filtered, hits) = snapshot(&mut state, columns, 24);
             assert!(filtered.contains("cmd.review"), "{filtered}");
@@ -5054,7 +5105,10 @@ mod tests {
             }));
             let (text, hits) = snapshot(&mut state, columns, 24);
             assert!(text.contains("cmd.review"), "{text}");
-            assert!(text.contains("Inactive · Loaded · text · Read-only"), "{text}");
+            assert!(
+                text.contains("Inactive · Loaded · text · Read-only"),
+                "{text}"
+            );
             assert!(text.contains("# Review skill"), "{text}");
             assert!(text.contains("PgUp/PgDn scroll"), "{text}");
             assert!(text.contains("of ") && text.contains("lines"), "{text}");
@@ -5081,21 +5135,33 @@ mod tests {
             assert!(text.contains("No skills were discovered"), "{text}");
             assert!(hits.choice_rows.is_empty());
             state.query = "missing".into();
-            assert!(snapshot(&mut state, columns, 18).0.contains("No skills match"));
+            assert!(snapshot(&mut state, columns, 18)
+                .0
+                .contains("No skills match"));
             state.skills.loading = true;
-            assert!(snapshot(&mut state, columns, 18).0.contains("Loading skills"));
+            assert!(snapshot(&mut state, columns, 18)
+                .0
+                .contains("Loading skills"));
             state.skills.loading = false;
             state.skills.error = Some("Skills browser unavailable. Update aster-acp.".into());
             let (error, hits) = snapshot(&mut state, columns, 18);
-            assert!(error.contains("Update") && error.contains("aster-acp"), "{error}");
+            assert!(
+                error.contains("Update") && error.contains("aster-acp"),
+                "{error}"
+            );
             assert!(error.contains("Ctrl+R retries"), "{error}");
             assert!(hits.choice_rows.is_empty());
             state.skills.detail = Some(serde_json::json!({"name":"missing"}));
             let (error, _) = snapshot(&mut state, columns, 18);
-            assert!(error.contains("Esc returns") && error.contains("the list"), "{error}");
+            assert!(
+                error.contains("Esc returns") && error.contains("the list"),
+                "{error}"
+            );
             state.skills.error = None;
             state.skills.loading = true;
-            assert!(snapshot(&mut state, columns, 18).0.contains("Loading skill details"));
+            assert!(snapshot(&mut state, columns, 18)
+                .0
+                .contains("Loading skill details"));
         }
     }
 
@@ -6144,21 +6210,24 @@ mod tests {
         state.phase = Phase::Busy;
         state.active_turn_id = Some("turn-1".into());
         state.status = "Waiting for model".into();
-        state.tasks = serde_json::json!({"waitReason": "Waiting for model", "steps": [], "jobs": []});
+        state.tasks =
+            serde_json::json!({"waitReason": "Waiting for model", "steps": [], "jobs": []});
         state.hud.config.elements = vec!["tasks".into()];
         state.editor.insert_str("keep this draft");
         for height in [10, 24] {
             let (text, _) = snapshot(&mut state, 100, height);
             assert_eq!(text.matches("Waiting for model").count(), 1, "{text}");
         }
-        state.tasks["steps"] = serde_json::json!([{"title":"Review layout", "status":"in_progress"}]);
+        state.tasks["steps"] =
+            serde_json::json!([{"title":"Review layout", "status":"in_progress"}]);
         let (text, _) = snapshot(&mut state, 100, 24);
         assert!(text.contains("0/1"), "{text}");
         state.tasks["steps"] = serde_json::json!([]);
         state.tasks["currentTask"] = serde_json::json!("Review layout");
         let (text, _) = snapshot(&mut state, 100, 24);
         assert!(text.contains("Review layout"), "{text}");
-        state.tasks["steps"] = serde_json::json!([{"title":"Review layout", "status":"in_progress"}]);
+        state.tasks["steps"] =
+            serde_json::json!([{"title":"Review layout", "status":"in_progress"}]);
         state.tasks["jobs"] = serde_json::json!([{"title":"Check files", "status":"running"}]);
         let (text, _) = snapshot(&mut state, 100, 24);
         assert_eq!(text.matches("0/1").count(), 1, "{text}");
@@ -6844,7 +6913,9 @@ mod tests {
                     assert!(first.contains("PNG"), "{first}");
                     assert!(!rows.iter().any(|row| row.toggle.is_some()));
                     if !caption.trim().is_empty() {
-                        assert!(rows.iter().any(|row| row.line.to_string().contains(caption)));
+                        assert!(rows
+                            .iter()
+                            .any(|row| row.line.to_string().contains(caption)));
                     }
                 }
             }

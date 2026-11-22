@@ -292,6 +292,7 @@ testpaths = [
     "packages/aster-cli/tests",
     "packages/aster-acp/tests",
     "packages/aster-bench/tests",
+    "packages/aster-memory/tests",
     "tests/trace_explorer",
 ]
 pythonpath = [

@@ -6,6 +6,7 @@
 # As root it installs system packages, copies the checkout to a normal user's
 # home and re-runs itself as that user; the tests never run as root (root
 # bypasses file-permission checks).
+# This covers host behavior; real microVM tests run in ci.yml's Linux sandbox job.
 # Usage: bash scripts/wsl_ci.sh quick|full
 set -euo pipefail
 mode="${1:?usage: wsl_ci.sh quick|full}"
@@ -45,11 +46,10 @@ id
 uv --version
 
 uv sync --frozen --all-extras --no-extra sandbox
-uv run --frozen python scripts/windows_smoke.py
+uv run --frozen --no-sync python scripts/windows_smoke.py
 if [ "$mode" = quick ]; then
-  uv run --frozen pytest -q tests/test_windows_platform.py tests/tools/test_bash_session.py \
+  uv run --frozen --no-sync pytest -q tests/test_native_windows.py tests/tools/test_bash_session.py \
     tests/storage tests/runtime/test_producers.py
 else
-  uv run --frozen pytest -q -m "not integration and not stress and not sandbox"
-  uv run --frozen pytest -q -m sandbox
+  uv run --frozen --no-sync pytest -q -m "not integration and not stress and not sandbox"
 fi

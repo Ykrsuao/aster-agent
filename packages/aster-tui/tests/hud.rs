@@ -47,8 +47,14 @@ fn lines(state: &State, width: usize, budget: usize) -> Vec<String> {
 fn skills_hud_links_to_the_browser_and_marks_additional_active_skills() {
     let mut state = state();
     state.hud.config.elements = vec!["skills".into()];
-    state.hud.telemetry.environment.skills = ["aster.libwriting", "aster.repo", "aster.shell", "aster.todo"]
-        .map(str::to_owned).into();
+    state.hud.telemetry.environment.skills = [
+        "aster.libwriting",
+        "aster.repo",
+        "aster.shell",
+        "aster.todo",
+    ]
+    .map(str::to_owned)
+    .into();
     let rows = hud::rows(&state, 160, 1);
     assert_eq!(rows[0].command, "/skills");
     assert!(rows[0].line.to_string().contains("+1"));
@@ -103,13 +109,18 @@ fn compact_hud_keeps_permissions_and_effort_before_long_project_details() {
         });
         for columns in [48, 80, 120] {
             let rows = hud::rows(&state, columns, 3);
-            let rendered = rows.iter().map(|row| row.line.to_string()).collect::<Vec<_>>();
+            let rendered = rows
+                .iter()
+                .map(|row| row.line.to_string())
+                .collect::<Vec<_>>();
             let project = &rendered[0];
             assert!(project.contains(label), "{columns}: {rendered:?}");
             assert!(project.contains("high"), "{columns}: {rendered:?}");
             assert!(project.starts_with("[magpie:"), "{columns}: {rendered:?}");
             assert!(rows.iter().all(|row| row.line.width() <= columns));
-            assert!(rendered.iter().any(|line| line.contains("86%") && line.contains("$0.1234")));
+            assert!(rendered
+                .iter()
+                .any(|line| line.contains("86%") && line.contains("$0.1234")));
             if columns <= 80 {
                 assert_eq!(rows[0].command, "/status");
                 assert_eq!(rows[1].command, "/context");
@@ -147,9 +158,15 @@ fn project_keeps_effort_when_the_configured_reasoning_row_does_not_fit() {
             for problem in [None, Some("Collection unavailable".into())] {
                 state.hud.problem = problem;
                 let rows = hud::rows(&state, columns, budget);
-                let rendered = rows.iter().map(|row| row.line.to_string()).collect::<Vec<_>>();
+                let rendered = rows
+                    .iter()
+                    .map(|row| row.line.to_string())
+                    .collect::<Vec<_>>();
                 assert_eq!(
-                    rendered.iter().map(|line| line.matches("high").count()).sum::<usize>(),
+                    rendered
+                        .iter()
+                        .map(|line| line.matches("high").count())
+                        .sum::<usize>(),
                     1,
                     "{columns} columns, {budget} rows: {rendered:?}"
                 );
@@ -174,7 +191,10 @@ fn changing_permissions_keeps_the_compact_hud_row_layout_stable() {
                 .map(|row| (row.element, row.command))
                 .collect::<Vec<_>>();
             if let Some(expected) = &expected {
-                assert_eq!(&layout, expected, "{columns} columns, permission {permission}");
+                assert_eq!(
+                    &layout, expected,
+                    "{columns} columns, permission {permission}"
+                );
             } else {
                 expected = Some(layout);
             }

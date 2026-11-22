@@ -60,6 +60,51 @@ jobs:
       - name: Unit tests (no live API calls)
         run: uv run pytest -q -m "not integration and not stress and not sandbox"
 
+  linux-terminal:
+    name: Linux native terminal
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ASTER_MODEL_METADATA_REFRESH: "False"
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # tags needed for uv-dynamic-versioning
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      # Rust transport tests launch the real ACP backend with this environment.
+      - name: Sync terminal and ACP dependencies
+        run: uv sync --locked --extra tui --extra mcp --extra tracing --extra viewer
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Rust terminal regressions
+        run: |
+          cargo fmt --manifest-path packages/aster-tui/Cargo.toml -- --check
+          cargo clippy --locked --manifest-path packages/aster-tui/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path packages/aster-tui/Cargo.toml
+          cargo build --locked --release --manifest-path packages/aster-tui/Cargo.toml
+      - name: Terminal launcher and ACP subprocess regressions
+        run: >-
+          uv run --no-sync python -m pytest -q
+          -m "not integration and not stress and not sandbox"
+          packages/aster-cli/tests/test_tui_command.py
+          packages/aster-acp/tests/test_protocol.py
+          --junitxml=artifacts/linux-terminal.xml
+      - name: Upload Linux terminal results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-terminal
+          path: artifacts/linux-terminal.xml
+
   sandbox:
     name: Linux sandbox
     runs-on: ubuntu-latest
@@ -415,6 +460,22 @@ jobs:
             packages/aster-cli/tests/test_tui_command.py \
             packages/aster-cli/tests/test_cli_utf8_output.py \
             packages/aster-acp/tests/test_session_titles.py
+      - name: Memory regressions (no live API calls)
+        shell: pwsh
+        env:
+          ASTER_MODEL_METADATA_REFRESH: "False"
+          LITELLM_LOCAL_MODEL_COST_MAP: "True"
+        run: >-
+          uv run --no-sync python -m pytest -q
+          -m "not integration and not stress and not sandbox"
+          packages/aster-memory/tests
+          --junitxml=artifacts/windows-memory.xml
+      - name: Upload Windows memory results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-memory
+          path: artifacts/windows-memory.xml
       - name: Security regressions (no live API calls or VM)
         shell: pwsh
         env:
