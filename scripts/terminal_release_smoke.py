@@ -18,8 +18,11 @@ import json
 import os
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
+
+from packaging.version import Version
 
 
 def installed_terminal() -> dict:
@@ -47,6 +50,44 @@ def installed_terminal() -> dict:
         "native_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
         "bundled_terminal": True,
     }
+
+
+def bind_bundle(package: dict, manifest_path: Path) -> dict:
+    """Bind installed versions and executable bytes to the supplied build manifest."""
+    raw = manifest_path.read_bytes()
+    manifest = json.loads(raw)
+    if (
+        manifest.get("dirty") is not False
+        or manifest.get("platform") != "win_amd64"
+        or set(manifest.get("packages", {})) != set(package["versions"])
+        or set(package["versions"].values()) != {manifest.get("version")}
+    ):
+        raise ValueError("Installed packages do not match the clean terminal bundle")
+    filename = manifest["packages"]["aster-cli"]
+    wheel = manifest_path.parent / "wheels" / filename
+    if Path(filename).name != filename or "\\" in filename:
+        raise ValueError("Invalid CLI wheel filename")
+    if hashlib.sha256(wheel.read_bytes()).hexdigest() != manifest["files"][f"wheels/{filename}"]:
+        raise ValueError("Installed bundle's CLI wheel hash does not match")
+    with zipfile.ZipFile(wheel) as archive:
+        digest = hashlib.sha256(archive.read("aster_cli/bin/aster.exe")).hexdigest()
+    if digest != package["native_sha256"]:
+        raise ValueError("Installed terminal does not match the bundled executable")
+    return {
+        **package,
+        "bundle_commit": manifest["commit"],
+        "bundle_manifest_sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
+def require_upgrade(seed_package: dict, package: dict) -> None:
+    expected = {"aster", "aster-cli", "aster-acp", "aster-memory", "aster-bench"}
+    before, after = seed_package.get("versions", {}), package.get("versions", {})
+    if set(before) != expected or set(after) != expected:
+        raise ValueError("Upgrade evidence requires all five package versions")
+    old, new = set(before.values()), set(after.values())
+    if len(old) != 1 or len(new) != 1 or Version(next(iter(old))) >= Version(next(iter(new))):
+        raise ValueError("Upgrade requires an older version; reinstall is insufficient")
 
 
 def responses(code: str, message: str):
@@ -83,7 +124,9 @@ class Client:
         self.updates.append(update)
 
 
-async def session_check(root: Path, phase: str, package: dict) -> dict:
+async def session_check(
+    root: Path, phase: str, package: dict, *, verify_upgrade: bool = False
+) -> dict:
     from acp import text_block
     from acp.schema import ToolCallStart
     from aster_acp.server import CodingACPAdapter
@@ -104,6 +147,8 @@ async def session_check(root: Path, phase: str, package: dict) -> dict:
         )
     else:
         state = json.loads(state_path.read_text(encoding="utf-8"))
+        if verify_upgrade:
+            require_upgrade(state["package"], package)
         for relative, expected in state["preserved_files"].items():
             assert hashlib.sha256((root / relative).read_bytes()).hexdigest() == expected, relative
         llm = FakeLLMClient(
@@ -137,6 +182,8 @@ async def session_check(root: Path, phase: str, package: dict) -> dict:
         return {
             **package,
             "seed_versions": state["package"]["versions"],
+            "seed_package": state["package"],
+            "upgrade_verified": verify_upgrade,
             "session_reopened_without_execution": True,
             "continued_after_install": True,
             "saved_input_bytes_preserved": True,
@@ -182,7 +229,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=("seed", "verify"))
     parser.add_argument("--state", required=True, type=Path)
+    parser.add_argument("--bundle-manifest", type=Path)
+    parser.add_argument("--require-upgrade", action="store_true")
     args = parser.parse_args()
+    if args.require_upgrade and args.phase != "verify":
+        parser.error("--require-upgrade is only valid for verify")
     root = args.state.resolve()
     root.mkdir(parents=True, exist_ok=True)
     (root / "user").mkdir(exist_ok=True)
@@ -197,9 +248,16 @@ def main() -> None:
         LITELLM_LOCAL_MODEL_COST_MAP="True",
     )
     package = installed_terminal()
+    if args.bundle_manifest is not None:
+        package = bind_bundle(package, args.bundle_manifest)
     # User-installed skills are outside this package-installation check.
     with patch("aster_acp.server.load_coding_skills_dirs", return_value=[]):
-        report = asyncio.run(asyncio.wait_for(session_check(root, args.phase, package), timeout=60))
+        report = asyncio.run(
+            asyncio.wait_for(
+                session_check(root, args.phase, package, verify_upgrade=args.require_upgrade),
+                timeout=60,
+            )
+        )
     (root / f"{args.phase}-result.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
 

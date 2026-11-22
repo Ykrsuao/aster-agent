@@ -1,3 +1,7 @@
 # Keep Vite's HTML input and output reproducible on Windows.
 src/aster/viewer/frontend-react/index.html text eol=lf
 src/aster/viewer/frontend-react/dist/index.html text eol=lf
+
+# Candidate provenance compares these source bytes with the frozen Git blobs.
+scripts/terminal_acceptance.py text eol=lf
+tests/fixtures/terminal_acceptance/tasks.json text eol=lf

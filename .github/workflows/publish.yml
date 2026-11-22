@@ -1,10 +1,10 @@
-# Publishes the five workspace packages to PyPI.
+# Publishes the exact five-package candidate already accepted by CI.
 #
 # Trigger: a GitHub Release is *published* (the release's tag `vX.Y.Z` is what
 # uv-dynamic-versioning turns into the package version — see RELEASING.md).
 # Auth: PyPI Trusted Publishing (OIDC). No API tokens, no repo secrets.
 #
-# `workflow_dispatch` runs the same build against TestPyPI for a dry run.
+# `workflow_dispatch` rehearses the same accepted artifacts against TestPyPI.
 #
 # Every `uses:` here is an `actions/*` action, i.e. GitHub-created. That is
 # deliberate: this org enforces an Actions allowlist, and a disallowed action
@@ -21,6 +21,15 @@ on:
   # to select the index: real PyPI is reachable only by publishing a GitHub
   # Release, so a mis-click here cannot burn a version number on PyPI.
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Final vX.Y.Z tag of the accepted candidate
+        type: string
+        required: true
+      candidate_artifact_id:
+        description: Candidate artifact ID printed by the strict CI run
+        type: string
+        required: true
 
 permissions: {}
 
@@ -30,73 +39,40 @@ env:
   UV_VERSION: "0.11.4"
 
 jobs:
-  build:
+  verify-candidate:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # tags needed for uv-dynamic-versioning
-
+          # Execute the current trusted controller, not code chosen by a release
+          # tag. Candidate source hashes are read at the frozen SHA through API.
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
       - name: Install uv
         run: |
           set -euo pipefail
           curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      # --no-sources: build with `tool.uv.sources` disabled, so the build is
-      # exercised the way a non-uv consumer's build backend would see it. Without
-      # it, a workspace source could paper over a dependency that is unresolvable
-      # off this machine. Recommended by
-      # https://docs.astral.sh/uv/guides/package/
-      - name: Build all packages
-        run: |
-          rm -rf dist
-          for pkg in aster aster-cli aster-acp aster-memory aster-bench; do
-            uv build --no-sources --package "$pkg" --out-dir dist
-          done
-          ls -l dist
-
-      # Guards the two ways a release can silently ship the wrong version:
-      # a shallow checkout (no tag reachable -> `.devN`), or a Release created
-      # from a commit that is not the tagged one.
-      - name: Check built version matches the release tag
-        if: github.event_name == 'release'
+      - name: Fetch and verify the accepted candidate
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          uv run --no-project --with packaging python - <<'PY'
-          import os, pathlib, sys
-          from packaging.utils import parse_wheel_filename
-          from packaging.version import Version
-
-          expected = Version(os.environ["TAG"].removeprefix("v"))
-          wheels = sorted(pathlib.Path("dist").glob("*.whl"))
-          assert len(wheels) == 5, f"expected 5 wheels, got {[w.name for w in wheels]}"
-          for whl in wheels:
-              _, version, _, _ = parse_wheel_filename(whl.name)
-              if version.is_devrelease:
-                  sys.exit(f"{whl.name}: dev version — the tag is not reachable from HEAD")
-              if version != expected:
-                  sys.exit(f"{whl.name}: built {version}, but the tag says {expected}")
-          print(f"OK — all five packages built as {expected}")
-          PY
-
-      # Catches a broken wheel before it is on PyPI forever.
-      - name: Smoke-test the wheels in a clean environment
-        run: |
-          uv venv /tmp/smoke --python 3.12
-          VIRTUAL_ENV=/tmp/smoke uv pip install \
-            dist/aster-*.whl dist/aster_cli-*.whl dist/aster_acp-*.whl \
-            dist/aster_memory-*.whl dist/aster_bench-*.whl
-          /tmp/smoke/bin/python -c "import aster, aster_cli, aster_acp, aster_memory, aster_bench; print(aster.__version__)"
-          /tmp/smoke/bin/aster --version
-          /tmp/smoke/bin/aster --help
-          /tmp/smoke/bin/aster-acp --help
-
+          set -euo pipefail
+          uv run --no-project --with packaging==25.0 python scripts/check_release_evidence.py fetch \
+            --destination "$RUNNER_TEMP/accepted-candidate"
       - uses: actions/upload-artifact@v4
         with:
           name: dist
-          path: dist/
+          path: ${{ runner.temp }}/accepted-candidate/dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terminal-release
+          path: ${{ runner.temp }}/accepted-candidate/terminal/
+          if-no-files-found: error
 
   # One job per package, each in its OWN environment (`pypi-<package>`).
   #
@@ -109,7 +85,7 @@ jobs:
   # tuple unique. (The constraint applies only while a publisher is pending —
   # but a distinct environment is also what gives per-package approval gates.)
   publish-testpypi:
-    needs: build
+    needs: verify-candidate
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
@@ -154,7 +130,7 @@ jobs:
             upload/*
 
   publish-pypi:
-    needs: build
+    needs: verify-candidate
     # Real PyPI is reachable ONLY from a published GitHub Release.
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
@@ -202,8 +178,7 @@ jobs:
             --check-url https://pypi.org/simple/ \
             upload/*
 
-  # Attach the built wheels to the GitHub Release so `uv add <url>` and
-  # air-gapped consumers get the exact artifacts that went to PyPI.
+  # Attach the accepted Python and Windows distributions without rebuilding.
   attach-to-release:
     needs: publish-pypi
     if: github.event_name == 'release'
@@ -215,6 +190,10 @@ jobs:
         with:
           name: dist
           path: dist/
+      - uses: actions/download-artifact@v4
+        with:
+          name: terminal-release
+          path: terminal/
       # The tag name goes through `env:`, not `${{ }}` inside the script.
       # GitHub expands `${{ }}` textually *before* bash parses the line, so a
       # tag containing `$(...)` or backticks would execute — double quotes do
@@ -224,4 +203,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$RELEASE_TAG" dist/* --repo "$GITHUB_REPOSITORY"
+        run: gh release upload "$RELEASE_TAG" dist/* terminal/* --repo "$GITHUB_REPOSITORY"
