@@ -71,6 +71,7 @@ from aster.strategy_validation import (
     run_postconditions,
     run_preconditions,
 )
+from aster.task_budget import TaskBudgetError
 from aster.unifiedllm import (
     AdmissionError,
     AdmissionQueueFullError,
@@ -111,7 +112,7 @@ def _raise_if_admission_queue_full(error: Exception | None) -> None:
     """Propagate policy rejections, including authenticated sandbox originals."""
     if isinstance(error, SandboxExecutionError):
         error = error.original_error
-    if isinstance(error, AdmissionQueueFullError):
+    if isinstance(error, (AdmissionQueueFullError, TaskBudgetError)):
         raise error
 
 
@@ -381,7 +382,7 @@ class CodeActSession:
         except Exception as exc:
             if state.exception is None:  # Don't overwrite caller-set value
                 state.exception = type(exc).__name__
-            if isinstance(exc, AdmissionQueueFullError):
+            if isinstance(exc, (AdmissionQueueFullError, TaskBudgetError)):
                 state.is_final = True
             raise
         finally:
@@ -981,7 +982,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         try:
             with _init_hm.timer("time_prefill"):
                 await self._run_prefill(runtime, call, builtins, session)
-        except (ReasoningReplayError, AdmissionQueueFullError):
+        except (ReasoningReplayError, AdmissionQueueFullError, TaskBudgetError):
             raise
         except Exception as e:
             logger.warning(f"[CODEACT] Prefill error (continuing): {e}")
@@ -1030,7 +1031,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         tool_choice=tool_choice,
                         **self._build_sampling_kwargs(),
                     )
-                except (ReasoningReplayError, AdmissionError):
+                except (ReasoningReplayError, AdmissionError, TaskBudgetError):
                     # Admission is an application policy decision, not a provider
                     # failure that an immediate strategy retry can repair.
                     turn_state.is_final = True

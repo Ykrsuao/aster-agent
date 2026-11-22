@@ -28,6 +28,7 @@ from aster.events import (
 )
 from aster.runtime.context_vars import _current_event_format_var, _get_agent_call_stack
 from aster.runtime.event_backend import EventBackend, InMemoryBackend
+from aster.task_budget import TaskBudgetError
 
 if TYPE_CHECKING:
     from aster.runtime.event_query import EventQuery
@@ -347,19 +348,24 @@ class EventManager:
         Snapshots handler lists before iterating so that handlers can safely
         subscribe or unsubscribe during emission without affecting the
         current cycle.  Exceptions in individual handlers are logged and
-        swallowed so one misbehaving handler cannot silence the rest.
+        swallowed so one misbehaving handler cannot silence the rest. Task
+        budget control results propagate to the host to stop further work.
         """
         event_type = event.event_type
 
         for handler in list(self._handlers[event_type]):
             try:
                 handler(event)
+            except TaskBudgetError:
+                raise
             except Exception:
                 logger.warning("Event handler %r raised", handler, exc_info=True)
 
         for handler in list(self._handlers["*"]):
             try:
                 handler(event)
+            except TaskBudgetError:
+                raise
             except Exception:
                 logger.warning("Wildcard handler %r raised", handler, exc_info=True)
 

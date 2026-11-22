@@ -8,11 +8,13 @@ import inspect
 import logging
 import re
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
 from aster.skill import Skill, TextSkill, get_slash_commands
 from aster.slash_dispatch import CoercionError, SlashCommandResult, parse_typed_args
+from aster.task_budget import current_task_budget, task_budget_activity
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +23,7 @@ logger = logging.getLogger(__name__)
 _HOST_COMMANDS = frozenset(
     "new sessions drafts resume rewind tree tools changes queue steer attach attachments "
     "reconnect retry undo model effort reasoning mode plan code permissions sandbox tasks "
-    "skills mcp recovery stop search status hud context logs help cancel exit".split()
+    "skills mcp recovery stop search status hud context logs help cancel exit task-budget".split()
 )
 _COMMAND_NAME = re.compile(r"\w[\w.:\[\]-]*\Z")
 
@@ -53,7 +55,11 @@ class CodingSlashCommandRegistry:
         self.refresh_skill_commands()
 
     def commands(self) -> tuple[CodingSlashCommand, ...]:
-        return tuple(self._commands[name] for name in sorted(self._commands))
+        return tuple(
+            self._commands[name]
+            for name in sorted(self._commands)
+            if name != "task-budget" or getattr(self.agent, "_task_budget", None) is not None
+        )
 
     def get(self, name: str) -> CodingSlashCommand | None:
         key = name.casefold()
@@ -83,6 +89,15 @@ class CodingSlashCommandRegistry:
         """Rebuild the command map after skill load, activation, or reload."""
         previous = self.commands()
         commands: dict[str, CodingSlashCommand] = {}
+        if hasattr(self.agent, "_task_budget"):
+            commands["task-budget"] = CodingSlashCommand(
+                name="task-budget",
+                description="Inspect the task allowance or explicitly start a new one.",
+                argument_hint="[new]",
+                completions=("new",),
+                output_to_agent=False,
+                _method=self._task_budget_command,
+            )
         loaded = self._loaded_skills()
         recovery = getattr(self.agent, "recovery", None)
         if getattr(self.agent, "_action_journal", None) is not None and recovery is not None:
@@ -254,9 +269,17 @@ class CodingSlashCommandRegistry:
         # requires that loop. Async commands can cancel cooperatively; a truly
         # blocking sync command needs the future per-agent process boundary to
         # provide a safe kill mechanism.
-        value = command._method(**kwargs)
-        if inspect.isawaitable(value):
-            value = await value
+        scope = (
+            nullcontext()
+            if command.name == "task-budget"
+            else task_budget_activity(
+                current_task_budget() or getattr(self.agent, "_task_budget", None)
+            )
+        )
+        async with scope:
+            value = command._method(**kwargs)
+            if inspect.isawaitable(value):
+                value = await value
         return SlashCommandResult(
             command=command.name,
             args=raw_args,
@@ -264,6 +287,15 @@ class CodingSlashCommandRegistry:
             text=str(value) if value is not None else None,
             output_to_agent=command.output_to_agent,
         )
+
+    def _task_budget_command(self, action: str = "") -> str:
+        from aster_cli.coding.task_budget import task_budget_command
+
+        previous = self.commands()
+        result = task_budget_command(self.agent, action)
+        if self._on_change is not None and self.commands() != previous:
+            self._on_change(self.commands())
+        return result
 
     def close(self) -> None:
         self._on_change = None

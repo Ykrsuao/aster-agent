@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """In-memory StorageManager — no persistence, drop-in for current behavior."""
 
-from typing import TYPE_CHECKING
+import copy
+from typing import TYPE_CHECKING, Any
 
 from aster.runtime.event_backend import EventBackend, InMemoryBackend
 
@@ -23,6 +24,14 @@ class InMemoryStorageManager:
 
     def __init__(self) -> None:
         self._event_backend: EventBackend = InMemoryBackend()
+        self._task_budget: dict[str, Any] | None = None
+
+    def load_task_budget(self) -> dict[str, Any] | None:
+        """In-memory sessions retain accounting only for this process lifetime."""
+        return copy.deepcopy(self._task_budget)
+
+    def save_task_budget(self, state: dict[str, Any]) -> None:
+        self._task_budget = copy.deepcopy(state)
 
     @property
     def event_backend(self) -> EventBackend:

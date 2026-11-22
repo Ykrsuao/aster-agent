@@ -45,6 +45,7 @@ from aster.runtime.sandbox.serialization import (
     effective_error_limit,
     is_picklable,
 )
+from aster.task_budget import TaskBudgetError, current_task_budget
 
 logger = logging.getLogger(__name__)
 _SNAPSHOT_GROUP = "aster-runtime"
@@ -412,6 +413,7 @@ class SandboxedExecutor:
         call = self._framework_builtins.get("_call")
         return {
             "globals": globals_,
+            "task_budget_host_only": current_task_budget() is not None,
             "builtins": builtins,
             "call": describe_call(call),
             "cell_state_inputs": (list(call.bound_parameters()) if call is not None else [])
@@ -713,6 +715,11 @@ class SandboxedExecutor:
             except asyncio.CancelledError:
                 await self._dispose(after_cancel=True)
                 raise
+            except TaskBudgetError:
+                # This is a host decision. End the waiting guest without turning
+                # the stop into correctable model feedback or trusting guest DTOs.
+                await self._dispose(after_cancel=True)
+                raise
             except TimeoutError:
                 await self._recover()
                 return self._synth_error(CellTimeoutError("cell exceeded its wall-clock deadline"))
@@ -989,6 +996,8 @@ class SandboxedExecutor:
                     ),
                 }
             return {"ok": True, "result": value, "was_async": was_async}
+        except TaskBudgetError:
+            raise
         except ExecutionSignal as sig:
             # Some tools end the turn by *raising* a control-flow signal (e.g. an
             # ARC submit_actions -> return_result). Marshal it back to the cell so

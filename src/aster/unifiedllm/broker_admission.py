@@ -25,9 +25,10 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import Future as ThreadFuture
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Literal
 
+from aster.task_budget import TaskBudgetError, current_task_budget
 from aster.unifiedllm.admission import (
     AdmissionCallCapError,
     AdmissionObserver,
@@ -96,6 +97,18 @@ class BrokerAdmissionConfig:
     def controller(self) -> BrokerAdmissionController:
         """Create an independent controller client for the current process."""
         return BrokerAdmissionController(self)
+
+    def __reduce__(self):
+        _reject_budgeted_process_export()
+        return type(self), tuple(getattr(self, item.name) for item in fields(self))
+
+
+def _reject_budgeted_process_export() -> None:
+    if current_task_budget() is not None:
+        raise TaskBudgetError(
+            "Task budgets cannot export admission brokers to independent processes: "
+            "the broker protocol does not settle task usage. Use host agent calls."
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1033,6 +1046,7 @@ class AdmissionBroker:
 
     def controller_config(self, *, queue_timeout: float | None = None) -> BrokerAdmissionConfig:
         """Return serializable settings for child-process controllers."""
+        _reject_budgeted_process_export()
         auth_token = self._auth_token
         if self._server is None or auth_token is None:
             raise RuntimeError("AdmissionBroker.start() must be called first")

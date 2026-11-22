@@ -357,3 +357,12 @@ conversation replay shared by CLI hosts such as the native TUI and ACP. The
 process running an agent owns the writable session handle; other hosts attach
 through their transport or use read-only discovery. Generic event and SQLite
 storage primitives remain in the core `aster` package.
+
+Optional `coding.task_budget` settings bound cumulative `calls`, observed
+`tokens` (input plus output), and active `time_seconds` across prompts, child
+agents, summaries and restored sessions. `/task-budget` inspects the current
+allowance; `/task-budget new` explicitly starts a new task with current settings.
+The SQLite ledger is independent of chat snapshots. Rewind and forks retain the
+latest consumption and stop until an explicit new allowance is requested. See
+[task budgets](../../docs/task-budget.md) for configuration, unknown usage,
+deadline behavior and supported process boundaries.

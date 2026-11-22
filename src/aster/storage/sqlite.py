@@ -61,6 +61,7 @@ class _CheckpointCopy:
     active: list[str]
     retained: list[tuple[str, str, str, str]]
     versions: dict[str, str]
+    task_budget: dict[str, typing.Any] | None
 
 
 # Unwrap Event = UserEvent | AssistantEvent | ToolCallEvent
@@ -147,6 +148,15 @@ CREATE TABLE IF NOT EXISTS snapshots (
     created_at  TEXT NOT NULL,
     data        TEXT NOT NULL
 );
+
+-- Operational accounting is deliberately outside rewindable chat snapshots.
+CREATE TABLE IF NOT EXISTS task_budgets (
+    task_id TEXT PRIMARY KEY,
+    is_current INTEGER NOT NULL DEFAULT 0 CHECK (is_current IN (0, 1)),
+    data TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_budget_current
+    ON task_budgets(is_current) WHERE is_current = 1;
 """
 
 
@@ -1158,8 +1168,21 @@ class SQLiteStorageManager:
                 or not set(active_tags).issubset(tags)
             ):
                 raise ValueError(f"Checkpoint {checkpoint_id!r} has invalid event references")
+        has_budget = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_budgets'"
+        ).fetchone()
+        budget = (
+            conn.execute("SELECT data FROM task_budgets WHERE is_current = 1").fetchone()
+            if has_budget
+            else None
+        )
         return _CheckpointCopy(
-            snapshot, [parsed[digest] for digest in refs], active, retained, versions
+            snapshot,
+            [parsed[digest] for digest in refs],
+            active,
+            retained,
+            versions,
+            json.loads(budget[0]) if budget else None,
         )
 
     def _install_checkpoint_copy(self, copied: _CheckpointCopy) -> None:
@@ -1168,7 +1191,14 @@ class SQLiteStorageManager:
                 row[0]
                 for row in self._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             }
-            for table in ("events", "active_tags", "snapshots", "checkpoints", "checkpoint_events"):
+            for table in (
+                "events",
+                "active_tags",
+                "snapshots",
+                "checkpoints",
+                "checkpoint_events",
+                "task_budgets",
+            ):
                 if (
                     table in tables
                     and self._conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
@@ -1198,6 +1228,12 @@ class SQLiteStorageManager:
                     "INSERT INTO checkpoint_events (digest, row_data) VALUES (?, ?)",
                     copied.versions.items(),
                 )
+                if copied.task_budget is not None:
+                    budget = {**copied.task_budget, "stopped": "forked_task"}
+                    self._conn.execute(
+                        "INSERT INTO task_budgets (task_id, is_current, data) VALUES (?, 1, ?)",
+                        (budget["task_id"], json.dumps(budget, allow_nan=False)),
+                    )
             self._backend._insertion_counter = self._backend._max_insertion_order() + 1
             self._backend._next_tag_num = self._backend.max_tag_num() + 1
 
@@ -1210,6 +1246,34 @@ class SQLiteStorageManager:
             "CREATE TABLE IF NOT EXISTS checkpoint_events "
             "(digest TEXT PRIMARY KEY, row_data TEXT NOT NULL)"
         )
+
+    def load_task_budget(self) -> dict[str, typing.Any] | None:
+        """Read the latest operational ledger, regardless of restored chat state."""
+        with self._db_lock:
+            row = self._conn.execute(
+                "SELECT data FROM task_budgets WHERE is_current = 1"
+            ).fetchone()
+            return json.loads(row[0]) if row else None
+
+    def save_task_budget(self, state: dict[str, typing.Any]) -> None:
+        """Commit accounting before returning to provider dispatch; never suppress errors."""
+        payload = json.dumps(state, ensure_ascii=False, allow_nan=False)
+        with self._db_lock, self._conn:
+            exists = self._conn.execute(
+                "SELECT 1 FROM task_budgets WHERE task_id = ?", (state["task_id"],)
+            ).fetchone()
+            if exists:
+                # A late settlement for an older task cannot replace the new owner.
+                self._conn.execute(
+                    "UPDATE task_budgets SET data = ? WHERE task_id = ?",
+                    (payload, state["task_id"]),
+                )
+            else:
+                self._conn.execute("UPDATE task_budgets SET is_current = 0 WHERE is_current = 1")
+                self._conn.execute(
+                    "INSERT INTO task_budgets (task_id, is_current, data) VALUES (?, 1, ?)",
+                    (state["task_id"], payload),
+                )
 
     def save_snapshot_json(
         self,

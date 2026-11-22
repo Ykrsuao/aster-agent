@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from aster.events import ExecutionResult
 from aster.strategies.codeact import CodeActStrategy
+from aster.task_budget import current_task_budget, task_budget_activity
 from aster_cli.coding.recovery import finish_action, require_recovery
 from aster_cli.coding.steering import current_steering
 from aster_cli.coding.verification import begin_verification, require_verification
@@ -193,6 +194,12 @@ class CodingReplyStrategy(CodeActStrategy):
             }
         )
         super().__init__(config=config, **kwargs)
+
+    async def execute(self, runtime: RuntimeServices, call: Any) -> Any:
+        # An explicitly selected child model is still work for the parent's task.
+        budget = current_task_budget() or getattr(runtime.agent, "_task_budget", None)
+        async with task_budget_activity(budget):
+            return await super().execute(runtime, call)
 
     def _tool_boundary_feedback(self, runtime: RuntimeServices) -> str | None:
         control = current_steering(runtime)

@@ -29,7 +29,7 @@ from aster_cli.coding.activity import ActivityShellTools
 from aster_cli.coding.instructions import render_agent_instructions
 from aster_cli.coding.recovery import RecoveryTools
 from aster_cli.coding.reply_strategy import CodingReplyStrategy
-from aster_cli.coding.settings import load_required_checks
+from aster_cli.coding.settings import load_required_checks, load_task_budget
 from aster_cli.coding.verification import CodingDone as Done
 from aster_cli.coding.verification import Verification, VerificationState
 from aster_cli.tools.repo_tools import RepoTools
@@ -43,6 +43,7 @@ with hidden:
     # Snapshot exclusions are evaluated at runtime. Keep this type resolvable
     # with postponed annotations so the channel's nosnapshot marker is honored.
     from aster.runtime.channels import Channel
+    from aster.task_budget import TaskBudget, restore_task_budget
 
 if TYPE_CHECKING:
     from aster.unifiedllm import UnifiedLLM
@@ -106,6 +107,7 @@ class CodingAgent(InteractiveAgent):
     _verification: Annotated[Verification, hidden, nosnapshot]
     _verification_state: Annotated[VerificationState, hidden]
     _action_journal: Annotated[Any, hidden, nosnapshot]
+    _task_budget: Annotated[TaskBudget | None, hidden, nosnapshot]
 
     def __init__(
         self,
@@ -125,6 +127,7 @@ class CodingAgent(InteractiveAgent):
         self._system_messages_in = self.queue_manager.queue("system_messages")
         self.system_messages = self._system_messages_in.reader
         self.cwd = Path(cwd).resolve()
+        self._task_budget = restore_task_budget(self._storage, load_task_budget(self.cwd))
         self._verification = Verification(self.cwd, load_required_checks(self.cwd))
         self._verification_state = self._verification.state
         self._base_shell = ShellTools(cwd=str(self.cwd))
@@ -357,6 +360,10 @@ class CodingAgent(InteractiveAgent):
                 await self.queue_manager.shutdown()
             finally:
                 try:
-                    await shell.close()
+                    try:
+                        if self._task_budget is not None:
+                            await self._task_budget.aclose()
+                    finally:
+                        await shell.close()
                 finally:
                     await self.llm.aclose()

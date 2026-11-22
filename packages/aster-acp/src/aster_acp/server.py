@@ -74,6 +74,7 @@ from aster.strategies.codeact import (
     MAX_ITERATIONS_MESSAGE,
     OUTPUT_TOKENS_EXHAUSTED_MESSAGE,
 )
+from aster.task_budget import TaskBudgetError
 from aster.unifiedllm import UnifiedLLM
 from aster_acp._attachments import ParsedPrompt, parse_prompt
 from aster_acp._foreground_turn import ForegroundTurns, InvalidTurnIdError
@@ -725,7 +726,7 @@ class CodingACPAdapter:
                     progress.stop("command_error")
                     session.agent.message(message)
                     return PromptResponse(stop_reason="end_turn")
-                except (GenerationError, SandboxError):
+                except (GenerationError, SandboxError, TaskBudgetError):
                     # Preserve generation limits and sandbox failures for the outer mapping.
                     raise
                 except Exception as exc:
@@ -752,6 +753,13 @@ class CodingACPAdapter:
         except CoercionError as exc:
             progress.stop("command_error")
             session.agent.message(f"Skill selection: {exc.message}")
+            return PromptResponse(stop_reason="end_turn")
+        except TaskBudgetError as exc:
+            message = str(exc)
+            await session.agent.queue_manager.shutdown()
+            await session.bridge.fail_open_tools(message, title="Task budget stopped")
+            progress.stop("task_budget")
+            session.agent.message(message)
             return PromptResponse(stop_reason="end_turn")
         except GenerationError as exc:
             # An interrupted strategy may have announced a tool without an output.
