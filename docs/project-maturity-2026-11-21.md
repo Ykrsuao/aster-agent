@@ -90,6 +90,7 @@
 
 - 类型：运行级可靠性缺口；优先级 P1。
 - 已有证据：受控 timeout/503 后能重开且不重放旧工具；正常取消能保存当前快照。另一次真实终端强杀保留了磁盘修改与活动记录，却没有当前快照和完成记录。
+- 当前实现：宿主先持久化动作意图，再执行生成 Python、shell 或文件写入；执行结果和任务快照保存分别确认。强杀、取消或超时留下不确定动作时，恢复后保留待核对状态，允许受限文件调查，用户通过 `/recovery` 核对后继续；实施与验收见文末。
 - 完成标准：先对宿主可观测的“外部副作用已发生、内部进度未保存”动作保存可辨认状态；恢复时先核对结果未知的动作，避免无条件重复；故障注入覆盖非幂等追加之后、检查点之前强杀。恢复聊天历史与恢复正在执行的任务分别验收，不承诺任意 Python/shell 副作用都能自动恰好执行一次。
 - 依据：[显式检查点语义](concepts/prompts-and-context.md)、[持久工作流示例](../examples/advanced/durable_hitl.py)、[强杀记录](../results/daily-use-20261120/README.md)、[正常取消和重开](../results/daily-finish-20261120/README.md)。
 
@@ -222,4 +223,17 @@
 - 持久性验收使用实际 SQLite 保存/重开和两个真实 ACP 子进程：先修改并询问用户，再回答无关问题、关闭进程，随后重开同一会话；提前完成被拒绝，真实宿主检查通过后才能收尾。模型为离线脚本，不代表真实模型自主选用效果。
 - Windows Python 3.12 完整 CLI **2,297 passed、43 skipped、1 deselected**，最终完整 ACP **992 passed、9 deselected、3 xfailed**；Linux Python 3.13 全 strategies 加验收、wire、streaming 定向范围 **2,031 passed、124 deselected**，最终完整 ACP **991 passed、1 skipped、9 deselected、3 xfailed**。范围有重叠，不相加；Ruff、格式、全部 **1,362** 个源码 Python 文件的 SPDX 和差异检查通过。
 - 初轮 ACP 的三个旧私有状态/恢复断言已更新为公开验收状态合同，并证明重开后的新编辑使已通过结果失效。Windows 另有一次既有模型会话初始化 30 秒超时；三组定向及上述完整复验通过，根因未确认，未扩大上限。测试现在只在失败时附上启动阶段 stderr，保留后续诊断证据。日志与 JUnit 位于本机临时目录 `aster-audit-delivery-da31de6dc7`；远端结果须绑定最终提交记录于草稿 PR。
+- 最终 A3 候选 `271aa4c6` 的 [CI](https://github.com/Ykrsuao/aster-agent/actions/runs/45035334353) 与 [WSL full](https://github.com/Ykrsuao/aster-agent/actions/runs/45035341490) 均成功；Linux unit 与 WSL 各 **16,913 passed、56 skipped、584 deselected、3 xfailed**，独立 Linux sandbox、Windows 完整终端包安装及其余启用检查成功。候选验收 harness 现以 `isinstance(result, Done)` 和 `complete_task` 识别已完成的编码任务，覆盖回复但未完成、等待输入、补丁正确但未收尾、收尾但独立验收失败；修前红灯，修后完整文件 **17 passed**。
 - 边界：未配置持久存储时只在内存保留；旧版本快照没有历史文件基线可恢复。未列出的文件、任意外部副作用及检查点前强杀不在本项保证内；后者继续归 A4。此门槛防止意外完成声明，不是对任意模型 Python 的安全隔离。A4/A5、M1b 和 R1/R2 仍待推进，A1 保持候选方向。
+
+## A4 实施与验收（2026-11-23）
+
+- 实施分支：`codex/action-recovery-20261122`，基于最终 A3 候选 `271aa4c6`。宿主将动作意图同步写入现有 SQLite 事件后，才执行生成 Python、shell 或文件写入；文件创建在 `O_CREAT` 前记录。journal 保存动作类型、安全摘要、工作目录与结果状态，不新增原始命令、stdin、输出或凭据。
+- 执行结果与任务状态保存分开确认。只有当前任务快照保存成功，才能确认它覆盖的已完成动作；保存失败、迟到结果、取消、timeout 与 worker 中断仍需核对。普通可纠正的 `SyntaxError`/`ValueError` 保留执行反馈，不要求每次人工解锁。
+- `/recovery` 由持久宿主注册，列出待核对动作；`/recovery ID --note "核对结果"` 仅记录用户检查，不调用模型、不重放动作。用户技能不能抢占这个命令。未核对前拒绝普通 Python、shell、写入及任务完成，仍允许 Plan 同等边界的 `self.files.read/list/search` 调查、提问，以及保留恢复提示的 `complete_task: false` 回复。
+- 每回合先绑定本分支的 pre-turn checkpoint 与内容摘要，再使 current snapshot 失效。强杀后缺少 current 时，仅恢复绑定且校验通过的 checkpoint；恢复后继续绑定原持久 storage、事件管理器和宿主执行控制。损坏 journal、来源不符或缺少已确认动作证明的快照拒绝恢复，保留原数据。
+- rewind/tree 继续允许导航，但新分支继承当前与目标分支中所选快照未覆盖的动作；晚于快照的完成或人工核对不能替旧状态解锁。冲突的动作/event ID 在写入前拒绝；已有待核对状态不能通过切分支清除。有动作的 provisional 会话保留在历史中，不作为空预备会话清理。
+- 真实 ACP 强杀验收覆盖 shell/Python × intent/outcome 四格：非幂等追加并 `fsync` 后强杀进程，重开时拒绝重复追加和提前完成，受限读取仍可用；逐项人工核对后继续，文件始终只有一行。另覆盖真实 native Python 部分写入后 timeout、ACP cancel 后正常 finalize/保存/重开，以及核对后执行、再保存、再次重开。
+- Windows Python 3.12 完整 CLI **2,389 passed、43 skipped、1 deselected**，最终完整 ACP **1,005 passed、9 deselected、3 xfailed**；Linux Python 3.13 完整 CLI **2,426 passed、6 skipped、1 deselected**，最终完整 ACP **1,004 passed、1 skipped、9 deselected、3 xfailed**。四格强杀包含在完整 ACP 内，范围不重复相加。全仓 Ruff、格式、全部 **1,372** 个源码 Python 文件 SPDX 与差异检查通过。
+- 初轮完整 ACP 的九个命令清单断言补入了宿主 `/recovery`，保留技能 metadata、顺序和路由断言。Windows 另有一次模型会话初始化 30 秒超时，启动日志停在 `provider_code_cache`；本地离线缓存探针冷建 **12.891 秒**、复用 **0.047 秒**，上述完整 ACP 复验通过，未扩大超时，未确认该次耗时变化的根因。较早 Python intent 强杀用例的一次会话读取失败未再复现；测试保留底层读取诊断，最终两平台四格均通过。日志与 JUnit 位于本机临时目录 `aster-audit-delivery-da31de6dc7`，远端结果绑定最终候选后记入草稿 PR。
+- 边界：一个 Python cell 与内部 shell 可能分别产生记录，用户须核对全部列出的 ID。记录只能表明宿主观察到的执行边界，不能推断任意代码的全部外部效果、自动回滚、阻止绕过框架的任意程序，或保证副作用恰好执行一次。模型均为离线脚本，未调用真实模型 API；A5、M1b 与 R1/R2 的集成和验收继续独立推进，A1 保持候选方向。

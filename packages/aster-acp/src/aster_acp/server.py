@@ -861,7 +861,8 @@ class CodingACPAdapter:
                 )
                 # Forks start at the selected pre-message state; ordinary loads
                 # use their last completed state, never a pre-last-turn checkpoint.
-                handle.storage.restore_current_snapshot(agent)
+                handle.restore_current_snapshot(agent)
+                agent.bind_action_journal(handle.actions)
                 # Saved conversations can come from another workspace or host.
                 agent.refresh_host_context()
             with phase("session_mcp"):
@@ -965,6 +966,15 @@ class CodingACPAdapter:
             if session.trust_notice:
                 session.bridge.publish_best_effort(
                     update_agent_message(text_block(session.trust_notice))
+                )
+            if session.handle.actions.pending():
+                session.bridge.publish_best_effort(
+                    update_agent_message(
+                        text_block(
+                            "Actions from an interrupted session need review before execution "
+                            "can continue. Use /recovery to inspect them."
+                        )
+                    )
                 )
             if session.startup_warnings:
                 details = "\n".join(f"- {warning}" for warning in session.startup_warnings)

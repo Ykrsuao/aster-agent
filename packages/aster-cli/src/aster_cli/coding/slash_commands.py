@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 _HOST_COMMANDS = frozenset(
     "new sessions drafts resume rewind tree tools changes queue steer attach attachments "
     "reconnect retry undo model effort reasoning mode plan code permissions sandbox tasks "
-    "skills mcp stop search status hud context logs help cancel exit".split()
+    "skills mcp recovery stop search status hud context logs help cancel exit".split()
 )
 _COMMAND_NAME = re.compile(r"\w[\w.:\[\]-]*\Z")
 
@@ -84,6 +84,14 @@ class CodingSlashCommandRegistry:
         previous = self.commands()
         commands: dict[str, CodingSlashCommand] = {}
         loaded = self._loaded_skills()
+        recovery = getattr(self.agent, "recovery", None)
+        if getattr(self.agent, "_action_journal", None) is not None and recovery is not None:
+            # Host reconciliation stays available even if a skill is unloaded,
+            # and user skills cannot take its short command name.
+            loaded = {
+                "aster.recovery": recovery,
+                **{name: skill for name, skill in loaded.items() if name != "aster.recovery"},
+            }
         for skill_name, skill in loaded.items():
             for meta, method in get_slash_commands(skill):
                 name = meta.name.casefold()

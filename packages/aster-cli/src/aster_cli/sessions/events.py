@@ -4,6 +4,8 @@
 
 from typing import Any, ClassVar, Literal
 
+from pydantic import Field
+
 from aster.context_blocks import Metadata
 from aster.context_blocks.roles import Role
 
@@ -47,6 +49,14 @@ class SessionTurnFinished(Metadata):
     completed_message_id: str | None
 
 
+class SessionSnapshotInvalidated(Metadata):
+    """Bind an interrupted turn to its own branch's last pre-turn state."""
+
+    session_id: str = Field(min_length=1)
+    checkpoint_id: str | None = Field(default=None, pattern=r"^user:\d+$")
+    checkpoint_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
 class SessionSteering(Metadata):
     """A durable state change for input addressed to an existing foreground turn."""
 
@@ -63,11 +73,56 @@ class SessionActivity(Metadata):
     activity: dict[str, Any]
 
 
+class SessionActionIntent(Metadata):
+    """A host side effect whose intent was committed before execution."""
+
+    kind: str = Field(min_length=1, max_length=64)
+    detail: str = Field(min_length=1, max_length=1024)
+    cwd: str = Field(min_length=1, max_length=4096)
+
+
+class SessionActionOutcome(Metadata):
+    """A bounded execution outcome, independent of saving agent progress."""
+
+    action_id: str = Field(min_length=1, max_length=256)
+    outcome: str = Field(min_length=1, max_length=256)
+
+
+class SessionActionsSaved(Metadata):
+    """Actions included in a successfully saved current agent snapshot."""
+
+    action_ids: list[str]
+
+
+class SessionActionReviewed(Metadata):
+    """A human's explicit reconciliation of an uncertain host side effect."""
+
+    action_id: str = Field(min_length=1, max_length=256)
+    note: str = Field(min_length=1, max_length=1024)
+
+
+class SessionActionsInherited(Metadata):
+    """Retained side effects need a fresh review against the restored state."""
+
+    action_ids: list[str]
+
+
+SESSION_ACTION_EVENT_TYPES: tuple[type[Metadata], ...] = (
+    SessionActionIntent,
+    SessionActionOutcome,
+    SessionActionsSaved,
+    SessionActionReviewed,
+    SessionActionsInherited,
+)
+
+
 SESSION_EVENT_TYPES: tuple[type[Metadata], ...] = (
     SessionStarted,
     SessionTitleUpdated,
     SessionUserMessage,
     SessionTurnFinished,
+    SessionSnapshotInvalidated,
     SessionSteering,
     SessionActivity,
+    *SESSION_ACTION_EVENT_TYPES,
 )

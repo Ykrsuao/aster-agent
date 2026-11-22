@@ -182,6 +182,13 @@ class RuntimeControls:
         self._permission_revision = 0
 
     def instructions(self) -> str:
+        if self._recovery_pending():
+            return (
+                "Actions from an interrupted session still need human review. "
+                "Generated execution is paused. Inspect their effects using one literal "
+                "await self.files.read/list/search(...) request per cell, then ask the user "
+                "to review them with /recovery. Do not repeat an earlier action."
+            )
         if self.mode == "plan":
             return (
                 "The user selected Plan mode. Inspect the workspace using one direct literal "
@@ -405,14 +412,17 @@ class RuntimeControls:
         host_path: Callable[[str], str] | None = None,
     ) -> Any:
         """Prepare a host file request without granting execution of its Python spelling."""
-        if self.mode == "plan":
+        if self.mode == "plan" or self._recovery_pending():
             from aster_acp._plan_files import plan_file_executor
 
             revision = self._permission_revision
             return plan_file_executor(
                 code,
                 files=self._plan_files,
-                allowed=lambda: self.mode == "plan" and self._permission_revision == revision,
+                allowed=lambda: (
+                    (self.mode == "plan" or self._recovery_pending())
+                    and self._permission_revision == revision
+                ),
                 timeout=timeout,
                 host_path=host_path,
             )
@@ -430,7 +440,12 @@ class RuntimeControls:
             host_path=host_path,
             workspace=getattr(self.agent, "cwd", None),
             extra_roots=self._sandbox_roots if self.execution_backend == "sandbox" else (),
+            journal=getattr(self.agent, "_action_journal", None),
         )
+
+    def _recovery_pending(self) -> bool:
+        journal = getattr(self.agent, "_action_journal", None)
+        return journal is not None and bool(journal.pending())
 
     async def authorize(self, code: str, *, tool_call_id: str | None = None) -> str | None:
         """Return a refusal reason or None; cancellation always propagates.
@@ -439,6 +454,8 @@ class RuntimeControls:
         grant is scoped to this RuntimeControls instance and disappears when
         the session is closed/reconnected. Unknown client choices fail closed.
         """
+        if self._recovery_pending():
+            return self.instructions()
         if self.mode == "plan":
             return (
                 "Plan mode disables generated execution. This code was not run. "
@@ -456,6 +473,8 @@ class RuntimeControls:
                 "literals, for example '\\x1b', and separate lines with plain newlines."
             )
         async with self._approval_lock:
+            if self._recovery_pending():
+                return self.instructions()
             if self.mode == "plan":
                 return (
                     "Plan mode disables generated execution. This code was not run. "
@@ -501,6 +520,8 @@ class RuntimeControls:
                     ],
                 )
                 outcome = response.outcome
+                if self._recovery_pending():
+                    return self.instructions()
                 option = getattr(outcome, "option_id", None)
                 if getattr(outcome, "outcome", None) == "selected":
                     if option == "allow_once":

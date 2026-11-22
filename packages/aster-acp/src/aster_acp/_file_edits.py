@@ -18,6 +18,7 @@ import sys
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from aster_cli.coding.activity import (
     _MAX_DIFF_INPUT_CHARS,
@@ -28,12 +29,16 @@ from aster_cli.coding.activity import (
     _omitted_diff,
 )
 from aster_cli.coding.instructions import _opened_file_path
+from aster_cli.coding.recovery import record_action
 
 from aster.agentdoc import pformat
 from aster.events import ExecutionResult
 from aster.runtime.event_manager import EventManager
 from aster.tools._bounded_io import FileTooLargeError, read_line_range, read_whole_file_checked
 from aster.tools.shell_tools import FileWrite, Match
+
+if TYPE_CHECKING:
+    from aster_cli.sessions.actions import SessionActions
 
 _MAX_SOURCE_BYTES = 128 * 1024
 _MAX_AST_NODES = 4096
@@ -219,6 +224,7 @@ class FileEditExecutor:
     _roots: tuple[Path, ...]
     _identity: tuple[int, int] | None
     _parent_identity: tuple[int, int]
+    _journal: SessionActions | None = None
 
     async def run_cell(self, code: str, *, execution_count: int = 1) -> ExecutionResult:
         """Run a standalone request with the timeout selected during preparation."""
@@ -251,6 +257,14 @@ class FileEditExecutor:
             return ExecutionResult(error=error)
 
     async def _run_operation(self) -> Match | FileWrite:
+        if isinstance(self._operation, _Read):
+            return await self._perform_operation()
+        kind = "file.write_file" if isinstance(self._operation, _Write) else "file.replace"
+        # Opening a new file already has an effect: persist intent before O_CREAT.
+        with record_action(self._journal, kind, str(self._host_path), self._cwd):
+            return await self._perform_operation()
+
+    async def _perform_operation(self) -> Match | FileWrite:
         operation = self._operation
         path = self._host_path
         creating = isinstance(operation, _Write) and self._identity is None
@@ -423,6 +437,7 @@ def file_edit_executor(
     host_path: Callable[[str], str] | None = None,
     workspace: str | Path | None = None,
     extra_roots: Iterable[tuple[str | Path, bool]] = (),
+    journal: SessionActions | None = None,
 ) -> FileEditExecutor | None:
     """Prepare one literal read/write/replace; all other Python needs normal approval.
 
@@ -483,4 +498,5 @@ def file_edit_executor(
         tuple(roots),
         (info.st_dev, info.st_ino) if info is not None else None,
         (parent.st_dev, parent.st_ino),
+        journal,
     )

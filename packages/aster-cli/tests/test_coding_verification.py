@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 from aster_cli.coding.agent import CodingAgent
+from aster_cli.coding.recovery import require_recovery
 from aster_cli.coding.reply_strategy import CodingReplyStrategy
 from aster_cli.coding.verification import (
     CodingDone,
@@ -667,8 +668,14 @@ def test_strategy_rebuild_preserves_unhashable_conditions_without_duplicate_gate
     first, second = Condition("first"), Condition("second")
     config = CodeActConfig(
         preconditions=[first, begin_verification, second],
-        postconditions=[first, require_verification, second],
+        postconditions=[
+            first,
+            require_verification,
+            second,
+            require_recovery,
+            require_verification,
+        ],
     )
     rebuilt = CodingReplyStrategy(config=CodingReplyStrategy(config=config).config).config
     assert list(rebuilt.preconditions) == [first, begin_verification, second]
-    assert list(rebuilt.postconditions) == [first, require_verification, second]
+    assert list(rebuilt.postconditions) == [first, second, require_recovery, require_verification]

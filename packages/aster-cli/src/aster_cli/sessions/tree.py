@@ -22,6 +22,7 @@ from typing import Literal
 
 from aster.errors.storage import SnapshotNotFoundError
 from aster.storage.sqlite import SQLiteStorageManager
+from aster_cli.sessions.actions import inherit_actions
 from aster_cli.sessions.store import (
     _AGENT_EVENT_TYPES,
     _START_EVENT_TYPES,
@@ -505,6 +506,7 @@ def navigate_tree(
         raise SessionCheckpointUnavailableError(
             "This message has no complete saved conversation state."
         )
+    action_sources = (store.path_for(current_id), store.path_for(choice.branch.session_id))
     entry = choice.branch.entries[choice.offset]
     end = choice.offset + (entry.role == "assistant")
     prefix = choice.branch.entries[:end]
@@ -535,6 +537,7 @@ def navigate_tree(
         SQLiteStorageManager.fork_checkpoint_from_path(
             store.path_for(choice.branch.session_id), choice.checkpoint_id, storage, retain=retain
         )
+        inherit_actions(*action_sources, restored=storage)
         copied = _read_branch(store.path_for(new_id))
         if (
             copied is None

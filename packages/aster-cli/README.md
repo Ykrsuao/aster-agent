@@ -180,6 +180,32 @@ the same `<workspace>/.aster/sessions` storage as Zed's ACP integration. Close
 the session in its current host before opening it in another: each saved
 session has one writer. Reopening restores conversation and agent context;
 it does not resurrect a running command or a terminated process.
+If a process stops after generated Python or a host shell/file operation starts
+but before its progress is saved, the restored session pauses further execution
+and asks you to check the effects:
+
+```text
+/recovery
+/recovery ACTION_ID --note "Checked the file; the appended line is present once"
+```
+
+The first command lists unresolved actions; the second records your inspection
+without calling the model or repeating an action. Review each listed ID. A Python
+cell and its shell tool can have separate records for the same operation.
+While review is pending, the agent can inspect workspace files through bounded
+`self.files.read/list/search` requests and ask questions, but cannot execute
+ordinary Python, perform more edits, or mark the coding task complete. An
+unrelated reply can retain the task with `complete_task: false` and a recovery
+notice.
+
+The journal distinguishes an operation returning from agent progress being saved.
+Restoring an older checkpoint keeps later effects as pending review because
+conversation navigation does not roll back working files. Inspection is required
+again when the selected state does not cover those effects. Journal writes must
+succeed before execution starts. These records cannot infer the full effects of
+arbitrary code, reverse external changes, or guarantee exactly-once execution;
+they prevent blindly continuing after an observed interruption.
+
 The backend replays saved Python calls, command output and file diffs alongside
 messages. Terminal/file activity is saved starting with this version; older
 sessions cannot recover events that were never recorded. `/changes` offers both

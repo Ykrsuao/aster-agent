@@ -646,6 +646,7 @@ async def test_adapter_loads_workspace_skills_and_advertises_commands(tmp_path, 
     assert len(advertised) == 1
     assert [command.name for command in advertised[0].available_commands] == [
         "diagnose",
+        "recovery",
         "skill-status",
     ]
     diagnose = advertised[0].available_commands[0]
@@ -1212,10 +1213,14 @@ async def test_initial_commands_are_deferred_until_new_session_returns(tmp_path,
     assert len(client.accepted) == 3
     initial_commands = client.accepted[0][1]
     assert isinstance(initial_commands, AvailableCommandsUpdate)
-    assert [command.name for command in initial_commands.available_commands] == ["triage"]
-    assert initial_commands.available_commands[0].field_meta == {
-        "aster": {"kind": "skill", "aliases": ["cmd.triage"]}
-    }
+    assert [command.name for command in initial_commands.available_commands] == [
+        "recovery",
+        "triage",
+    ]
+    triage = next(
+        command for command in initial_commands.available_commands if command.name == "triage"
+    )
+    assert triage.field_meta == {"aster": {"kind": "skill", "aliases": ["cmd.triage"]}}
     assert not llm.calls
     assert isinstance(client.accepted[1][1], CurrentModeUpdate)
     initial_usage = client.accepted[2][1]
@@ -1273,10 +1278,11 @@ async def test_load_session_advertises_commands_to_registered_session(tmp_path):
         update for _, update in load_client.accepted if isinstance(update, AvailableCommandsUpdate)
     ]
     assert len(advertised) == 1
-    assert [command.name for command in advertised[0].available_commands] == ["triage"]
-    assert advertised[0].available_commands[0].field_meta == {
-        "aster": {"kind": "skill", "aliases": ["cmd.triage"]}
-    }
+    assert [command.name for command in advertised[0].available_commands] == ["recovery", "triage"]
+    triage = next(
+        command for command in advertised[0].available_commands if command.name == "triage"
+    )
+    assert triage.field_meta == {"aster": {"kind": "skill", "aliases": ["cmd.triage"]}}
     assert not llm.calls
     await load_adapter.close()
 
@@ -1395,7 +1401,7 @@ async def test_adapter_republishes_commands_after_skill_activation(tmp_path):
         update for update in client.updates if isinstance(update, AvailableCommandsUpdate)
     ]
     assert len(advertised) == 2
-    assert [command.name for command in advertised[-1].available_commands] == ["later"]
+    assert [command.name for command in advertised[-1].available_commands] == ["later", "recovery"]
     await adapter.close()
 
 
@@ -1437,7 +1443,7 @@ async def test_adapter_replaces_advertised_commands_after_skill_reload(tmp_path,
         update for update in client.updates if isinstance(update, AvailableCommandsUpdate)
     ]
     assert len(advertised) == 1
-    assert [command.name for command in advertised[0].available_commands] == ["repair"]
+    assert [command.name for command in advertised[0].available_commands] == ["recovery", "repair"]
     invoked = await runtime.commands.invoke("repair", "deep")
     assert invoked.text == "Repair using deep mode (reloaded)."
     await adapter.close()
@@ -1473,6 +1479,7 @@ async def test_failed_skill_reload_keeps_previous_command_and_advertisement(tmp_
     assert not any(isinstance(update, AvailableCommandsUpdate) for update in client.updates)
     assert [command.name for command in runtime.commands.commands()] == [
         "diagnose",
+        "recovery",
         "skill-status",
     ]
     invoked = await runtime.commands.invoke("diagnose", "deep")
@@ -1741,8 +1748,8 @@ async def test_adapter_routes_distinct_workspace_commands_to_their_sessions(tmp_
         for session_id, update in client.accepted
         if isinstance(update, AvailableCommandsUpdate)
     }
-    assert commands_by_session[alpha_session.session_id] == ["alpha"]
-    assert commands_by_session[beta_session.session_id] == ["beta"]
+    assert commands_by_session[alpha_session.session_id] == ["alpha", "recovery"]
+    assert commands_by_session[beta_session.session_id] == ["beta", "recovery"]
     messages = {
         session_id: update.content.text
         for session_id, update in client.accepted

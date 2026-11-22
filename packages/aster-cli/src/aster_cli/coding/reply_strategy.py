@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from aster.events import ExecutionResult
 from aster.strategies.codeact import CodeActStrategy
+from aster_cli.coding.recovery import finish_action, require_recovery
 from aster_cli.coding.steering import current_steering
 from aster_cli.coding.verification import begin_verification, require_verification
 
@@ -181,9 +182,13 @@ class CodingReplyStrategy(CodeActStrategy):
                     else (*config.preconditions, begin_verification)
                 ),
                 "postconditions": (
-                    config.postconditions
-                    if any(item is require_verification for item in config.postconditions)
-                    else (*config.postconditions, require_verification)
+                    *(
+                        item
+                        for item in config.postconditions
+                        if item is not require_recovery and item is not require_verification
+                    ),
+                    require_recovery,
+                    require_verification,
                 ),
             }
         )
@@ -297,6 +302,7 @@ class CodingReplyStrategy(CodeActStrategy):
             and _has_plain_final_reply(code)
         ):
             return ExecutionResult(error=ValueError(_REPLY_GUIDANCE))
+        file_executor = None
         control = getattr(runtime.agent, "_execution_control", None)
         if control is not None and not (output_metadata or {}).get("prefill"):
             prepare_file_edit = getattr(control, "file_edit_executor", None)
@@ -319,12 +325,34 @@ class CodingReplyStrategy(CodeActStrategy):
                 # Python or reading the native/guest REPL's mutable bindings.
                 session = copy.copy(session)
                 session.sandbox_executor = file_executor
-        return await super()._execute_code(
-            runtime,
-            code,
-            builtins,
-            session,
-            target_method_name,
-            tool_call_id=tool_call_id,
-            output_metadata=output_metadata,
+        journal = getattr(runtime.agent, "_action_journal", None)
+        if (
+            target_method_name != "handle"
+            or (output_metadata or {}).get("prefill")
+            or file_executor is not None
+        ):
+            # Trusted file adapters journal writes themselves and keep bounded
+            # inspection available while recovery is pending.
+            journal = None
+        action_id = (
+            journal.begin(
+                "python.execute", "Generated Python cell", str(getattr(runtime.agent, "cwd", "."))
+            )
+            if journal is not None
+            else None
         )
+        try:
+            result = await super()._execute_code(
+                runtime,
+                code,
+                builtins,
+                session,
+                target_method_name,
+                tool_call_id=tool_call_id,
+                output_metadata=output_metadata,
+            )
+        except BaseException as error:
+            finish_action(journal, action_id, error)
+            raise
+        finish_action(journal, action_id, result.error, requires_review=result.cancelled)
+        return result

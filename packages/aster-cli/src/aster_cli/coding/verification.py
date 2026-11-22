@@ -199,7 +199,7 @@ class Verification:
                 self.state.outcomes[name] = "interrupted"
         self._initial = self.observe()
 
-    async def run(self, name: str, events: Any) -> ShellResult:
+    async def run(self, name: str, events: Any, *, journal: Any = None) -> ShellResult:
         if name not in self.checks:
             raise ValueError(f"Unknown check {name!r}; choose from {list(self.checks)}")
         if self._turn_id is None:
@@ -216,7 +216,7 @@ class Verification:
         shell = ShellTools(cwd=str(self.root), default_timeout=check.timeout)
         try:
             try:
-                result = await ActivityShellTools(shell, events).run(
+                result = await ActivityShellTools(shell, events, journal=journal).run(
                     check.command, timeout=check.timeout
                 )
             finally:
@@ -287,6 +287,6 @@ def require_verification(agent: Any, result: Any, call: Any) -> None:
                 else "The coding task remains open; its required checks have passed."
             )
             original = result.message or result.explanation
-            if isinstance(result, CodingDone):
+            if isinstance(result, CodingDone) and result._original_message is None:
                 result._original_message = original
             result.message = f"{original}\n\n{notice}"

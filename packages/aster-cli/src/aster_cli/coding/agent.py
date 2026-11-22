@@ -27,6 +27,7 @@ from aster.tools.shell_tools import ShellTools
 from aster.tools.todo import Todo  # noqa: F401 - public REPL type and sandbox data contract
 from aster_cli.coding.activity import ActivityShellTools
 from aster_cli.coding.instructions import render_agent_instructions
+from aster_cli.coding.recovery import RecoveryTools
 from aster_cli.coding.reply_strategy import CodingReplyStrategy
 from aster_cli.coding.settings import load_required_checks
 from aster_cli.coding.verification import CodingDone as Done
@@ -69,7 +70,17 @@ class CodingAgent(InteractiveAgent):
     # take one over, which would remove the tool while the model is still told
     # it has it.
     __protected_skill_attrs__ = frozenset(
-        {"shell", "repo", "files", "todo", "libs", "skills", "verify", "verification_status"}
+        {
+            "shell",
+            "repo",
+            "files",
+            "todo",
+            "libs",
+            "skills",
+            "verify",
+            "verification_status",
+            "recovery",
+        }
     )
 
     cwd: Annotated[Path, nosnapshot]
@@ -84,6 +95,7 @@ class CodingAgent(InteractiveAgent):
     shell: Annotated[ActivityShellTools, nosnapshot]
     repo: Annotated[RepoTools, nosnapshot]
     files: Annotated[WorkspaceFiles, nosnapshot]
+    recovery: Annotated[RecoveryTools, nosnapshot]
     todo: TodoManager
     libs: Annotated[SkillWriting, nosnapshot]
     skills: Annotated[SkillRegistry, nosnapshot]
@@ -93,6 +105,7 @@ class CodingAgent(InteractiveAgent):
     _execution_control: Annotated[Any, hidden, nosnapshot]
     _verification: Annotated[Verification, hidden, nosnapshot]
     _verification_state: Annotated[VerificationState, hidden]
+    _action_journal: Annotated[Any, hidden, nosnapshot]
 
     def __init__(
         self,
@@ -106,6 +119,7 @@ class CodingAgent(InteractiveAgent):
     ) -> None:
         super().__init__(llm=llm, **kwargs)
         self._execution_control = None
+        self._action_journal = None
         self._slash_commands_in = self.queue_manager.queue("slash_commands")
         self.slash_commands = self._slash_commands_in.reader
         self._system_messages_in = self.queue_manager.queue("system_messages")
@@ -117,6 +131,7 @@ class CodingAgent(InteractiveAgent):
         self.shell = ActivityShellTools(self._base_shell, self.event_manager)
         self.repo = RepoTools(root=self.cwd, session=self.shell.session)
         self.files = WorkspaceFiles(self.cwd)
+        self.recovery = RecoveryTools()
         self.todo = TodoManager()
         self.skills = SkillRegistry(self)
         self.skills.register("aster.shell", self.shell)
@@ -156,6 +171,7 @@ class CodingAgent(InteractiveAgent):
         )
         self.refresh_host_context()
         self.context["todo_status"] = Context(expr="self.todo.status()")
+        self.context["recovery_status"] = Context(expr="self.recovery.status()")
         self.context["execution_policy"] = Context(
             expr="self._execution_control.instructions() if self._execution_control else ''"
         )
@@ -221,7 +237,9 @@ class CodingAgent(InteractiveAgent):
         exit status and file hashes, never text supplied by the model.
         """
         self.refresh_host_context()
-        result = await self._verification.run(check_name, self.event_manager)
+        result = await self._verification.run(
+            check_name, self.event_manager, journal=self._action_journal
+        )
         return (
             f"{check_name}: exit_code={result.returncode}, timed_out={result.timed_out}\n{result}"
         )
@@ -230,6 +248,17 @@ class CodingAgent(InteractiveAgent):
     def verification_status(self) -> dict[str, Any]:
         """Show pending files and check outcomes without running commands."""
         return self._verification.status()
+
+    @hidden
+    @no_trace
+    def bind_action_journal(self, journal: Any) -> None:
+        """Attach the owning host's journal after restoring the agent snapshot."""
+        self._action_journal = journal
+        self.shell._journal = journal
+        self.recovery._journal = journal
+        if "aster.recovery" not in self.skills.loaded():
+            self.skills.register("aster.recovery", self.recovery)
+            self.skills.activate(["aster.recovery"])
 
     def get_summarization_status(self) -> dict[str, Any]:
         """Return compact history information for host status displays."""

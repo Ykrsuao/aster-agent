@@ -629,6 +629,7 @@ async def test_acp_subprocess_transcript(tmp_path, monkeypatch):
     assert [command.name for command in commands.available_commands] == [
         "protocol-check",
         "protocol-text",
+        "recovery",
     ]
     assert commands.available_commands[0].input is not None
     assert commands.available_commands[0].input.root.hint == "<value>"
