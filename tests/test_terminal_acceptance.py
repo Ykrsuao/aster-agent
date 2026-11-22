@@ -98,9 +98,26 @@ def test_cross_file_verifier_rejects_copied_converter(tmp_path):
     assert not acceptance.verify(task, tmp_path)[0]
 
 
-@pytest.mark.parametrize("max_calls, expected", [(2, "completed"), (1, "call_limit")])
+@pytest.mark.parametrize(
+    "max_calls, reply, expected",
+    [
+        pytest.param(2, {"message": "done", "explanation": "fixed"}, "completed", id="2-completed"),
+        pytest.param(
+            1, {"message": "done", "explanation": "fixed"}, "call_limit", id="1-call_limit"
+        ),
+        pytest.param(
+            2,
+            {"message": "reply only", "explanation": "task pending", "complete_task": False},
+            "needs_input",
+            id="reply-only",
+        ),
+        pytest.param(
+            2, {"question": "Which task should I finish?"}, "needs_input", id="needs-input"
+        ),
+    ],
+)
 async def test_worker_uses_real_coding_agent_with_scripted_model(
-    tmp_path, monkeypatch, max_calls, expected
+    tmp_path, monkeypatch, max_calls, reply, expected
 ):
     from aster.unifiedllm import FakeLLMClient, LLMResponse, LLMUsage, ToolCall
 
@@ -127,9 +144,7 @@ async def test_worker_uses_real_coding_agent_with_scripted_model(
                     ToolCall(
                         id="done",
                         name="return_result",
-                        arguments=json.dumps(
-                            {"result": {"message": "done", "explanation": "fixed"}}
-                        ),
+                        arguments=json.dumps({"result": reply}),
                     )
                 ],
                 finish_reason="tool_calls",
@@ -158,10 +173,11 @@ async def test_worker_uses_real_coding_agent_with_scripted_model(
         }
     )
     result = json.loads(meter.read_text(encoding="utf-8"))
-    assert result["status"] == expected
     assert result["attempted_calls"] == max_calls
+    assert result["error"] is None
     assert result["cost_usd"] == 0
     assert acceptance.verify(task, workspace)[0]
+    assert result["status"] == expected
 
 
 def test_live_options_are_required_and_output_cannot_overwrite(tmp_path):
@@ -182,7 +198,18 @@ def test_error_reason_does_not_export_exception_text(tmp_path):
     assert "api-key" not in reason
 
 
-def test_report_preserves_verification_when_worker_hits_call_limit(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "worker_status, correct_patch, expected_reason",
+    [
+        ("call_limit", True, "call_limit"),
+        ("needs_input", True, "needs_input"),
+        ("completed", False, "verification_failed:AssertionError"),
+        ("completed", True, None),
+    ],
+)
+def test_report_requires_completion_and_independent_verification(
+    tmp_path, monkeypatch, worker_status, correct_patch, expected_reason
+):
     from argparse import Namespace
     from pathlib import Path
 
@@ -193,10 +220,11 @@ def test_report_preserves_verification_when_worker_hits_call_limit(tmp_path, mon
         if "--worker" not in args:
             return original(args, **kwargs)
         payload = json.loads(kwargs["text"])
-        acceptance.write_files(Path(payload["workspace"]), task["solution"])
+        if correct_patch:
+            acceptance.write_files(Path(payload["workspace"]), task["solution"])
         acceptance.write_json(
             Path(payload["meter"]),
-            {"status": "call_limit", "attempted_calls": 8, "completed_calls": 8},
+            {"status": worker_status, "attempted_calls": 8, "completed_calls": 8},
         )
         return 0, "", False
 
@@ -204,7 +232,11 @@ def test_report_preserves_verification_when_worker_hits_call_limit(tmp_path, mon
     monkeypatch.setattr(acceptance, "candidate", lambda: {"commit": "test", "dirty": True})
     output = tmp_path / "report"
     args = Namespace(output=output, model="test", timeout=10, max_calls=8, max_output_tokens=4096)
-    assert acceptance.run_suite(args, [task], "fixture-hash") == 1
+    assert acceptance.run_suite(args, [task], "fixture-hash") == (
+        0 if expected_reason is None else 1
+    )
     result = json.loads((output / "report.json").read_text(encoding="utf-8"))["tasks"][0]
-    assert result["passed"] is False and result["reason"] == "call_limit"
-    assert result["verification_passed"] is True and result["verification_reason"] is None
+    assert result["passed"] is (expected_reason is None)
+    assert result["reason"] == expected_reason
+    assert result["verification_passed"] is correct_patch
+    assert result["verification_reason"] == (None if correct_patch else expected_reason)

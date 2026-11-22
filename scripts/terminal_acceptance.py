@@ -178,7 +178,7 @@ def write_json(path: Path, data: dict) -> None:
 async def worker(payload: dict) -> None:
     from aster_cli.coding.agent import CodingAgent
 
-    from aster.interactive import SummarizationConfig
+    from aster.interactive import Done, SummarizationConfig
     from aster.llm_config import llm_config_chain
     from aster.secrets import load_secrets_into_env
     from aster.tracing import enable_tracing
@@ -255,7 +255,11 @@ async def worker(payload: dict) -> None:
         status = "running"
         save()
         result = await agent.handle({"user_messages": [payload["prompt"]]})
-        status = "completed" if type(result).__name__ == "Done" else "needs_input"
+        status = (
+            "completed"
+            if isinstance(result, Done) and getattr(result, "complete_task", True)
+            else "needs_input"
+        )
     except CallBudgetExceeded:
         status = "call_limit"
     except BaseException as exc:
