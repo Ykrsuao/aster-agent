@@ -15,14 +15,21 @@ from aster.interactive import AgentMessage
 from aster.unifiedllm import FakeLLMClient
 
 
-async def test_list_opt_in_recovers_only_user_inputs_without_opening_agent(tmp_path):
+@pytest.mark.parametrize("session_ids", [("a-first", "z-second"), ("z-first", "a-second")])
+async def test_list_opt_in_recovers_only_user_inputs_without_opening_agent(tmp_path, session_ids):
     store = SessionStore(tmp_path / ".aster" / "sessions")
-    first = store.create(working_directory=str(tmp_path))
-    first.record_user_message("first input")
+    first = store.create(session_id=session_ids[0], working_directory=str(tmp_path))
+    first_tag, _ = first.record_user_message("first input")
     first.events.add(AgentMessage(content="not an input"))
-    second = store.create(working_directory=str(tmp_path))
-    second.record_user_message("  中文\nsecond input  \n")
-    first.record_user_message("latest input")
+    second = store.create(session_id=session_ids[1], working_directory=str(tmp_path))
+    second_tag, _ = second.record_user_message("  中文\nsecond input  \n")
+    latest_tag, _ = first.record_user_message("latest input")
+    # Windows clocks may assign the same timestamp to these adjacent writes.
+    # This case tests chronological merging across sessions, with distinct times.
+    for index, (session, tag) in enumerate(
+        [(first, first_tag), (second, second_tag), (first, latest_tag)], start=1
+    ):
+        session.events.update(tag, timestamp=datetime(2026, 1, 1, 0, 0, index, tzinfo=UTC))
 
     # Both writer handles remain open while the picker reads their history.
     def factory():
