@@ -100,10 +100,11 @@
 ### M1a：保护记忆库的 embedding 身份与维度
 
 - 类型：已复现的库级检索完整性缺陷；优先级 P1，Q2 后可独立修复，不依赖终端记忆功能。
-- 现状：向量存储没有绑定 embedding backend/model/dim 身份；同维换模型无法识别不同向量空间。库里已有数据库 schema 版本迁移，缺的是 embedding 兼容合同。
+- 初评现状：向量存储没有绑定 embedding backend/model/dim 身份；同维换模型无法识别不同向量空间。库里已有数据库 schema 版本迁移，缺的是 embedding 兼容合同。
 - 复现：默认 NumPy 后端的临时 SQLite 库存入 2 维向量后，以 3 维重开查询产生矩阵错误；继续写入 3 维记录仍会成功持久化，之后以 2 维重开查询也因混合维度失败。两条文本仍在，未证实文本或关系丢失；其他向量后端有各自约束，不能套用此复现结果。
 - 完成标准：读取和写入前校验 embedding 身份及维度，拒绝不兼容写入且保留原数据；提供保留文本/关系的显式重建路径；验收维度改变、同维换模型、既有数据库、重开及迁移中断。
 - 依据：[MemoryStore](../packages/aster-memory/src/aster_memory/store.py)、[向量后端](../packages/aster-memory/src/aster_memory/vector_backends.py)、[MemoryManager](../packages/aster-memory/src/aster_memory/manager.py)。
+- 实施状态：库级修复与本地验收已完成，见文末 M1a 实施记录；终端记忆仍归 M1b。
 
 ### M1b：接入可选的终端项目记忆
 
@@ -154,3 +155,14 @@
 - 本批已实现 Q1 的 Rust 格式修复，以及 Q2 的默认记忆测试收集、Windows 记忆回归、Linux 原生终端 job 和 WSL 宿主配置修复。首轮 Windows fmt/Clippy、628 项 Rust 测试与 160 项交付/启动/ACP 回归已通过；首轮默认测试收集选中 16,359 项，其中记忆包 366 项。
 - 新增的 Windows 记忆 CI 在候选 `f9e2be2a` 捕获一项测试时间假设：连续创建的新旧事实可能同时间，随机 ID 决定排序。冻结时钟可复现；测试现已显式设置先后时间，并覆盖两种 ID 顺序，保留原断言。修复后本地记忆回归 354 passed、13 skipped、1 integration deselected；默认收集选中 16,360 项，其中记忆包 367 项。生产排序未改动，M1a 仍未修复。失败证据见 [CI 44967334424](https://github.com/Ykrsuao/aster-agent/actions/runs/44967334424/job/137039226272)。
 - 最终完成状态还应关联同一干净候选的安装/升级与 CI 结果，后续证据汇总在 [质量基线 PR](https://github.com/Ykrsuao/aster-agent/pull/1)。远端旧 SHA 的失败与新候选验证须分别记录；同版本重装不得记作跨版本升级。
+
+## M1a 实施与验收（2026-11-22）
+
+- 实现提交：[3c0673b5](https://github.com/Ykrsuao/aster-agent/commit/3c0673b55a59c7a0b944d25f66e20ab6cb9bffbd)，基于质量基线 `aa08ee4c`。以上初评和基线验证描述保留为历史记录，不代表此提交仍允许混维写入。
+- 数据库现在保存 embedding 身份、维度和索引 namespace。具名 embedder、raw 向量和无身份旧库不能凭相同维度互相认领；查询与 embedding 写入拒绝身份/维度不符、错误形状和非有限数值。已有库未声明身份时仍可查看文本、关系及原始向量，不代表数据库绝对只读。
+- 新增显式 `rebuild_embeddings()`：从一致快照保留文本、完整元数据、ID、关系、维护历史及归档记录，重新生成全部向量后发布到新文件。目标已存在、并发创建、失败或中断均不覆盖原库或目标；重建不自动切换宿主配置。说明及示例见 [记忆库兼容与重建](../packages/aster-memory/src/aster_memory/README.md#embedding-compatibility-and-rebuilding)。
+- 旧版/新版对照探针：2 维库重开后尝试写入 3 维记录，`aa08ee4c` 接受并留下 2 条记录；新实现抛出 `EmbeddingMismatchError`，只留下原有 1 条记录，原文本均保留。
+- 本地最终回归：记忆包与 `test_coding_agent.py` 共 **498 passed、13 skipped、2 deselected**；临时安装真实 sqlite-vec 的定向回归 **94 passed、9 skipped**。两组有重叠，不相加。后者的跳过均依赖未安装的 Chroma；其客户端交互、同服务隔离及复制库回归使用离线替身验证。
+- 独立审查补入并验证 stale 句柄、事务回滚、迁移中断清理、索引初始化恢复，以及同一 Chroma 服务下不同路径的数据库副本隔离。跨主机同 namespace、同绝对路径的独立副本仍需使用不同 `VectorConfig.collection`。
+- 变更范围 Ruff、格式及差异检查通过；全部 1,347 个受控 Python 文件（含新增回归）通过 SPDX 检查。原始全工作区 SPDX 命令会遇到既有验收目录内刻意生成的非 UTF-8 文件；该目录保留，不纳入交付。JUnit 保存在本地 `.review-temp/m1a-20261122/`，不随源码提交，远端证据以此分支的 PR 检查为准。
+- 升级边界：打开库会升级到 schema v3，旧版库代码拒绝打开，降级前需保留原始备份；重建发布要求支持硬链接的文件系统。未调用真实 embedding API，未验收真实 Chroma 服务，未接入终端长期记忆，也未扩大记忆包的完整平台支持声明。
