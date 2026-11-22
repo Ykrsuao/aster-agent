@@ -195,3 +195,4 @@
 - 首轮 Windows CI 与安装恢复成功，但包内 `MANIFEST.dirty=true`：既有流程将 memory/security JUnit 写入源码目录的未忽略 `artifacts/`。已把这两份报告移到运行器临时目录，并增加 bundle commit 必须匹配 CI checkout、dirty 必须为 false 的门槛；保留初轮产物，最终以修正后的候选重新验收。
 - 第二轮 Windows 在 `test_reconsolidation_allows_reconciler_to_mutate_input_copy` 捕获另一条既有测试的顺序假设：重整按 `(created_at, id)` 排序，测试却把插入首项当作排序首项。同时间戳且 ID 反序的受控探针 5/5 复现，其余三格 15/15 通过。测试现明确输入先后时间，并覆盖两种 ID 顺序；保留更新原 ID、未归档及计数断言，生产排序不变。修后探针 20/20、reflection 回归 32 passed，完整记忆包 **483 passed、13 skipped、1 deselected**。失败与修复验证单独保留，不把第二轮结果当最终候选成功。
 - 验收边界：OAuth 不在 ACP 中自动刷新，尚未端到端验收；没有调用真实模型 API、真实用户 MCP 服务或持久凭据。SSE 沿用现有支持，本项新增的完整本地 wire 旅程使用 stdio 与显式凭据 HTTP。
+- 用户入口补验复现了忙碌时 `/mcp` 被编辑器提交白名单拦截：此前测试直接调用命令路由，未经过按 Enter 的路径。现放行只读 MCP 列表，新增空闲/忙碌的真实提交入口回归，并让前台/后台忙碌重连拒绝测试也经过该入口。修前用例失败，修后 14 项 MCP 定向测试、fmt 与 Clippy 通过；该修改须以其后续候选 CI 验收，先前成功不覆盖本次修正。

@@ -82,6 +82,32 @@ fn mcp_status_is_read_only_during_a_prompt_and_escape_keeps_input_and_attachment
 }
 
 #[test]
+fn mcp_editor_submission_opens_status_while_foreground_work_continues() {
+    for foreground in [false, true] {
+        let mut c = ready();
+        if foreground {
+            c.input("current task".into());
+        }
+        let phase = c.state.phase;
+        let turn = c.state.active_turn_id.clone();
+        c.paste("/mcp".into());
+        let actions = key(&mut c, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            c.state.overlay,
+            Some(Overlay::Mcp),
+            "foreground={foreground}"
+        );
+        let params = register(&mut c, 1, actions, "_aster/session/mcp/status");
+        assert_eq!(params, json!({"sessionId":"session-a"}));
+        answer(&mut c, 1, status("ready"));
+        assert_eq!(c.state.choices().len(), 2);
+        assert_eq!(c.state.phase, phase);
+        assert_eq!(c.state.active_turn_id, turn);
+        assert_eq!(c.state.editor.lines(), &[""]);
+    }
+}
+
+#[test]
 fn mcp_retry_rejects_foreground_and_background_work_but_status_still_works() {
     for foreground in [false, true] {
         let mut c = ready();
@@ -91,7 +117,9 @@ fn mcp_retry_rejects_foreground_and_background_work_but_status_still_works() {
             c.state.tasks = json!({"jobs":[{"id":"worker","status":"running","canStop":true}]});
         }
         let phase = c.state.phase;
-        assert!(c.input("/mcp reconnect local".into()).is_empty());
+        c.paste("/mcp reconnect local".into());
+        assert!(key(&mut c, KeyCode::Enter, KeyModifiers::NONE).is_empty());
+        assert_eq!(c.state.overlay, Some(Overlay::Mcp));
         assert!(c
             .state
             .mcp

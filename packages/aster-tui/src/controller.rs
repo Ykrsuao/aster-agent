@@ -5252,6 +5252,7 @@ impl Controller {
                     | "/sandbox"
                     | "/tasks"
                     | "/skills"
+                    | "/mcp"
                     | "/stop"
             )
         {
