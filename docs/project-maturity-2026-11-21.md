@@ -47,9 +47,10 @@
 ### U1：让文本技能从“可浏览”变成“可明确使用”
 
 - 类型：确认的能力断点；优先级 P1。
-- 现状：`SKILL.md` 注册为未激活的 `cmd.<id>`；可用技能上下文将 `cmd.*` 视为 slash command 而排除，但编码宿主的 slash 路由只发现 `@slash_command`，`TextSkill` 没有该命令。`/skills` 当前是只读浏览器。
-- 验证：离线注册现有文本技能后，已加载 1、已激活 0、宿主 slash commands 0，且技能名不在 `status()` 中。对象仍可能通过 `doc(self)` 被发现，不能据此声称模型完全看不到技能。
-- 完成标准：提供一个明确的文本技能调用流程，复用现有注册和消息路由；用户能选择技能并将其用于任务；验收缺失技能、同名冲突、取消和重连。浏览说明不自动运行脚本。
+- 实施前：`SKILL.md` 注册为未激活的 `cmd.<id>`；可用技能上下文将 `cmd.*` 视为 slash command 而排除，但编码宿主的 slash 路由只发现 `@slash_command`，`TextSkill` 没有该命令。`/skills` 是只读浏览器。
+- 初次验证：离线注册现有文本技能后，已加载 1、已激活 0、宿主 slash commands 0，且技能名不在 `status()` 中。对象仍可能通过 `doc(self)` 被发现，不能据此声称模型完全看不到技能。
+- 当前实现：直接输入 `/技能名 [任务]`、在任务中提及 `$技能名`，或由模型按任务从技能简介中选择、按需读取正文。显式调用将完整说明、来源目录和原始任务送入同一回合，保留附件与现有权限；终端提供技能补全。读取技能不自动激活或运行脚本，实施与验收记录见文末。
+- 完成标准：复用现有注册和消息路由，支持显式选择与按需读取；验收缺失技能、同名冲突、调用策略、多技能、取消和恢复。浏览说明不自动运行脚本；离线流程验证与真实模型选用效果分别记录。
 - 依据：[注册表](../src/aster/skill_registry.py)、[TextSkill](../src/aster/skill.py)、[编码 slash 路由](../packages/aster-cli/src/aster_cli/coding/slash_commands.py)、[终端技能说明](../packages/aster-tui/README.md)。
 
 ### U2：接通原生终端的 MCP 配置与连接生命周期
@@ -166,3 +167,15 @@
 - 独立审查补入并验证 stale 句柄、事务回滚、迁移中断清理、索引初始化恢复，以及同一 Chroma 服务下不同路径的数据库副本隔离。跨主机同 namespace、同绝对路径的独立副本仍需使用不同 `VectorConfig.collection`。
 - 变更范围 Ruff、格式及差异检查通过；全部 1,347 个受控 Python 文件（含新增回归）通过 SPDX 检查。原始全工作区 SPDX 命令会遇到既有验收目录内刻意生成的非 UTF-8 文件；该目录保留，不纳入交付。JUnit 保存在本地 `.review-temp/m1a-20261122/`，不随源码提交，远端证据以此分支的 PR 检查为准。
 - 升级边界：打开库会升级到 schema v3，旧版库代码拒绝打开，降级前需保留原始备份；重建发布要求支持硬链接的文件系统。未调用真实 embedding API，未验收真实 Chroma 服务，未接入终端长期记忆，也未扩大记忆包的完整平台支持声明。
+
+## U1 实施与验收（2026-11-22）
+
+- 实现提交：[6ad1d18a](https://github.com/Ykrsuao/aster-agent/commit/6ad1d18a02c5d6a8d23dc63d404a4dc470835412)，基于 M1a 候选 `25bd8b3d`。质量基线与 M1a 仍由前置草稿 PR #1/#2 交付；本项沿用其提交，不把前置验证计入 U1。
+- 使用 `/技能名 [任务]` 或在任务中提及 `$技能名`；也可让模型从名称、完整简介和来源目录中选择相关技能，再调用 `read_text_skill()` 读取正文。显式选择将完整说明、来源目录、字面任务参数与附件送入同一可取消回合；多技能先全部校验，再一次入队，重复别名去重。
+- 终端补全只替换光标处的 token，保留前后多行、附件与撤销。每个技能只展示一个主项，支持目录 ID 与完整 registry 名别名；未知命令和首轮命令目录未就绪时保留草稿。内置/Python 命令保留优先级，歧义及禁用的用户调用在模型执行前报错。
+- 支持 `user-invocable`、`disable-model-invocation` 和 `agents/openai.yaml` 的 `policy.allow_implicit_invocation`；任一自动调用策略禁用即不进入自动目录，非法布尔配置拒绝发现或保留 reload 前对象。未选择的正文不预加载；读取技能不自动激活或运行脚本，恢复会话重新发现当前文件。
+- 用户流程回归覆盖新建/恢复的首轮目录、缺失/冲突/策略、多技能原子入队、字面参数、文本/图片附件、取消清理及恢复后读取新版技能。真实 Rust → ACP 子进程验证直接命令、内联提及、附件与关闭；CodeAct 两步测试验证先读简介再读正文。代码块、混合缩进、转义、路径及 Unicode 名称有独立回归。
+- 最终本地 Python 回归：核心技能 **192 passed**；完整 CLI **2,245 passed、41 skipped、1 deselected**；完整 ACP **931 passed、9 deselected、3 xfailed**。新增围栏容器反例修正后，已重新运行受影响的完整 CLI/ACP；定向回归与全套有重叠，不累加。JUnit 保存在本地 `.review-temp/u1-20261122/*-direct-final.xml`。
+- 最终 Rust 回归 **643 passed、2 ignored**；fmt、Clippy（`-D warnings`）和 release build 通过。变更范围 11 个 Python 文件的 Ruff 与格式检查通过，全部 **1,348** 个受控 Python 文件通过 SPDX 检查；本地验收目录不属于交付源码。
+- 旧交互候选曾在已有 Windows 进程清理测试 `unexpected_backend_exit_stops_unmanaged_descendants` 中出现 `Backend processes started while cleanup was preparing`；后续完整验证通过。本项未修改 `process_tree.rs`，时序根因未证实，不把后续通过记作该竞态已修复。原始与最终日志保存在本地 `.review-temp/`，远端证据以本项最终候选 PR 检查为准。
+- 验收边界：模型使用离线替身，未调用真实模型 API；自动选用的实际质量仍需真实任务验证。Plan 模式仍限制模型生成执行，自动读取技能受该限制；显式调用继续走宿主路由。本项没有接入终端长期记忆或更换 embedding 配置。
