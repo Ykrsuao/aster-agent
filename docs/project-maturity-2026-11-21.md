@@ -190,7 +190,8 @@
 - 固定安全错误只暴露可理解原因和 HTTP 状态码，不包含响应正文、URL、header/env 或原始异常链。MCP 对象与回调排除持久快照，恢复按当前配置重建；真实子进程验收证明普通用户状态仍可保存、恢复。
 - 本地核心 MCP **313 passed**；registry 两文件 **75 passed**；完整 CLI **2,246 passed、41 skipped、1 deselected**；完整 ACP **964 passed、9 deselected、3 xfailed**。ACP 全套后补入不可信配置元数据读取失败的容错，最终 MCP/workspace trust **59 passed**；registry 的最后 context 清理修复由上述 75 项覆盖。各范围有重叠，不累加。
 - 真实 Python ACP → 本地 MCP wire **5 passed、14 deselected**，覆盖 stdio cwd、字面环境值、显式凭据 HTTP、401 脱敏、信任/优先级/重复名称、失败重试、快照恢复和关闭清理。模型使用 FakeLLM；没有连接真实用户服务。
-- Windows Rust 全套 **656 passed、2 ignored**；最终后端的 Rust → ACP → 本地 MCP 回归 **1 passed**。Rust fmt、Clippy（`-D warnings`）与 release build 通过；18 个变更 Python 文件的 Ruff/format、差异检查与全部 **1,354** 个受控 Python 文件的 SPDX 检查通过。
+- Windows Rust 全套 **656 passed、2 ignored**；最终后端的 Rust → ACP → 本地 MCP 回归 **1 passed**。Rust fmt、Clippy（`-D warnings`）与 release build 通过；19 个变更 Python 文件（含 CI 后补的记忆测试）的 Ruff/format、差异检查与全部 **1,354** 个受控 Python 文件的 SPDX 检查通过。
 - 本地原始证据位于 `.review-temp/u2-20261122/` 与 `.review-temp/u2-rust-20261122/`，不随源码提交。远端 CI、WSL 与 Windows bundle 安装验收须绑定本项最终候选 SHA，并记录在本分支的草稿 PR；前置 U1 成功不代替 U2 结果。Windows seed/reinstall/verify 仍只证明同版本重装。
 - 首轮 Windows CI 与安装恢复成功，但包内 `MANIFEST.dirty=true`：既有流程将 memory/security JUnit 写入源码目录的未忽略 `artifacts/`。已把这两份报告移到运行器临时目录，并增加 bundle commit 必须匹配 CI checkout、dirty 必须为 false 的门槛；保留初轮产物，最终以修正后的候选重新验收。
+- 第二轮 Windows 在 `test_reconsolidation_allows_reconciler_to_mutate_input_copy` 捕获另一条既有测试的顺序假设：重整按 `(created_at, id)` 排序，测试却把插入首项当作排序首项。同时间戳且 ID 反序的受控探针 5/5 复现，其余三格 15/15 通过。测试现明确输入先后时间，并覆盖两种 ID 顺序；保留更新原 ID、未归档及计数断言，生产排序不变。修后探针 20/20、reflection 回归 32 passed，完整记忆包 **483 passed、13 skipped、1 deselected**。失败与修复验证单独保留，不把第二轮结果当最终候选成功。
 - 验收边界：OAuth 不在 ACP 中自动刷新，尚未端到端验收；没有调用真实模型 API、真实用户 MCP 服务或持久凭据。SSE 沿用现有支持，本项新增的完整本地 wire 旅程使用 stdio 与显式凭据 HTTP。
