@@ -84,6 +84,7 @@ class RetrievalEngine:
         *,
         access_log_cap: int = 64,
     ) -> None:
+        store.bind_embeddings(embedder.identity, embedder.dim)
         self.store = store
         self.embedder = embedder
         self.config = config
@@ -98,11 +99,13 @@ class RetrievalEngine:
         query_cues: set[str] | None,
     ) -> tuple[list[tuple[str, float]], dict[str, Memory], dict[str, dict]]:
         """Shared scoring pipeline: ranked (id, score), memories, per-id diagnostics."""
+        self.store.bind_embeddings(self.embedder.identity, self.embedder.dim)
         cfg = self.config
         if self.store.count() == 0 or not query.strip():
             return [], {}, {}
 
         qvec = self.embedder.embed(query)
+        self.store.bind_embeddings(self.embedder.identity, self.embedder.dim)
 
         # ---- stage 1: hybrid candidate pool (dense ∪ sparse) ----
         dense = self.store.knn(qvec, cfg.n_dense, owner=owner)

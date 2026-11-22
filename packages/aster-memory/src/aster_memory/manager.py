@@ -202,9 +202,14 @@ class MemoryManager:
         return ForgettingEngine(self.store, self.config.forget, owner=self.role)
 
     def _make_store(self, agent: Agent) -> MemoryStore:
-        """Open explicit or agent-default storage using the configured embedding dimension."""
+        """Open storage bound to the actual embedder's identity and dimension."""
         path = self.config.path or self._default_path(agent)
-        return MemoryStore(path, vector_config=self.config.vector, embedding_dim=self.embedder.dim)
+        return MemoryStore(
+            path,
+            vector_config=self.config.vector,
+            embedding_dim=self.embedder.dim,
+            embedding_identity=self.embedder.identity,
+        )
 
     # ------------------------------------------------------------------
     # install / uninstall
@@ -294,6 +299,7 @@ class MemoryManager:
         references: list[str] | None = None,
     ) -> str:
         """Encode a memory (dedup-on-write). Returns the memory id."""
+        self.store.bind_embeddings(self.embedder.identity, self.embedder.dim)
         mem = Memory(
             content=content,
             type=type,
@@ -306,6 +312,7 @@ class MemoryManager:
             references=[capture(self.agent, self.store, r) for r in references or []],
         )
         emb = self.embedder.embed(mem.embedding_text())
+        self.store.bind_embeddings(self.embedder.identity, self.embedder.dim)
 
         if dedup and self.store.count() > 0:
             # Dedup within own scope only — never reinforce another agent's memory.
@@ -436,6 +443,7 @@ class MemoryManager:
         references: list[str] | None = None,
     ) -> bool:
         """Refine a memory, refreshing derived metadata and changed embedding input."""
+        self.store.bind_embeddings(self.embedder.identity, self.embedder.dim)
         m = self._find(memory_id)
         if m is None:
             return False
@@ -458,6 +466,7 @@ class MemoryManager:
                 if embedding_after != embedding_before
                 else None
             )
+            self.store.bind_embeddings(self.embedder.identity, self.embedder.dim)
             with self.store.edit(m.id, embedding=embedding) as current:
                 if current is None:
                     return False

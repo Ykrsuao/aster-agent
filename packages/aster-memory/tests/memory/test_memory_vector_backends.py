@@ -6,6 +6,12 @@ The numpy backend always runs; the others ``importorskip`` their optional
 dependency so the suite stays green whether or not they are installed.
 """
 
+import shutil
+import sys
+from contextlib import closing
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import numpy as np
 import pytest
 from aster_memory import (
@@ -164,3 +170,174 @@ def test_npindex_unit():
     idx.add("a", np.array([1.0, 0.0], dtype=np.float32))
     idx.add("b", np.array([0.0, 1.0], dtype=np.float32))
     assert idx.query(np.array([1.0, 0.0], dtype=np.float32), 1)[0][0] == "a"
+
+
+@pytest.fixture
+def fake_chroma(monkeypatch):
+    class Collection:
+        def __init__(self, name):
+            self.name = name
+            self.index = NumpyVectorIndex()
+
+        def upsert(self, *, ids, embeddings):
+            for id, vector in zip(ids, embeddings, strict=True):
+                self.index.add(id, np.asarray(vector))
+
+        def delete(self, *, ids):
+            for id in ids:
+                self.index.remove(id)
+
+        def query(self, *, query_embeddings, n_results):
+            ranked = self.index.query(np.asarray(query_embeddings[0]), n_results)
+            return {
+                "ids": [[id for id, _ in ranked]],
+                "distances": [[1.0 - score for _, score in ranked]],
+            }
+
+        def count(self):
+            return len(self.index)
+
+    collections = {}
+    client = Mock()
+
+    def get_collection(name, metadata):
+        return collections.setdefault(name, Collection(name))
+
+    client.get_or_create_collection.side_effect = get_collection
+    module = SimpleNamespace(
+        HttpClient=Mock(return_value=client),
+        PersistentClient=Mock(return_value=client),
+        EphemeralClient=Mock(return_value=client),
+    )
+    monkeypatch.setitem(sys.modules, "chromadb", module)
+    monkeypatch.setitem(sys.modules, "chromadb.config", SimpleNamespace(Settings=Mock()))
+    return module
+
+
+@pytest.fixture
+def fake_sqlite_vec(monkeypatch):
+    module = SimpleNamespace(load=Mock(), serialize_float32=Mock())
+    monkeypatch.setitem(sys.modules, "sqlite_vec", module)
+    return module
+
+
+@pytest.mark.parametrize("backend", ["chroma_embedded", "chroma_http"])
+def test_chroma_namespace_isolates_stores_and_reuses_the_same_store(fake_chroma, tmp_path, backend):
+    config = VectorConfig(backend=backend, collection="shared")
+    first = make_vector_index(
+        config, dim=2, path=str(tmp_path / "memory.sqlite"), namespace="a" * 32
+    )
+    reopened = make_vector_index(
+        config, dim=2, path=str(tmp_path / "memory.sqlite"), namespace="a" * 32
+    )
+    second = make_vector_index(config, dim=3, path=str(tmp_path / "memory.db"), namespace="b" * 32)
+    assert first._collection is reopened._collection
+    assert first._collection is not second._collection
+    assert first._collection.name.startswith("shared-")
+    assert second._collection.name.startswith("shared-")
+    if backend == "chroma_embedded":
+        paths = [call.kwargs["path"] for call in fake_chroma.PersistentClient.call_args_list]
+        assert len(set(paths)) == 1  # The SQLite suffixes map to the same Chroma directory.
+
+
+def test_chroma_without_namespace_keeps_persistent_names_and_isolates_ephemeral(fake_chroma):
+    config = VectorConfig(backend="chroma_embedded", collection="shared")
+    persistent = make_vector_index(config, dim=2, path="memory.sqlite")
+    first = make_vector_index(config, dim=2)
+    second = make_vector_index(config, dim=2)
+    assert persistent._collection.name == "shared"
+    assert first._collection is not second._collection
+
+
+def test_chroma_bound_ephemeral_namespace_is_stable(fake_chroma):
+    config = VectorConfig(backend="chroma_embedded", collection="shared")
+    first = make_vector_index(config, dim=2, namespace="a" * 32)
+    reopened = make_vector_index(config, dim=2, namespace="A" * 32)
+    assert first._collection is reopened._collection
+
+
+def test_sqlite_vec_namespace_isolates_tables(fake_sqlite_vec):
+    conn = Mock()
+    config = VectorConfig(backend="sqlite_vec")
+    first = make_vector_index(config, dim=2, conn=conn, namespace="a" * 32)
+    reopened = make_vector_index(config, dim=2, conn=conn, namespace="A" * 32)
+    second = make_vector_index(config, dim=3, conn=conn, namespace="b" * 32)
+    assert first._table == reopened._table == f"vec_memories_{'a' * 32}"
+    assert second._table == f"vec_memories_{'b' * 32}"
+    statements = [call.args[0] for call in conn.execute.call_args_list]
+    assert first._table in statements[0]
+    assert first._table in statements[1]
+    assert second._table in statements[2]
+    assert "embedding float[3]" in statements[2]
+
+
+def test_sqlite_vec_without_namespace_keeps_table_name(fake_sqlite_vec):
+    index = make_vector_index(VectorConfig(backend="sqlite_vec"), dim=2, conn=Mock())
+    assert index._table == "vec_memories"
+
+
+@pytest.mark.parametrize("backend", ["sqlite_vec", "chroma_embedded", "chroma_http"])
+@pytest.mark.parametrize(
+    "namespace", ["", "g" * 32, "a" * 31, "a" * 33, "a'; DROP TABLE memories; --"]
+)
+def test_persistent_backend_rejects_invalid_namespace_before_loading_dependencies(
+    backend, namespace
+):
+    with pytest.raises(ValueError, match="namespace"):
+        make_vector_index(VectorConfig(backend=backend), dim=2, conn=Mock(), namespace=namespace)
+
+
+def test_numpy_ignores_namespace():
+    assert isinstance(make_vector_index(VectorConfig(), namespace="a" * 32), NumpyVectorIndex)
+
+
+@pytest.mark.parametrize("backend", ["chroma_embedded", "chroma_http"])
+@pytest.mark.parametrize("copy_database", [False, True], ids=["fresh", "copied"])
+def test_chroma_store_isolates_copied_or_fresh_databases(
+    fake_chroma, tmp_path, backend, copy_database
+):
+    """Exercise the real store/adapter with an offline Chroma protocol double."""
+    source_path = tmp_path / "memory.sqlite"
+    other_path = tmp_path / "memory.db"
+    config = VectorConfig(backend=backend, collection="shared")
+    options = {
+        "vector_config": config,
+        "embedding_identity": "test:v1",
+        "embedding_dim": 2,
+    }
+    with closing(MemoryStore(source_path, **options)) as initial:
+        initial.add(Memory(id="original", content="original"), np.array([1.0, 0.0]))
+        initial_collection = initial._index._collection.name
+    if copy_database:
+        shutil.copyfile(source_path, other_path)
+
+    with (
+        closing(MemoryStore(source_path, **options)) as source,
+        closing(MemoryStore(other_path, **options)) as other,
+    ):
+        assert source._index._collection.name == initial_collection
+        other.add(Memory(id="other-only", content="other only"), np.array([0.0, 1.0]))
+
+        assert source.get("other-only") is None
+        assert source.knn(np.array([0.0, 1.0]), 1) == [("original", 0.0)]
+        assert other.knn(np.array([0.0, 1.0]), 1) == [("other-only", 1.0)]
+        assert source._index._collection is not other._index._collection
+        if backend == "chroma_embedded":
+            paths = [call.kwargs["path"] for call in fake_chroma.PersistentClient.call_args_list]
+            assert len(set(paths)) == 1
+
+
+@pytest.mark.parametrize("backend", ["chroma_embedded", "chroma_http"])
+@pytest.mark.parametrize("alias", ["relative", "windows_case"])
+def test_chroma_namespace_normalizes_store_paths(
+    fake_chroma, monkeypatch, tmp_path, backend, alias
+):
+    if alias == "windows_case" and sys.platform != "win32":
+        pytest.skip("Windows paths are case insensitive")
+    monkeypatch.chdir(tmp_path)
+    path = str(tmp_path / "memory.sqlite")
+    alias_path = "./memory.sqlite" if alias == "relative" else path.upper()
+    config = VectorConfig(backend=backend, collection="shared")
+    first = make_vector_index(config, dim=2, path=path, namespace="a" * 32)
+    reopened = make_vector_index(config, dim=2, path=alias_path, namespace="a" * 32)
+    assert first._collection is reopened._collection

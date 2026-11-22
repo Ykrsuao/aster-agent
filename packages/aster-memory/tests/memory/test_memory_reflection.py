@@ -21,8 +21,8 @@ def emb():
 
 
 @pytest.fixture
-def store():
-    s = MemoryStore(":memory:")
+def store(emb):
+    s = MemoryStore(":memory:", embedding_identity=emb.identity, embedding_dim=emb.dim)
     yield s
     s.close()
 
@@ -272,7 +272,9 @@ def test_reconsolidation_can_reuse_an_original_id(store, emb):
 def test_reconsolidation_discards_result_after_source_changes(
     tmp_path, emb, monkeypatch, phase, change
 ):
-    store = MemoryStore(tmp_path / "shared.sqlite")
+    store = MemoryStore(
+        tmp_path / "shared.sqlite", embedding_identity=emb.identity, embedding_dim=emb.dim
+    )
     other = MemoryStore(tmp_path / "shared.sqlite")
     try:
         originals = [_add(store, emb, f"deployment host {name}") for name in ("alpha", "beta")]

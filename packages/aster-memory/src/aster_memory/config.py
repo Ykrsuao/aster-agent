@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class ScoringWeights(BaseModel, frozen=True):
@@ -69,8 +69,8 @@ class EmbeddingConfig(BaseModel, frozen=True):
     model: str = "nvidia/nv-embedqa-e5-v5"  # used when backend == "litellm"
     endpoint: str | None = None  # api_base override for litellm (e.g. the gateway /v1)
     api_key: str | None = None
-    dim: int = 256  # hashing dimension (litellm infers from the response)
-    dimensions: int | None = None  # OpenAI 'dimensions' param (3-large supports reduction)
+    dim: int = Field(default=256, gt=0)  # hashing dimension (litellm infers from the response)
+    dimensions: int | None = Field(default=None, gt=0)  # OpenAI 'dimensions' param
     batch_size: int = 64
     timeout: float = 60.0  # per-request HTTP timeout for litellm.embedding (avoid silent hangs)
     num_retries: int = 2  # retry transient embedding failures (incl. timeouts) before raising

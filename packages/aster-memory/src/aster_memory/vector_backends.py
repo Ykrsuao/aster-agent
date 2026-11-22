@@ -18,6 +18,9 @@ Select one with ``MemoryConfig.vector.backend``; ``make_vector_index`` dispatche
 
 from __future__ import annotations
 
+import hashlib
+import os
+import re
 import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -26,6 +29,14 @@ import numpy as np
 
 if TYPE_CHECKING:
     from aster_memory.config import VectorConfig
+
+
+def _validate_namespace(namespace: str | None) -> str | None:
+    if namespace is None:
+        return None
+    if not isinstance(namespace, str) or re.fullmatch(r"[0-9a-fA-F]{32}", namespace) is None:
+        raise ValueError("Vector index namespace must be 32 hexadecimal characters")
+    return namespace.lower()
 
 
 @runtime_checkable
@@ -93,7 +104,17 @@ class SqliteVecVectorIndex:
     ``cos = 1 - d^2/2``.
     """
 
-    def __init__(self, conn: sqlite3.Connection, dim: int, table: str = "vec_memories") -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        dim: int,
+        table: str = "vec_memories",
+        *,
+        namespace: str | None = None,
+    ) -> None:
+        namespace = _validate_namespace(namespace)
+        if namespace is not None:
+            table = f"{table}_{namespace}"
         if dim <= 0:
             raise ValueError("sqlite-vec backend requires a positive embedding dim")
         try:
@@ -150,8 +171,21 @@ class ChromaVectorIndex:
     """Vector index backed by ChromaDB (cosine space)."""
 
     def __init__(
-        self, config: VectorConfig, *, dim: int | None = None, path: str = ":memory:"
+        self,
+        config: VectorConfig,
+        *,
+        dim: int | None = None,
+        path: str = ":memory:",
+        namespace: str | None = None,
     ) -> None:
+        namespace = _validate_namespace(namespace)
+        if namespace is not None and path and path != ":memory:":
+            # Database copies retain the stored namespace; include their resolved path
+            # so independent SQLite files cannot share a Chroma collection.
+            canonical_path = os.path.normcase(str(Path(path).resolve()))
+            namespace = hashlib.sha256(
+                namespace.encode("ascii") + b"\0" + os.fsencode(canonical_path)
+            ).hexdigest()[:32]
         try:
             import chromadb
             from chromadb.config import Settings
@@ -161,7 +195,7 @@ class ChromaVectorIndex:
                 "Install it with: uv pip install chromadb"
             ) from e
         settings = Settings(anonymized_telemetry=False)
-        name = config.collection
+        name = config.collection if namespace is None else f"{config.collection}-{namespace}"
         if config.backend == "chroma_http":
             self._client = chromadb.HttpClient(
                 host=config.host or "localhost", port=config.port or 8000, settings=settings
@@ -173,10 +207,11 @@ class ChromaVectorIndex:
             # Ephemeral clients share one in-process system, so a fixed collection
             # name leaks dim/contents across independent in-memory stores. Give each
             # store its own collection.
-            import uuid
-
             self._client = chromadb.EphemeralClient(settings=settings)
-            name = f"{config.collection}-{uuid.uuid4().hex[:8]}"
+            if namespace is None:
+                import uuid
+
+                name = f"{name}-{uuid.uuid4().hex[:8]}"
         self._collection = self._client.get_or_create_collection(
             name=name, metadata={"hnsw:space": "cosine"}
         )
@@ -209,8 +244,9 @@ def make_vector_index(
     dim: int | None = None,
     conn: sqlite3.Connection | None = None,
     path: str = ":memory:",
+    namespace: str | None = None,
 ) -> VectorIndex:
-    """Build the vector index named by ``config.backend``."""
+    """Build a vector index, isolating persistent data by the store namespace."""
     backend = config.backend
     if backend == "numpy":
         return NumpyVectorIndex()
@@ -219,7 +255,7 @@ def make_vector_index(
             raise ValueError("sqlite_vec backend needs the store's sqlite connection")
         if dim is None:
             raise ValueError("sqlite_vec backend needs the embedding dim")
-        return SqliteVecVectorIndex(conn, dim)
+        return SqliteVecVectorIndex(conn, dim, namespace=namespace)
     if backend in ("chroma_embedded", "chroma_http"):
-        return ChromaVectorIndex(config, dim=dim, path=path)
+        return ChromaVectorIndex(config, dim=dim, path=path, namespace=namespace)
     raise ValueError(f"Unknown vector backend: {backend!r}")

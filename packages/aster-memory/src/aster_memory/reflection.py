@@ -66,6 +66,7 @@ class ReflectionEngine:
         *,
         owner: str | None = None,
     ) -> None:
+        store.bind_embeddings(embedder.identity, embedder.dim)
         self.store = store
         self.embedder = embedder
         self.config = config
@@ -99,6 +100,7 @@ class ReflectionEngine:
         an interrupted pass followed by a full pass converges to the same
         state as a never-interrupted one.
         """
+        self.store.bind_embeddings(self.embedder.identity, self.embedder.dim)
         t0 = time.perf_counter()
         report = ReflectionReport()
 
@@ -270,6 +272,7 @@ class ReflectionEngine:
                     if c.id != consolidated.id:
                         consolidated.add_edge(c.id, EdgeType.REFINES, 1.0)
                 embedding = self.embedder.embed(consolidated.embedding_text())
+                self.store.bind_embeddings(self.embedder.identity, self.embedder.dim)
             with self.store.transaction():
                 # The reconciler and embedder ran without holding a write lock.
                 if any(
@@ -396,6 +399,7 @@ class ReflectionEngine:
             if self.owner is not None and not nm.owner:
                 nm.owner = self.owner
             emb = self.embedder.embed(nm.embedding_text())
+            self.store.bind_embeddings(self.embedder.identity, self.embedder.dim)
             # Link the abstraction back only to episodes the reasoner saw.
             for ep in sliced:
                 nm.add_edge(ep.id, EdgeType.DERIVED_FROM, 1.0)

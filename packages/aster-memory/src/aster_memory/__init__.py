@@ -43,6 +43,7 @@ from aster_memory.descriptors import (
 )
 from aster_memory.embeddings import (
     Embedder,
+    EmbeddingMismatchError,
     HashingEmbedder,
     LiteLLMEmbedder,
     get_embedder,
@@ -107,6 +108,7 @@ __all__ = [
     "ObservabilityConfig",
     # embeddings
     "Embedder",
+    "EmbeddingMismatchError",
     "HashingEmbedder",
     "LiteLLMEmbedder",
     "get_embedder",

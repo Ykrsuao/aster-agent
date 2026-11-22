@@ -36,8 +36,8 @@ def emb():
 
 
 @pytest.fixture
-def store():
-    s = MemoryStore(":memory:")
+def store(emb):
+    s = MemoryStore(":memory:", embedding_identity=emb.identity, embedding_dim=emb.dim)
     yield s
     s.close()
 

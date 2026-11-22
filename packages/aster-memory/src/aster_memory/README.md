@@ -350,7 +350,9 @@ protocol (`vector_backends.py`):
 | `chroma_embedded` | Chroma over a local dir | `chromadb` |
 | `chroma_http` | a running Chroma server | `chromadb` |
 
-All four return identical ranking; swap freely. Embeddings (`embeddings.py`):
+Indexes use cosine similarity; approximate backends can return different neighbors.
+An index can be rebuilt from SQLite's vector blobs, but changing the embedding
+model requires re-embedding the text. Embeddings (`embeddings.py`):
 
 | `embedding.backend` | what |
 |---|---|
@@ -367,6 +369,87 @@ MemoryConfig(
                               dimensions=1024),
 )
 ```
+
+### Embedding compatibility and rebuilding
+
+Each database binds a stable embedding identity and dimension. `MemoryManager`,
+retrieval and reflection check this contract; vector writes and queries validate
+their shape and reject NaN/Inf before modifying records. A different model is
+incompatible even when its vectors have the same dimension.
+
+The offline hashing identity versions its algorithm. LiteLLM's identity hashes
+the normalized model name, endpoint and requested `dimensions`; credentials,
+timeouts and retry settings are excluded. The actual dimension is recorded
+separately and cannot change after a successful response. Use a pinned model
+revision: a provider replacing the model behind an unchanged alias/endpoint
+cannot be detected from those settings. Custom embedders must implement the
+`Embedder` protocol's non-empty, stable `identity` property and change it whenever
+the model or preprocessing changes.
+
+For direct store access with an embedder, declare both parts of the contract:
+
+```python
+from aster_memory import HashingEmbedder, MemoryStore
+
+embedder = HashingEmbedder(dim=256)
+store = MemoryStore(
+    "memory.sqlite",
+    embedding_identity=embedder.identity,
+    embedding_dim=embedder.dim,
+)
+```
+
+A new empty `MemoryStore()` without an identity supports low-level, caller-supplied
+vectors under a `raw-vectors:v1` contract, binding the dimension on the first
+vector write. This does not establish which model produced them. Named embedders
+cannot adopt raw vectors, and dimensions alone cannot identify vectors in a
+legacy database. Opening either a legacy database or a named database without
+declaring its identity allows text/graph inspection and raw vector reads; it does
+not authorize semantic queries or new embedding writes. An incompatible named
+open raises `EmbeddingMismatchError` without replacing existing data. The viewer's
+hashing-only retrieval debugger reports HTTP 422 for an incompatible identity.
+
+Explicitly rebuild when changing models/dimensions or adopting a legacy/raw store:
+
+```python
+from aster_memory import HashingEmbedder, MemoryStore
+
+source = MemoryStore("memory.sqlite")
+try:
+    rebuilt = source.rebuild_embeddings(
+        HashingEmbedder(dim=512), "memory-rebuilt.sqlite", batch_size=64
+    )
+finally:
+    source.close()
+# After checking the new file, set MemoryConfig.path to str(rebuilt) and use
+# EmbeddingConfig(backend="hashing", dim=512).
+```
+
+Rebuilding copies a consistent snapshot, including archived memories, IDs, full
+record metadata, relationships and maintenance history. It re-embeds every record
+and publishes a new NumPy-backed SQLite file only after all batches succeed.
+The destination must not exist; failures, interruption and a concurrent creator
+never replace it or overwrite the source. Pause writers when planning a cutover:
+source writes after the snapshot are retained in the source, not the new file.
+`LiteLLMEmbedder` can also be passed explicitly; doing so sends those memory texts
+to its configured embedding service.
+
+Derived sqlite-vec tables use a persisted namespace per database. Chroma collection
+names also include a digest of the normalized absolute SQLite path, so database
+copies at different paths cannot share an index even when their persisted
+namespaces match. Reopening the same path reuses its collection; moving the database
+creates a new derived collection. Independent copies at the same absolute path on
+different hosts still need distinct `VectorConfig.collection` values when sharing
+one Chroma HTTP service. Rebuilding allocates a new namespace and leaves old indexes
+intact; it does not attempt a transaction spanning SQLite and an external Chroma
+service.
+After validating the replacement, optional indexes can be created from its blobs
+using the same embedding contract. Publication uses a hard link in the destination
+directory, requiring a filesystem that supports hard links (such as NTFS/ext4).
+
+Opening a database upgrades its schema stamp to v3 so older library versions
+cannot silently bypass the contract. Legacy vector identities are never guessed
+during this schema upgrade; preserve an original backup before a library downgrade.
 
 ---
 

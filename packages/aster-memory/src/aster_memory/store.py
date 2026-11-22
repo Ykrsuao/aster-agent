@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """SQLite-centric memory store + pluggable vector index.
 
-Everything lives in one SQLite file selected by ``MemoryConfig.path`` or the
-embedding host. TUI defaults to one memory DB per session; other hosts may choose
-workspace/project paths explicitly:
+Canonical records and vectors live in one SQLite file selected by
+``MemoryConfig.path`` or the host. Hosts choose session or workspace/project paths
+explicitly:
 
 * ``memories``      — full record as JSON + promoted columns for filtering/sort
                       + the embedding as a float32 blob.
@@ -19,8 +19,11 @@ L2-normalised vectors.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import tempfile
 import threading
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -28,6 +31,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from aster_memory.embeddings import EmbeddingMismatchError, validate_embedding
 from aster_memory.schema import Edge, EdgeType, Memory, MemoryType
 from aster_memory.vector_backends import (
     NumpyVectorIndex,
@@ -37,6 +41,7 @@ from aster_memory.vector_backends import (
 
 if TYPE_CHECKING:
     from aster_memory.config import VectorConfig
+    from aster_memory.embeddings import Embedder
 
 
 def _vec_to_blob(vec: np.ndarray) -> bytes:
@@ -48,7 +53,8 @@ def _blob_to_vec(blob: bytes) -> np.ndarray:
 
 
 # Stamp of the DDL shape this code understands (PRAGMA user_version).
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+_RAW_EMBEDDING_IDENTITY = "raw-vectors:v1"
 
 
 class MemorySchemaError(RuntimeError):
@@ -94,6 +100,13 @@ CREATE TABLE IF NOT EXISTS maintenance_log (
     kind   TEXT NOT NULL,
     report TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS embedding_contract (
+    id        INTEGER PRIMARY KEY CHECK (id = 1),
+    identity  TEXT NOT NULL,
+    dim       INTEGER NOT NULL CHECK (dim > 0),
+    namespace TEXT NOT NULL
+);
 """
 
 
@@ -107,35 +120,275 @@ class MemoryStore:
         vector_index: VectorIndex | None = None,
         vector_config: VectorConfig | None = None,
         embedding_dim: int | None = None,
+        embedding_identity: str | None = None,
     ) -> None:
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        # ``check_same_thread=False`` lets foreground memory calls and
-        # background reflection workers use this store, but the connection
-        # still needs application-level serialization. Keep the lock reentrant
-        # because row hydration and retrieval paths call other store helpers.
         self._lock = threading.RLock()
         self._pending_index: set[str] | None = None
+        self._embedding_identity: str | None = None
+        self._embedding_dim = embedding_dim
+        self._embedding_namespace: str | None = None
+        self._vector_config = vector_config
+        self._provided_index = vector_index
+        self._index: VectorIndex = NumpyVectorIndex()
+        self._index_ready = False
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
+        try:
+            with self._lock:
+                self._conn.row_factory = sqlite3.Row
+                if self.path != ":memory:":
+                    self._conn.execute("PRAGMA journal_mode=WAL")
+                    self._conn.execute("PRAGMA busy_timeout=5000")
+                self._migrate()
+                self._data_version = self._current_data_version()
+                contract = self._embedding_contract()
+                if embedding_identity is not None:
+                    self.bind_embeddings(embedding_identity, embedding_dim)
+                elif contract is not None and contract["identity"] == _RAW_EMBEDDING_IDENTITY:
+                    self.bind_embeddings(
+                        _RAW_EMBEDDING_IDENTITY,
+                        embedding_dim if embedding_dim is not None else contract["dim"],
+                    )
+                elif contract is None and not self.count(include_archived=True):
+                    self._embedding_identity = _RAW_EMBEDDING_IDENTITY
+                    if embedding_dim is not None:
+                        self.bind_embeddings(_RAW_EMBEDDING_IDENTITY, embedding_dim)
+                    else:
+                        self._initialize_index()
+                elif embedding_dim is not None and contract is not None:
+                    if embedding_dim != contract["dim"]:
+                        raise EmbeddingMismatchError(
+                            "Embedding dimension differs from the stored contract; "
+                            "use rebuild_embeddings() with a new destination."
+                        )
+                # Existing undeclared stores remain available for text inspection.
+        except BaseException:
+            self._conn.close()
+            raise
+
+    def _embedding_contract(self) -> sqlite3.Row | None:
+        return self._conn.execute("SELECT * FROM embedding_contract WHERE id = 1").fetchone()
+
+    def bind_embeddings(self, identity: str, dim: int | None) -> None:
+        """Declare the vector space, checking existing data before opening an index.
+
+        Only an empty, unbound database can acquire a new identity. Existing
+        unidentified/raw vectors must be explicitly rebuilt, even at the same dim.
+        """
+        if not isinstance(identity, str) or not identity.strip():
+            raise EmbeddingMismatchError("An explicit, non-empty embedding identity is required.")
+        if not isinstance(dim, int) or isinstance(dim, bool) or dim <= 0:
+            raise EmbeddingMismatchError("The embedding dimension must be a positive integer.")
         with self._lock:
-            self._conn.row_factory = sqlite3.Row
-            if self.path != ":memory:":
-                self._conn.execute("PRAGMA journal_mode=WAL")
-                self._conn.execute("PRAGMA busy_timeout=5000")
-            self._migrate()
-            # An explicit index wins; otherwise dispatch on the config's backend
-            # (numpy / sqlite_vec / chroma_*). Default is the zero-dependency numpy index.
-            if vector_index is not None:
-                self._index: VectorIndex = vector_index
-            elif vector_config is not None:
-                self._index = make_vector_index(
-                    vector_config, dim=embedding_dim, conn=self._conn, path=self.path
-                )
-            else:
-                self._index = NumpyVectorIndex()
-            self._load_index()
-            self._data_version = self._current_data_version()
+            if self._pending_index is not None:
+                raise RuntimeError("Bind embeddings outside a write transaction.")
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                contract = self._embedding_contract()
+                if contract is not None:
+                    if contract["identity"] != identity or contract["dim"] != dim:
+                        raise EmbeddingMismatchError(
+                            "Embedding identity or dimension differs from the stored contract; "
+                            "use rebuild_embeddings() with a new destination."
+                        )
+                elif self.count(include_archived=True):
+                    raise EmbeddingMismatchError(
+                        "Existing memories have no embedding identity. Inspect their text or "
+                        "use rebuild_embeddings() with a new destination; dimensions alone "
+                        "cannot establish compatibility."
+                    )
+                else:
+                    self._conn.execute(
+                        "INSERT INTO embedding_contract (id, identity, dim, namespace) "
+                        "VALUES (1, ?, ?, ?)",
+                        (identity, dim, uuid.uuid4().hex),
+                    )
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+            contract = self._embedding_contract()
+            if (
+                self._index_ready
+                and self._embedding_identity == identity
+                and self._embedding_dim == dim
+                and self._embedding_namespace == contract["namespace"]
+            ):
+                return
+            self._embedding_identity = identity
+            self._embedding_dim = dim
+            self._embedding_namespace = contract["namespace"]
+            self._index_ready = False
+            self._initialize_index()
+
+    def rebuild_embeddings(
+        self, embedder: Embedder, destination: str | Path, *, batch_size: int = 64
+    ) -> Path:
+        """Re-embed a consistent snapshot into a new NumPy-backed database.
+
+        Preserves every memory (including archived rows), edge and maintenance
+        record. The source is untouched. A failed/interrupted rebuild never
+        publishes a partial destination, and an existing destination is never replaced.
+        """
+        if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
+            raise ValueError("batch_size must be a positive integer")
+        if str(destination) == ":memory:":
+            raise ValueError("rebuild_embeddings needs a new filesystem destination")
+        destination = Path(destination).expanduser().resolve()
+        if os.path.lexists(destination):
+            raise FileExistsError(destination)
+        identity, dim = embedder.identity, embedder.dim
+        if not isinstance(identity, str) or not identity.strip():
+            raise EmbeddingMismatchError("The replacement embedder needs a stable identity.")
+        if not isinstance(dim, int) or isinstance(dim, bool) or dim < 1:
+            raise EmbeddingMismatchError("The replacement embedder needs a positive dimension.")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=f".{destination.name}-rebuild-", dir=destination.parent
+        ) as directory:
+            staged = Path(directory) / "memory.sqlite"
+            target = sqlite3.connect(staged)
+            cursor: sqlite3.Cursor | None = None
+            try:
+                target.row_factory = sqlite3.Row
+                target.executescript(_SCHEMA)
+                target.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                # Copy only canonical tables: ANN tables/collections are derived,
+                # and copying their extension schema would make recovery depend on it.
+                with self._lock:
+                    if self._conn.in_transaction:
+                        raise RuntimeError("Rebuild embeddings outside a write transaction.")
+                    self._conn.execute("BEGIN")
+                    try:
+                        for table in ("memories", "memory_edges", "maintenance_log"):
+                            columns = [
+                                row["name"] for row in target.execute(f"PRAGMA table_info({table})")
+                            ]
+                            names = ", ".join(columns)
+                            placeholders = ", ".join("?" for _ in columns)
+                            rows = self._conn.execute(f"SELECT {names} FROM {table}")
+                            target.executemany(
+                                f"INSERT INTO {table} ({names}) VALUES ({placeholders})", rows
+                            )
+                        target.execute(
+                            "INSERT INTO embedding_contract (id, identity, dim, namespace) "
+                            "VALUES (1, ?, ?, ?)",
+                            (identity, dim, uuid.uuid4().hex),
+                        )
+                        target.commit()
+                    finally:
+                        self._conn.rollback()
+                cursor = target.execute("SELECT id, data FROM memories ORDER BY id")
+                while rows := cursor.fetchmany(batch_size):
+                    texts = [
+                        Memory.model_validate_json(row["data"]).embedding_text() for row in rows
+                    ]
+                    vectors = embedder.embed_batch(texts)
+                    if len(vectors) != len(rows):
+                        raise EmbeddingMismatchError(
+                            "The replacement embedder returned the wrong number of vectors."
+                        )
+                    if embedder.identity != identity or embedder.dim != dim:
+                        raise EmbeddingMismatchError("The replacement embedding contract changed.")
+                    blobs = [
+                        (_vec_to_blob(validate_embedding(vector, dim)), row["id"])
+                        for row, vector in zip(rows, vectors, strict=True)
+                    ]
+                    with target:
+                        target.executemany("UPDATE memories SET embedding = ? WHERE id = ?", blobs)
+            finally:
+                if cursor is not None:
+                    cursor.close()
+                target.close()
+            # An atomic, non-overwriting publish on the same filesystem. Unlike
+            # replace()/POSIX rename(), link() cannot clobber a concurrently created file.
+            os.link(staged, destination)
+        return destination
+
+    def _check_embedding_contract(self) -> int | None:
+        contract = self._embedding_contract()
+        if self._embedding_identity is None:
+            raise EmbeddingMismatchError(
+                "This store is open for inspection without an embedding identity. "
+                "Open it with the matching identity/dimension or use rebuild_embeddings()."
+            )
+        if contract is None:
+            if (
+                self._embedding_identity == _RAW_EMBEDDING_IDENTITY
+                and self._embedding_namespace is None
+                and not self._conn.execute(
+                    "SELECT 1 FROM memories WHERE embedding IS NOT NULL LIMIT 1"
+                ).fetchone()
+            ):
+                return self._embedding_dim
+            raise EmbeddingMismatchError(
+                "Stored vectors have no embedding identity; use rebuild_embeddings()."
+            )
+        if (
+            contract["identity"] != self._embedding_identity
+            or (self._embedding_dim is not None and contract["dim"] != self._embedding_dim)
+            or (
+                self._embedding_namespace is not None
+                and contract["namespace"] != self._embedding_namespace
+            )
+        ):
+            raise EmbeddingMismatchError(
+                "The stored embedding contract changed or differs from this handle; "
+                "reopen with the matching embedder or use rebuild_embeddings()."
+            )
+        return contract["dim"]
+
+    def _prepare_embedding(self, vector: np.ndarray, *, write: bool = False) -> np.ndarray:
+        dim = self._check_embedding_contract()
+        if dim is None:
+            candidate = np.asarray(vector)
+            if candidate.ndim != 1 or not candidate.size:
+                raise EmbeddingMismatchError("An embedding must be a non-empty 1-D vector.")
+            dim = int(candidate.size)
+        validated = validate_embedding(vector, dim)
+        if write and self._embedding_contract() is None:
+            self._conn.execute(
+                "INSERT INTO embedding_contract (id, identity, dim, namespace) VALUES (1, ?, ?, ?)",
+                (self._embedding_identity, dim, uuid.uuid4().hex),
+            )
+        return validated
+
+    def _initialize_index(self) -> None:
+        dim = self._check_embedding_contract()
+        version = self._current_data_version()
+        entries = self._index_entries(dim)
+        contract = self._embedding_contract()
+        if self._provided_index is not None:
+            index = self._provided_index
+        elif self._vector_config is not None:
+            if self._vector_config.backend != "numpy" and dim is None:
+                raise EmbeddingMismatchError("This vector backend needs an explicit embedding dim.")
+            index = make_vector_index(
+                self._vector_config,
+                dim=dim,
+                conn=self._conn,
+                path=self.path,
+                namespace=contract["namespace"] if contract is not None else None,
+            )
+        else:
+            index = NumpyVectorIndex()
+        for memory_id, embedding in entries:
+            index.add(memory_id, embedding)
+        self._index = index
+        self._index_ready = True
+        self._data_version = version
+
+    def _index_entries(self, dim: int | None) -> list[tuple[str, np.ndarray]]:
+        entries = []
+        for row in self._conn.execute(
+            "SELECT id, archived, embedding FROM memories WHERE embedding IS NOT NULL"
+        ):
+            embedding = validate_embedding(_blob_to_vec(row["embedding"]), dim)
+            if not row["archived"]:
+                entries.append((row["id"], embedding))
+        return entries
 
     # ------------------------------------------------------------------
     # internal helpers
@@ -172,30 +425,23 @@ class MemoryStore:
             return int(self._conn.execute("PRAGMA data_version").fetchone()[0])
 
     def refresh_if_changed(self) -> bool:
-        """Reload the derived vector index if another connection committed.
-
-        SQLite's ``data_version`` moves only on *other* connections' commits,
-        so this is a cheap no-op in the single-writer case. Only the in-memory
-        numpy index needs rebuilding; sqlite-vec and Chroma read shared storage
-        directly. SQL reads are always current and never need this.
-        """
+        """Reload the derived NumPy index after a compatible external commit."""
         with self._lock:
             version = self._current_data_version()
+            if self._embedding_identity is not None:
+                dim = self._check_embedding_contract()
+            else:
+                dim = None
             if version == self._data_version:
                 return False
+            if self._index_ready and isinstance(self._index, NumpyVectorIndex):
+                entries = self._index_entries(dim)
+                index = NumpyVectorIndex()
+                for memory_id, embedding in entries:
+                    index.add(memory_id, embedding)
+                self._index = index
             self._data_version = version
-            if isinstance(self._index, NumpyVectorIndex):
-                self._index = NumpyVectorIndex()
-                self._load_index()
             return True
-
-    def _load_index(self) -> None:
-        with self._lock:
-            cur = self._conn.execute(
-                "SELECT id, embedding FROM memories WHERE archived = 0 AND embedding IS NOT NULL"
-            )
-            for row in cur.fetchall():
-                self._index.add(row["id"], _blob_to_vec(row["embedding"]))
 
     def _row_to_memory(self, row: sqlite3.Row) -> Memory:
         data = json.loads(row["data"])
@@ -241,6 +487,8 @@ class MemoryStore:
             self._conn.execute("BEGIN IMMEDIATE")
             self._pending_index = set()
             try:
+                if self._embedding_identity is not None:
+                    self._check_embedding_contract()
                 yield
                 self._conn.commit()
             except BaseException:
@@ -249,6 +497,13 @@ class MemoryStore:
             finally:
                 pending = self._pending_index
                 self._pending_index = None
+            contract = self._embedding_contract()
+            if self._embedding_identity is not None and contract is not None:
+                self._check_embedding_contract()
+                self._embedding_dim = contract["dim"]
+                self._embedding_namespace = contract["namespace"]
+            if not self._index_ready:
+                return
             # Some indexes share this connection and commit their own writes.
             for id in pending:
                 row = self._conn.execute(
@@ -275,7 +530,11 @@ class MemoryStore:
     def add(self, memory: Memory, embedding: np.ndarray | None = None) -> Memory:
         """Insert (or replace) a memory and its edges. Persists the embedding."""
         with self.transaction():
-            blob = _vec_to_blob(embedding) if embedding is not None else None
+            blob = (
+                _vec_to_blob(self._prepare_embedding(embedding, write=True))
+                if embedding is not None
+                else None
+            )
             payload = memory.model_dump(mode="json", exclude={"edges"})
             self._conn.execute(
                 """INSERT OR REPLACE INTO memories
@@ -330,7 +589,11 @@ class MemoryStore:
                     memory.owner,
                     memory.status,
                     json.dumps(payload),
-                    _vec_to_blob(embedding) if embedding is not None else None,
+                    (
+                        _vec_to_blob(self._prepare_embedding(embedding, write=True))
+                        if embedding is not None
+                        else None
+                    ),
                     memory.id,
                 ),
             )
@@ -414,12 +677,18 @@ class MemoryStore:
             return None if row is None else str(row["owner"])
 
     def get_embedding(self, id: str) -> np.ndarray | None:
+        """Read a stored vector; inspection handles never claim model compatibility."""
         with self._lock:
+            if self._embedding_identity is not None:
+                self._check_embedding_contract()
             row = self._conn.execute(
                 "SELECT embedding FROM memories WHERE id = ?", (id,)
             ).fetchone()
             if row and row["embedding"] is not None:
-                return _blob_to_vec(row["embedding"])
+                vector = _blob_to_vec(row["embedding"])
+                if self._embedding_identity is not None:
+                    return self._prepare_embedding(vector)
+                return vector
             return None
 
     def neighbors(self, id: str) -> list[Edge]:
@@ -502,6 +771,9 @@ class MemoryStore:
         oversampled (4x, growing) until ``k`` survive or it is exhausted.
         """
         with self._lock:
+            query_vec = self._prepare_embedding(query_vec)
+            if not self._index_ready:
+                self._initialize_index()
             self.refresh_if_changed()
             if owner is None:
                 return self._index.query(query_vec, k)

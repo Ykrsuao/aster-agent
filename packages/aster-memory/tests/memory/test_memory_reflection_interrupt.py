@@ -39,6 +39,7 @@ def _stop_after(n: int):
 
 def _seed(store: MemoryStore, emb: HashingEmbedder) -> None:
     """Duplicates (merge fodder), related pairs (edge fodder), episodes."""
+    store.bind_embeddings(emb.identity, emb.dim)
     base = _now() - 100.0
     rows = [
         ("the deploy command is make ship", MemoryType.INFO),
