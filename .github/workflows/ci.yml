@@ -469,13 +469,13 @@ jobs:
           uv run --no-sync python -m pytest -q
           -m "not integration and not stress and not sandbox"
           packages/aster-memory/tests
-          --junitxml=artifacts/windows-memory.xml
+          --junitxml="$env:RUNNER_TEMP/windows-memory.xml"
       - name: Upload Windows memory results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-memory
-          path: artifacts/windows-memory.xml
+          path: ${{ runner.temp }}/windows-memory.xml
       - name: Security regressions (no live API calls or VM)
         shell: pwsh
         env:
@@ -501,13 +501,13 @@ jobs:
           tests/agentdoc/test_variables_visibility.py
           tests/runtime/sandbox/test_broker_policy.py
           tests/viewer/test_main.py
-          --junitxml=artifacts/windows-security.xml
+          --junitxml="$env:RUNNER_TEMP/windows-security.xml"
       - name: Upload Windows security results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-security
-          path: artifacts/windows-security.xml
+          path: ${{ runner.temp }}/windows-security.xml
       - name: Terminal delivery and acceptance harness regressions
         shell: pwsh
         env:
@@ -535,7 +535,14 @@ jobs:
           cargo build --locked --release --manifest-path packages/aster-tui/Cargo.toml
       - name: Build the complete Windows terminal bundle
         shell: pwsh
-        run: uv run --no-sync python scripts/build_terminal_release.py --skip-cargo-build --out-dir dist/terminal-windows
+        run: |
+          uv run --no-sync python scripts/build_terminal_release.py --skip-cargo-build --out-dir dist/terminal-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $manifest = Get-Content -LiteralPath 'dist/terminal-windows/MANIFEST.json' -Raw | ConvertFrom-Json
+          if ($manifest.commit -ne $env:GITHUB_SHA -or $manifest.dirty -ne $false) {
+            git status --short
+            throw 'Terminal bundle must match the clean CI checkout.'
+          }
       - name: Install and reinstall outside the checkout
         shell: pwsh
         env:

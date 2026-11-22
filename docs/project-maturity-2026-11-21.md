@@ -192,4 +192,5 @@
 - 真实 Python ACP → 本地 MCP wire **5 passed、14 deselected**，覆盖 stdio cwd、字面环境值、显式凭据 HTTP、401 脱敏、信任/优先级/重复名称、失败重试、快照恢复和关闭清理。模型使用 FakeLLM；没有连接真实用户服务。
 - Windows Rust 全套 **656 passed、2 ignored**；最终后端的 Rust → ACP → 本地 MCP 回归 **1 passed**。Rust fmt、Clippy（`-D warnings`）与 release build 通过；18 个变更 Python 文件的 Ruff/format、差异检查与全部 **1,354** 个受控 Python 文件的 SPDX 检查通过。
 - 本地原始证据位于 `.review-temp/u2-20261122/` 与 `.review-temp/u2-rust-20261122/`，不随源码提交。远端 CI、WSL 与 Windows bundle 安装验收须绑定本项最终候选 SHA，并记录在本分支的草稿 PR；前置 U1 成功不代替 U2 结果。Windows seed/reinstall/verify 仍只证明同版本重装。
+- 首轮 Windows CI 与安装恢复成功，但包内 `MANIFEST.dirty=true`：既有流程将 memory/security JUnit 写入源码目录的未忽略 `artifacts/`。已把这两份报告移到运行器临时目录，并增加 bundle commit 必须匹配 CI checkout、dirty 必须为 false 的门槛；保留初轮产物，最终以修正后的候选重新验收。
 - 验收边界：OAuth 不在 ACP 中自动刷新，尚未端到端验收；没有调用真实模型 API、真实用户 MCP 服务或持久凭据。SSE 沿用现有支持，本项新增的完整本地 wire 旅程使用 stdio 与显式凭据 HTTP。
