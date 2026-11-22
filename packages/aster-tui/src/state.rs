@@ -56,9 +56,16 @@ impl Entry {
             } else {
                 format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
             };
-            let kind = if attachment.is_image() { "Image" } else { "File" };
+            let kind = if attachment.is_image() {
+                "Image"
+            } else {
+                "File"
+            };
             let format = if attachment.is_image() {
-                attachment.mime_type().trim_start_matches("image/").to_uppercase()
+                attachment
+                    .mime_type()
+                    .trim_start_matches("image/")
+                    .to_uppercase()
             } else {
                 attachment.mime_type().into()
             };
@@ -792,19 +799,35 @@ impl State {
         }
         let query = self.query.to_lowercase();
         let choices: Vec<Choice> = match self.overlay {
-            Some(Overlay::Skills) if !self.skills.loading && self.skills.error.is_none()
-                && self.skills.detail.is_none() => self.skills.items.iter().filter_map(|skill| {
-                let name = skill["name"].as_str()?;
-                let active = skill["active"] == true;
-                let status = if active { "Active" } else if skill["loaded"] == true {
-                    "Available"
-                } else { "Not loaded" };
-                Some(Choice {
-                    label: format!("{} {}", if active { "✓" } else { "·" }, clean(name)),
-                    detail: format!("{status} · {}", clean(skill["description"].as_str().unwrap_or(""))),
-                    value: name.into(),
-                })
-            }).collect(),
+            Some(Overlay::Skills)
+                if !self.skills.loading
+                    && self.skills.error.is_none()
+                    && self.skills.detail.is_none() =>
+            {
+                self.skills
+                    .items
+                    .iter()
+                    .filter_map(|skill| {
+                        let name = skill["name"].as_str()?;
+                        let active = skill["active"] == true;
+                        let status = if active {
+                            "Active"
+                        } else if skill["loaded"] == true {
+                            "Available"
+                        } else {
+                            "Not loaded"
+                        };
+                        Some(Choice {
+                            label: format!("{} {}", if active { "✓" } else { "·" }, clean(name)),
+                            detail: format!(
+                                "{status} · {}",
+                                clean(skill["description"].as_str().unwrap_or(""))
+                            ),
+                            value: name.into(),
+                        })
+                    })
+                    .collect()
+            }
             Some(Overlay::Hud) => self.hud.choices(),
             Some(Overlay::Rollback) => {
                 let mut scopes = vec![Choice {
@@ -1227,7 +1250,10 @@ pub fn default_commands() -> Vec<Command> {
             "Choose Python sandbox; on or off changes this session",
         ),
         ("/tasks", "Inspect plan steps and background jobs (Alt+T)"),
-        ("/skills", "Browse available skills, active status and documentation"),
+        (
+            "/skills",
+            "Browse available skills, active status and documentation",
+        ),
         ("/stop", "Stop a selected background job by its task ID"),
         (
             "/search",

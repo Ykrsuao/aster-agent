@@ -803,7 +803,8 @@ impl Controller {
         self.state.skills.generation = self.state.skills.generation.wrapping_add(1);
         self.state.skills.loading = false;
         if self.state.overlay == Some(Overlay::Skills) {
-            self.state.skills.error = Some("Backend disconnected. Use /reconnect, then reopen /skills.".into());
+            self.state.skills.error =
+                Some("Backend disconnected. Use /reconnect, then reopen /skills.".into());
         }
         self.tree_search_request = None;
         self.tree_search_due = None;
@@ -2439,7 +2440,8 @@ impl Controller {
             } if self.state.session_id.as_ref() == Some(session)
                 && *generation == self.state.conversation_generation)
         }) {
-            self.state.notice("Wait for the current permission change to finish.", false);
+            self.state
+                .notice("Wait for the current permission change to finish.", false);
             return vec![];
         }
         if (self.state.busy() && !live_permission) || self.state.phase == Phase::Failed {
@@ -2614,7 +2616,10 @@ impl Controller {
             .is_some_and(|target| target != session)
         {
             // Content belongs to the visible inspector and is never replayed.
-            if matches!(operation, RuntimeRequest::Context { .. } | RuntimeRequest::Skills { .. }) {
+            if matches!(
+                operation,
+                RuntimeRequest::Context { .. } | RuntimeRequest::Skills { .. }
+            ) {
                 return vec![];
             }
             if let Some(backup) = self.backup.as_mut() {
@@ -2777,11 +2782,17 @@ impl Controller {
             return vec![];
         }
         if !self.state.skills.supported {
-            self.state.skills.error = Some("This backend does not support the skills browser. Update aster-acp and reconnect.".into());
+            self.state.skills.error = Some(
+                "This backend does not support the skills browser. Update aster-acp and reconnect."
+                    .into(),
+            );
             return vec![];
         }
         if self.state.phase == Phase::Failed || self.exiting || self.opening.is_some() {
-            self.state.skills.error = Some("Session is unavailable. Reconnect or finish switching conversations, then retry.".into());
+            self.state.skills.error = Some(
+                "Session is unavailable. Reconnect or finish switching conversations, then retry."
+                    .into(),
+            );
             return vec![];
         }
         self.state.skills.loading = true;
@@ -2789,7 +2800,9 @@ impl Controller {
         self.runtime_request(
             "_aster/session/skills",
             params,
-            RuntimeRequest::Skills { view: self.state.skills.generation },
+            RuntimeRequest::Skills {
+                view: self.state.skills.generation,
+            },
         )
     }
 
@@ -2799,7 +2812,8 @@ impl Controller {
         }
         self.state.skills.loading = false;
         if let Some(error) = value.get("error") {
-            let reason = error["data"]["reason"].as_str()
+            let reason = error["data"]["reason"]
+                .as_str()
                 .or_else(|| error["message"].as_str())
                 .unwrap_or("Could not read skills.");
             self.state.skills.error = Some(format!("{} · Ctrl+R retry", clean(reason)));
@@ -2811,19 +2825,35 @@ impl Controller {
             if skill["name"] == detail["name"] && skill["text"].is_string() {
                 self.state.skills.detail = Some(skill.clone());
             } else {
-                self.state.skills.error = Some("Invalid skill detail. Ctrl+R retries; Esc returns to the list.".into());
+                self.state.skills.error =
+                    Some("Invalid skill detail. Ctrl+R retries; Esc returns to the list.".into());
             }
         } else if let Some(items) = result["skills"].as_array() {
-            let selected = self.state.choices().get(self.state.selected)
+            let selected = self
+                .state
+                .choices()
+                .get(self.state.selected)
                 .map(|choice| choice.value.clone());
-            self.state.skills.items = items.iter().take(2000)
+            self.state.skills.items = items
+                .iter()
+                .take(2000)
                 .filter(|item| item["name"].as_str().is_some_and(|name| !name.is_empty()))
-                .cloned().collect();
-            self.state.skills.total = result["total"].as_u64()
-                .map_or(self.state.skills.items.len(), |total| total.min(usize::MAX as u64) as usize);
+                .cloned()
+                .collect();
+            self.state.skills.total = result["total"]
+                .as_u64()
+                .map_or(self.state.skills.items.len(), |total| {
+                    total.min(usize::MAX as u64) as usize
+                });
             self.state.skills.truncated = result["truncated"] == true || items.len() > 2000;
-            self.state.selected = selected.and_then(|name| self.state.choices().iter()
-                .position(|choice| choice.value == name)).unwrap_or(0);
+            self.state.selected = selected
+                .and_then(|name| {
+                    self.state
+                        .choices()
+                        .iter()
+                        .position(|choice| choice.value == name)
+                })
+                .unwrap_or(0);
         } else {
             self.state.skills.error = Some("Invalid skills list. Press Ctrl+R to retry.".into());
         }
@@ -5036,9 +5066,16 @@ impl Controller {
     fn overlay_key(&mut self, overlay: Overlay, key: KeyEvent) -> Vec<Action> {
         if overlay == Overlay::Skills {
             if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::CONTROL {
-                if key.kind == KeyEventKind::Repeat { return vec![]; }
-                let name = self.state.skills.detail.as_ref()
-                    .and_then(|skill| skill["name"].as_str()).map(str::to_owned);
+                if key.kind == KeyEventKind::Repeat {
+                    return vec![];
+                }
+                let name = self
+                    .state
+                    .skills
+                    .detail
+                    .as_ref()
+                    .and_then(|skill| skill["name"].as_str())
+                    .map(str::to_owned);
                 return self.request_skills(name);
             }
             if self.state.skills.detail.is_some() {
@@ -5050,10 +5087,18 @@ impl Controller {
                         self.state.skills.error = None;
                         self.state.detail_scroll = 0;
                     }
-                    KeyCode::Up => self.state.detail_scroll = self.state.detail_scroll.saturating_sub(1),
-                    KeyCode::Down => self.state.detail_scroll = self.state.detail_scroll.saturating_add(1),
-                    KeyCode::PageUp => self.state.detail_scroll = self.state.detail_scroll.saturating_sub(10),
-                    KeyCode::PageDown => self.state.detail_scroll = self.state.detail_scroll.saturating_add(10),
+                    KeyCode::Up => {
+                        self.state.detail_scroll = self.state.detail_scroll.saturating_sub(1)
+                    }
+                    KeyCode::Down => {
+                        self.state.detail_scroll = self.state.detail_scroll.saturating_add(1)
+                    }
+                    KeyCode::PageUp => {
+                        self.state.detail_scroll = self.state.detail_scroll.saturating_sub(10)
+                    }
+                    KeyCode::PageDown => {
+                        self.state.detail_scroll = self.state.detail_scroll.saturating_add(10)
+                    }
                     KeyCode::Home => self.state.detail_scroll = 0,
                     KeyCode::End => self.state.detail_scroll = u16::MAX,
                     _ => {}
