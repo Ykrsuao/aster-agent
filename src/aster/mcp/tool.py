@@ -743,8 +743,8 @@ class MCPTool:
     async def _refresh_access_token(self) -> bool:
         """Refresh the OAuth access token and rebuild the client. Returns True on success.
 
-        Uses the cached refresh token via ``handle_mcp_oauth`` (use_cache=True),
-        so no human interaction is needed when a valid refresh token exists.
+        Forces the cached refresh-token exchange even when the server rejected a
+        locally unexpired token. Failure never starts an interactive auth flow.
         """
         ctx = self._refresh_ctx
         server_url = ctx.get("server_url")
@@ -761,6 +761,7 @@ class MCPTool:
                 open_browser=False,  # unattended refresh — never launch a browser
                 manual=False,
                 use_cache=True,
+                refresh_only=True,
             )
             headers = dict(ctx.get("headers") or {})
             headers["Authorization"] = f"{token.token_type} {token.access_token}"
