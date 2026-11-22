@@ -377,6 +377,55 @@ async def test_real_provider_collection_exposes_reply_before_completion_and_comm
         await dispatcher.close()
 
 
+async def test_pending_verification_notice_commits_the_existing_reply_preview(tmp_path):
+    class StreamingFake(FakeLLMClient):
+        async def acall(self, *args, **kwargs):
+            response = await super().acall(*args, **kwargs)
+            tool = response.tool_calls[0]
+            emit_stream("chat", chat(tool.arguments, name=tool.name))
+            return response
+
+    settings = tmp_path / ".aster"
+    settings.mkdir()
+    (settings / "settings.yaml").write_text(
+        'coding:\n  required_checks:\n    tests:\n      command: "echo check"\n'
+        '      files: ["code.txt"]\n',
+        encoding="utf-8",
+    )
+    target = tmp_path / "code.txt"
+    target.write_text("original", encoding="utf-8")
+    llm = StreamingFake.with_tool_call(
+        "return_result",
+        {"result": {"message": "Paris", "explanation": "Answered", "complete_task": False}},
+        strict_exhaustion=True,
+    )
+    agent = CodingAgent(llm=llm, cwd=tmp_path)
+    target.write_text("pending change", encoding="utf-8")
+    client = RecordingClient()
+    bridge = ACPEventBridge(agent, client, "pending-session", stream_messages=True)
+    dispatcher = InteractiveSessionDispatcher(agent)
+    dispatcher.on_result = bridge.observe_result
+    try:
+        async with bridge.prompt(perf_counter(), "native"):
+            result = await dispatcher.submit("What is the capital of France?")
+        messages = [update for update in client.updates if isinstance(update, AgentMessageChunk)]
+        assert messages[0].content.text == "Paris"
+        assert messages[-1].content.text == result.message
+        assert "still needs verification: tests" in result.message
+        assert {update.field_meta["aster"]["messageId"] for update in messages} == {
+            messages[0].field_meta["aster"]["messageId"]
+        }
+        assert [update.field_meta["aster"]["messageState"] for update in messages] == [
+            "delta",
+            "complete",
+        ]
+        assert agent.verification_status()["state"] == "pending"
+        assert llm.call_count == 1
+    finally:
+        await bridge.close()
+        await dispatcher.close()
+
+
 @pytest.mark.parametrize("with_progress", [False, True])
 async def test_computed_python_reply_is_delivered_without_another_model_request(
     tmp_path, with_progress

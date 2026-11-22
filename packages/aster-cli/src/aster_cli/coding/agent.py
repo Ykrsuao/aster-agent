@@ -12,7 +12,6 @@ from aster.agentdoc import doc, spec
 from aster.agents import TokenBudgetSummarizer
 from aster.config import CodeActConfig, PredictConfig
 from aster.interactive import (
-    Done,
     InteractiveAgent,
     NeedInput,
     SummarizationConfig,
@@ -30,7 +29,8 @@ from aster_cli.coding.activity import ActivityShellTools
 from aster_cli.coding.instructions import render_agent_instructions
 from aster_cli.coding.reply_strategy import CodingReplyStrategy
 from aster_cli.coding.settings import load_required_checks
-from aster_cli.coding.verification import Verification
+from aster_cli.coding.verification import CodingDone as Done
+from aster_cli.coding.verification import Verification, VerificationState
 from aster_cli.tools.repo_tools import RepoTools
 from aster_cli.tools.workspace_files import WorkspaceFiles
 
@@ -69,7 +69,7 @@ class CodingAgent(InteractiveAgent):
     # take one over, which would remove the tool while the model is still told
     # it has it.
     __protected_skill_attrs__ = frozenset(
-        {"shell", "repo", "files", "todo", "libs", "skills", "verify"}
+        {"shell", "repo", "files", "todo", "libs", "skills", "verify", "verification_status"}
     )
 
     cwd: Annotated[Path, nosnapshot]
@@ -92,6 +92,7 @@ class CodingAgent(InteractiveAgent):
     _command_registry: Annotated[Any, hidden, nosnapshot]
     _execution_control: Annotated[Any, hidden, nosnapshot]
     _verification: Annotated[Verification, hidden, nosnapshot]
+    _verification_state: Annotated[VerificationState, hidden]
 
     def __init__(
         self,
@@ -111,6 +112,7 @@ class CodingAgent(InteractiveAgent):
         self.system_messages = self._system_messages_in.reader
         self.cwd = Path(cwd).resolve()
         self._verification = Verification(self.cwd, load_required_checks(self.cwd))
+        self._verification_state = self._verification.state
         self._base_shell = ShellTools(cwd=str(self.cwd))
         self.shell = ActivityShellTools(self._base_shell, self.event_manager)
         self.repo = RepoTools(root=self.cwd, session=self.shell.session)
@@ -172,6 +174,7 @@ class CodingAgent(InteractiveAgent):
     @no_trace
     def refresh_host_context(self) -> None:
         """Rebuild current host information after construction or snapshot restoration."""
+        self._verification.configure(load_required_checks(self.cwd), state=self._verification_state)
         # Keep paths as literal data, separate from fixed behavioral instructions.
         # They must never become a context expression or a prompt template.
         self.context["workspace_paths"] = Context(
@@ -184,11 +187,15 @@ class CodingAgent(InteractiveAgent):
                 + json.dumps(
                     {name: check.model_dump() for name, check in self._verification.checks.items()}
                 )
-                + "\nAfter changing these files, call await self.verify(name) for every check. "
+                + "\nUnverified changes remain pending across turns and restored sessions. "
+                "After changing these files, call await self.verify(name) for every check. "
                 "Checks run in a fresh host shell; fix failures and rerun after final edits. "
-                "A Done reply cannot replace missing, failed or stale check results.",
+                "A Done reply cannot replace missing, failed or stale check results. "
+                "For unrelated conversation or planning without new edits, return Done with "
+                "complete_task=false; the pending coding task is retained and shown to the user.",
                 prefix=True,
             )
+        self.context["verification_status"] = Context(expr="self.verification_status()")
         shell = "PowerShell" if is_native_windows() else "bash"
         self.context["host_shell"] = Context(
             f"self.shell runs on the host using {shell}, even when execute_python runs in a sandbox. "
@@ -206,17 +213,23 @@ class CodingAgent(InteractiveAgent):
         )
 
     async def verify(self, check_name: str) -> str:
-        """Run a host-configured check and record its real outcome for this turn.
+        """Run a host-configured check and record its outcome for the pending task.
 
         Choose a name from required_checks. Commands run on the host in a fresh
         shell rooted at the workspace, including when Python uses a sandbox.
         Returned text is for inspection; the completion check uses recorded
         exit status and file hashes, never text supplied by the model.
         """
+        self.refresh_host_context()
         result = await self._verification.run(check_name, self.event_manager)
         return (
             f"{check_name}: exit_code={result.returncode}, timed_out={result.timed_out}\n{result}"
         )
+
+    @no_trace
+    def verification_status(self) -> dict[str, Any]:
+        """Show pending files and check outcomes without running commands."""
+        return self._verification.status()
 
     def get_summarization_status(self) -> dict[str, Any]:
         """Return compact history information for host status displays."""

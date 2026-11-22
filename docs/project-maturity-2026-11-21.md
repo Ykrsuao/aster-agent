@@ -81,8 +81,8 @@
 ### A3：把完成检查扩展为可恢复的任务验收状态
 
 - 类型：现有实现的明确边界；优先级 P1。
-- 现状：`required_checks` 是显式启用、显式文件和当前回合的验证。`Verification.begin()` 清空结果，重新打开后重建初始快照；旧改动没有进一步修改时，需要显式 `verify` 才会触发验证。
-- 影响：一次任务跨多个回合或恢复后，产品没有统一的“还有哪些改动尚未验收”的状态。已有当轮验证和并发隔离不能当作这个流程已经完成。
+- 实施前：`required_checks` 是显式启用、显式文件和当前回合的验证。`Verification.begin()` 清空结果，重新打开后重建初始快照；旧改动没有进一步修改时，需要显式 `verify` 才会触发验证。
+- 当前实现：任务身份、文件基线、检查合同和结果随现有快照保存，跨回合和进程重开仍须完成待验收任务；文件、工作区或检查配置改变使旧证据失效。无关问答可保留任务并显示待验收状态，不能借此跳过本回合修改的检查。见文末 A3 实施记录。
 - 完成标准：任务级记录待验收的改动和检查合同；跨回合/重启保留未完成状态；代码或检查配置改变后旧结果失效；普通问答不误触发修改任务的全部检查。
 - 依据：[verification.py](../packages/aster-cli/src/aster_cli/coding/verification.py)、[现有边界与回归记录](../results/delivery-followup-20261120/README.md)。
 
@@ -208,4 +208,18 @@
 - Windows 完整 CLI **2,277 passed、43 skipped、1 deselected**；最终完整 ACP **990 passed、9 deselected、3 xfailed**。初轮 ACP 发现输入历史测试依赖相邻写入有不同时间戳，已保留真实记录路径、显式设置时间并参数化相反 session ID 顺序，生产排序未改动。另有一次模型会话初始化 30 秒超时，单独复验及上述完整 ACP 复验通过，未放宽超时；根因未证实。
 - Linux 定向回归 **182 passed、1 skipped、1 deselected**；补入真实 ACP wire 与输入历史用例后的相关范围 **51 passed、1 skipped**。这些范围有重叠，不相加。Windows 缺少符号链接创建权限及 POSIX FIFO 的用例跳过；独立硬链接与 junction 用例通过，Linux 覆盖符号链接、硬链接和 FIFO，条件跳过 Windows junction。
 - Windows Rust 会话控制回归 **61 passed**，fmt check 通过；全仓 Ruff 与格式检查通过，全部 **1,360** 个源码 Python 文件通过 SPDX 检查，差异检查通过。日志与 JUnit 位于本机临时目录 `aster-audit-delivery-da31de6dc7`，不随源码提交；远端结果须绑定本分支最终候选，记录于草稿 PR。
+- 最终 A2 候选 `611a232b` 的 [CI](https://github.com/Ykrsuao/aster-agent/actions/runs/45029653122) 与 [WSL full](https://github.com/Ykrsuao/aster-agent/actions/runs/45029656811) 均成功；Linux unit 与 WSL 各 **16,881 passed、56 skipped、584 deselected、3 xfailed**，独立 Linux sandbox、Windows 完整包安装及其余启用检查成功。前一候选曾因 ACP 通知尚未送达而失败；现按本轮独立 ID 等待四个工具终态和最终完整回复，保留原权限、内容及文件未变断言。
 - 验收边界：用户显式 slash 命令保留独立宿主权限合同，Plan 不把整个会话或 Python 解释器变成操作系统只读沙箱。模型使用 `FakeLLMClient`，没有调用真实模型 API；真实模型自主调查质量不由这些离线测试证明。A3/A4/A5、M1b 和 R1/R2 仍待推进，A1 保持候选方向。
+
+## A3 实施与验收（2026-11-22）
+
+- 实施分支：`codex/task-verification-20261122`，基于 A2 候选；继续使用显式的 `coding.required_checks`，没有自动猜测测试工具或依赖文件。
+- `VerificationState` 保存任务身份、工作区、文件基线、检查合同、通过证据和结果。宿主执行对象、shell 和在途 attempt 不入快照；恢复时绑定当前配置，上一回合仍在运行的检查记为中断，迟到结果不能覆盖新 attempt。
+- 任务未验收时，普通 `Done` 仍必须通过全部当前检查；`complete_task: false` 允许没有新修改或新检查请求的问答/规划保留任务。宿主追加待验收提示；流式回复保留同一消息身份，不产生重复回答或错误的中断提示。`NeedInput` 和 `Waiting` 保留任务。
+- 每回合开始、执行检查前和接受完成前重载配置。覆盖文件编辑、删除、新建、命令/超时/文件列表变更及工作区迁移均会使旧证据失效；显式删除全部检查禁用门槛并清除通过证据，重新启用必须重新检查。部分有效结果可跨回合和恢复继续使用。
+- 增补了显式 Python `return` 的既有验收旁路：计算得到的合法返回值原先只校验类型便结束；现在也执行策略后置条件。拒绝进入可纠正的反馈，检查代码自身出错继续作为基础设施错误报告。单独工具、inline `return_result` 与显式 `return` 都受验收合同约束。
+- 反例证据：跨回合未验收改动用例在旧实现失败；流式待验收提示用例复现重复消息/错误中断；显式 `return` 的四条策略用例修前失败，修后策略文件 **17 passed**。流式回复文件 **37 passed**，包含同一预览提交、取消、重试及摘要隔离。
+- 持久性验收使用实际 SQLite 保存/重开和两个真实 ACP 子进程：先修改并询问用户，再回答无关问题、关闭进程，随后重开同一会话；提前完成被拒绝，真实宿主检查通过后才能收尾。模型为离线脚本，不代表真实模型自主选用效果。
+- Windows Python 3.12 完整 CLI **2,297 passed、43 skipped、1 deselected**，最终完整 ACP **992 passed、9 deselected、3 xfailed**；Linux Python 3.13 全 strategies 加验收、wire、streaming 定向范围 **2,031 passed、124 deselected**，最终完整 ACP **991 passed、1 skipped、9 deselected、3 xfailed**。范围有重叠，不相加；Ruff、格式、全部 **1,362** 个源码 Python 文件的 SPDX 和差异检查通过。
+- 初轮 ACP 的三个旧私有状态/恢复断言已更新为公开验收状态合同，并证明重开后的新编辑使已通过结果失效。Windows 另有一次既有模型会话初始化 30 秒超时；三组定向及上述完整复验通过，根因未确认，未扩大上限。测试现在只在失败时附上启动阶段 stderr，保留后续诊断证据。日志与 JUnit 位于本机临时目录 `aster-audit-delivery-da31de6dc7`；远端结果须绑定最终提交记录于草稿 PR。
+- 边界：未配置持久存储时只在内存保留；旧版本快照没有历史文件基线可恢复。未列出的文件、任意外部副作用及检查点前强杀不在本项保证内；后者继续归 A4。此门槛防止意外完成声明，不是对任意模型 Python 的安全隔离。A4/A5、M1b 和 R1/R2 仍待推进，A1 保持候选方向。

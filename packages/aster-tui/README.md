@@ -791,6 +791,12 @@ Plan does not turn the Python interpreter or the whole session into an OS sandbo
 
 ## Reviewing and undoing file changes
 
+Configured [task verification checks](../aster-cli/README.md#interactive-coding-sessions)
+retain unverified edits and partial check results across turns and normal session
+reopens. Changed files or check settings invalidate old evidence. An unrelated
+answer can leave the coding task pending without running checks; its pending
+status is included in the reply. Checks remain opt-in through `coding.required_checks`.
+
 Open Git Changes with Ctrl+G, select a file, then press Ctrl+U. Choose all of its
 unstaged hunks or one hunk, inspect the proposed patch, and select Apply. The
 confirmation starts on Cancel. Foreground and background work must be stopped.

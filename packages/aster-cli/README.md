@@ -261,7 +261,7 @@ not affected.
 
 ## Interactive coding sessions
 
-Trusted hosts can require explicit checks after a coding turn changes specified
+Trusted hosts can require explicit checks after a coding task changes specified
 files. Configure them in the existing `.aster/settings.yaml` (or user settings
 and `ASTER_SETTINGS` layers):
 
@@ -293,20 +293,37 @@ return a nonzero exit code on failure; use formatter `--check`, not an auto-fix
 command. Check results record actual exit/timeout status and file hashes. A
 failed, skipped or outdated result cannot be replaced by a `Done.evidence` claim.
 
-The existing completion validator requires every configured check to pass on
-the final file contents if the turn changed a listed file or explicitly invoked
-verification. Changes during a check invalidate that result. A pure conversation
-with no listed file changes does not run commands or require checks. No checks
-are enabled by default, and the framework does not guess test tools or file
-dependencies.
+Changing a listed file or explicitly requesting verification creates a pending
+task. Its identity, file baseline, check contract and outcomes are saved in the
+existing session snapshot. A new turn or restored session retains that task,
+including partial successful checks; a `Done` reply requires every current check
+to pass on the final contents. Changes during a check invalidate its result, and
+late results from a previous turn or superseded attempt cannot replace current
+evidence. `self.verification_status()` shows pending files and check outcomes
+without running commands.
 
-Definitions stay fixed for the session; results are not restored from snapshots
-or reused across turns. This first version checks the declared files in the
-current turn, not every historical edit: after reopening or continuing a failed
-turn without further edits, explicitly request `verify` before claiming those
-earlier changes are validated. Background changes after completion and files
-omitted from the configured list are outside this guarantee. This prevents
-accidental completion claims; it is not a security boundary against arbitrary
+The host reloads check settings at turn start, before `verify`, and before task
+acceptance. Changes to a command, timeout, file list or workspace invalidate the
+saved evidence. Changing covered contents makes old passes stale, including
+changes made outside the agent while a session was closed. Removing all checks
+explicitly disables the gate and clears its evidence; re-enabling them requires
+fresh checks. No checks are enabled by default, and the framework does not guess
+test tools or file dependencies.
+
+Ordinary conversation without a pending task needs no checks. With an earlier
+task still pending, the coding reply can set `complete_task: false` in the
+`return_result` JSON object to answer an unrelated question or provide a plan.
+The host retains the task and appends its pending verification status to the
+reply. This flag cannot bypass checks for edits or verification requested in the
+current turn. `NeedInput` and `Waiting` also retain pending work.
+
+Persistence requires the host's normal session snapshots; an agent without
+persistent storage retains this state only in memory. Old snapshots created
+before task verification have no historical baseline to recover. Changes after
+the last observation are detected when the next turn or status check observes
+them; this is not a background file watcher. Files omitted from the configured
+list and arbitrary side effects are outside this contract. These checks prevent
+accidental completion claims; they are not a security boundary against arbitrary
 agent-generated Python.
 
 `aster_cli.sessions` owns durable coding-agent session identity, metadata, and

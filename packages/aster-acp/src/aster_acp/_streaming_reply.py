@@ -139,6 +139,12 @@ class ReplyStream:
                 call.sent = ""
                 call.disabled = True
 
+    def amend(self, original: str, text: str) -> None:
+        """Retain a validated reply's identity when the host appends a status notice."""
+        for call in self._calls.values():
+            if call.final is not None and call.final == original.strip():
+                call.final = text.strip()
+
     def accept(self, text: str) -> str | None:
         for index, call in tuple(self._calls.items()):
             if call.final is not None and call.final == text.strip():

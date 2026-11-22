@@ -2129,32 +2129,75 @@ Standard Python builtins and agent instance (`self`) are available."""
                     return_type,
                     method_name,
                 )
-                if success:
-                    # Add execution output event
+            except Exception as e:
+                logger.debug(f"[CODEACT] Auto-completion validation error: {e}, continuing loop")
+                success = False
+
+            if success:
+                # Keep postcondition infrastructure failures outside the type-validation
+                # fallback. Only an InvariantError is feedback the model can correct.
+                try:
+                    run_postconditions(runtime.agent, validated, call, self.config.postconditions)
+                except InvariantError as error:
+                    hm.validation_error(type(error).__name__, str(error)[:500])
+                    session.record_error()
+                    error_msg = format_validation_error(
+                        error, return_type, validated, runtime.truncation_config
+                    )
+                    runtime.event_manager.update(
+                        tool_call_event_id,
+                        result=ToolResult(
+                            tool_call_id=tool_call.id,
+                            content=_EXECUTE_PYTHON_RECEIPT,
+                            result_status=ResultStatus.ERROR,
+                        ),
+                    )
                     runtime.event_manager.add(
                         PythonOutput(
                             tool_call_id=tool_call.id,
                             execution_count=execution_count,
                             stdout=result.stdout,
-                            stderr=result.stderr,
-                            value=result.returned_value,
+                            stderr=(
+                                f"{result.stderr}\nreturn validation error: {error_msg}"
+                                if result.stderr
+                                else f"return validation error: {error_msg}"
+                            ),
+                            value=None,
                             explicit_return=result.explicit_return,
-                            execution_status=ResultStatus.COMPLETE,
+                            execution_status=ResultStatus.ERROR,
                             images=result.images,
                         )
                     )
-                    get_harness_metrics().explicit_return_completed()
-                    # Record a trace-only completion marker. Both CodeAct variants
-                    # omit this marker from provider replay: it was not an LLM call.
-                    self._emit_synthetic_inline_return(runtime, validated)
-                    logger.info("[CODEACT] Auto-completed task from explicit return statement")
-                    return ("TASK_COMPLETE", validated)
-                # Validation failed - continue with normal flow
-                logger.debug(
-                    "[CODEACT] Auto-completion validation failed (type mismatch), continuing loop"
+                    if session.is_exhausted():
+                        raise GenerationError(
+                            f"return validation failed after {session.max_retries} attempts.\n"
+                            f"Last error:\n{error_msg}"
+                        ) from error
+                    return None
+
+                # Add execution output event
+                runtime.event_manager.add(
+                    PythonOutput(
+                        tool_call_id=tool_call.id,
+                        execution_count=execution_count,
+                        stdout=result.stdout,
+                        stderr=result.stderr,
+                        value=result.returned_value,
+                        explicit_return=result.explicit_return,
+                        execution_status=ResultStatus.COMPLETE,
+                        images=result.images,
+                    )
                 )
-            except Exception as e:
-                logger.debug(f"[CODEACT] Auto-completion validation error: {e}, continuing loop")
+                get_harness_metrics().explicit_return_completed()
+                # Record a trace-only completion marker. Both CodeAct variants
+                # omit this marker from provider replay: it was not an LLM call.
+                self._emit_synthetic_inline_return(runtime, validated)
+                logger.info("[CODEACT] Auto-completed task from explicit return statement")
+                return ("TASK_COMPLETE", validated)
+            # Validation failed - continue with normal flow
+            logger.debug(
+                "[CODEACT] Auto-completion validation failed (type mismatch), continuing loop"
+            )
 
         # Note: Bare expressions (IPython-style) are shown as "Out[n]:" but do NOT auto-complete.
         # Only explicit `return x` statements can auto-complete the task.

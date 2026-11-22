@@ -146,10 +146,12 @@ async def test_acp_verify_respects_execution_denial(tmp_path, checked_adapters, 
     assert "not run" in repr(llm.calls[-1].messages).lower()
     assert not (tmp_path / "check-ran.txt").exists()
     session = (await adapter._sessions.get(session_id)).value
-    assert not session.agent._verification._passed
+    assert session.agent.verification_status()["checks"] == {"unit": "not_run"}
 
 
-async def test_loaded_acp_session_does_not_restore_passed_checks(tmp_path, checked_adapters):
+async def test_loaded_acp_session_invalidates_restored_passes_after_new_edits(
+    tmp_path, checked_adapters
+):
     first, _, _ = checked_adapters(
         _response("await self.shell.write_file('target.txt', 'changed')"),
         _response("print(await self.verify('unit'))"),
@@ -160,7 +162,9 @@ async def test_loaded_acp_session_does_not_restore_passed_checks(tmp_path, check
         session_id = (await first.new_session(str(tmp_path))).session_id
         await first.prompt(session_id, [text_block("Edit and verify the file")])
         session = (await first._sessions.get(session_id)).value
-        assert session.agent._verification._passed
+        saved_status = session.agent.verification_status()
+        assert saved_status["state"] == "verified"
+        assert saved_status["checks"] == {"unit": "passed"}
         await first.close()
 
         restarted, llm, _ = checked_adapters(
@@ -173,11 +177,14 @@ async def test_loaded_acp_session_does_not_restore_passed_checks(tmp_path, check
         await restarted.load_session(str(tmp_path), session_id)
         restored = (await restarted._sessions.get(session_id)).value
         assert not llm.calls
-        assert not restored.agent._verification._passed
+        assert restored.agent.verification_status() == saved_status
         response = await restarted.prompt(
             session_id, [text_block("Make and verify another change")]
         )
     assert response.stop_reason == "end_turn"
     assert llm.call_count == 4
     assert "Required checks" in repr(llm.calls[2].messages)
-    assert restored.agent._verification._passed
+    status = restored.agent.verification_status()
+    assert status["state"] == "verified"
+    assert status["checks"] == {"unit": "passed"}
+    assert status["task_id"] != saved_status["task_id"]

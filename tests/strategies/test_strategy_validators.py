@@ -18,6 +18,7 @@ import pytest
 
 from aster import Agent, InvariantError, strategy
 from aster.config import CodeActConfig
+from aster.errors import GenerationError
 from aster.strategies.codeact import CodeActStrategy
 from aster.strategy_validation import normalize_conditions, run_postconditions, run_preconditions
 from aster.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
@@ -25,6 +26,14 @@ from aster.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
 def _return_result_call(result, call_id: str = "call_ret") -> ToolCall:
     return ToolCall(id=call_id, name="return_result", arguments=json.dumps({"result": result}))
+
+
+def _explicit_return_call(result, call_id: str = "call_ret") -> ToolCall:
+    return ToolCall(
+        id=call_id,
+        name="execute_python",
+        arguments=json.dumps({"code": f"return {result!r}"}),
+    )
 
 
 def _resp(tool_calls: list) -> LLMResponse:
@@ -116,21 +125,30 @@ class _ValidatedAgent(Agent, llm=_DUMMY_LLM):
 
 
 @pytest.mark.asyncio
-async def test_postcondition_rejects_then_accepts_on_retry():
+@pytest.mark.parametrize("complete", [_return_result_call, _explicit_return_call])
+async def test_postcondition_rejects_then_accepts_on_retry(complete):
     fake = FakeLLMClient(
         scripted_responses=[
-            _resp([_return_result_call("bad", "c1")]),  # InvariantError -> retry
-            _resp([_return_result_call("good", "c2")]),
+            _resp([complete("bad", "c1")]),  # InvariantError -> retry
+            _resp([complete("good", "c2")]),
         ]
     )
     agent = _ValidatedAgent(llm=fake)
     assert await agent.solve("q") == "good"
     assert fake.call_count == 2  # one retry for the rejected result
+    if complete is _explicit_return_call:
+        rejected = next(
+            output for output in agent.events.query(type="PythonOutput") if output.stderr
+        )
+        assert "'bad' is not acceptable" in rejected.stderr
+        assert rejected.execution_status.value == "error"
+        assert rejected.value is None
 
 
 @pytest.mark.asyncio
-async def test_no_violation_passes_first_try():
-    fake = FakeLLMClient(scripted_responses=[_resp([_return_result_call("good")])])
+@pytest.mark.parametrize("complete", [_return_result_call, _explicit_return_call])
+async def test_no_violation_passes_first_try(complete):
+    fake = FakeLLMClient(scripted_responses=[_resp([complete("good")])])
     agent = _ValidatedAgent(llm=fake)
     assert await agent.solve("q") == "good"
     assert fake.call_count == 1
@@ -144,8 +162,9 @@ class _PlainAgent(Agent, llm=_DUMMY_LLM):
 
 
 @pytest.mark.asyncio
-async def test_no_postconditions_configured_is_unaffected():
-    fake = FakeLLMClient(scripted_responses=[_resp([_return_result_call("bad")])])
+@pytest.mark.parametrize("complete", [_return_result_call, _explicit_return_call])
+async def test_no_postconditions_configured_is_unaffected(complete):
+    fake = FakeLLMClient(scripted_responses=[_resp([complete("bad")])])
     agent = _PlainAgent(llm=fake)
     assert await agent.solve("q") == "bad"  # no postcondition -> no rejection
     assert fake.call_count == 1
@@ -163,14 +182,71 @@ class _BuggyAgent(Agent, llm=_DUMMY_LLM):
 
 
 @pytest.mark.asyncio
-async def test_buggy_postcondition_surfaces_as_infra_error_not_retry():
+@pytest.mark.parametrize("complete", [_return_result_call, _explicit_return_call])
+async def test_buggy_postcondition_surfaces_as_infra_error_not_retry(complete):
     """A postcondition that raises a non-InvariantError must not be swallowed as
     model-correctable feedback (it's an infra/programming error)."""
-    fake = FakeLLMClient(scripted_responses=[_resp([_return_result_call("anything")])])
+    fake = FakeLLMClient(scripted_responses=[_resp([complete("anything")])])
     agent = _BuggyAgent(llm=fake)
     with pytest.raises(RuntimeError, match="postcondition"):
         await agent.solve("q")
     assert fake.call_count == 1  # no spurious retry loop
+
+
+@pytest.mark.asyncio
+async def test_explicit_return_postconditions_preserve_validated_string_values():
+    seen = []
+
+    def record_result(agent, result, call):
+        seen.append(result)
+
+    class UnionAgent(Agent, llm=_DUMMY_LLM):
+        @strategy(CodeActStrategy(config=CodeActConfig(postconditions=[record_result])))
+        async def solve(self) -> str | dict:
+            """Return the requested value."""
+            ...
+
+    fake = FakeLLMClient(
+        scripted_responses=[
+            _resp(
+                [
+                    ToolCall(
+                        id="explicit",
+                        name="execute_python",
+                        arguments=json.dumps({"code": "payload = {'n': 1}\nreturn 'payload'"}),
+                    )
+                ]
+            )
+        ]
+    )
+    assert await UnionAgent(llm=fake).solve() == "payload"
+    assert seen == ["payload"]
+    assert fake.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_return_postcondition_rejections_exhaust_the_retry_budget():
+    class LimitedAgent(Agent, llm=_DUMMY_LLM):
+        @strategy(
+            CodeActStrategy(
+                config=CodeActConfig(
+                    postconditions=[_post_reject_bad], max_retries=2, max_iterations=3
+                )
+            )
+        )
+        async def solve(self) -> str:
+            """Return a valid result."""
+            ...
+
+    fake = FakeLLMClient(
+        scripted_responses=[
+            _resp([_explicit_return_call("bad", "first")]),
+            _resp([_explicit_return_call("bad", "second")]),
+        ]
+    )
+    with pytest.raises(GenerationError, match="2 attempts"):
+        await LimitedAgent(llm=fake).solve()
+    assert fake.call_count == 2
 
 
 def _post_cancel(agent, result, call):

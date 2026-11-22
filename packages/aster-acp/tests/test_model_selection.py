@@ -82,20 +82,23 @@ async def test_stdio_remembers_an_existing_model_without_rewriting_its_connectio
         ASTER_SESSIONS_DIR=str(tmp_path / "sessions"),
         LITELLM_LOCAL_MODEL_COST_MAP="True",
         PYTHONIOENCODING="utf-8",
+        ASTER_STARTUP_TIMING="1",
     )
-    process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-u",
-        "-m",
-        "aster_acp",
-        "--select-model",
-        "--no-sandbox",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-        env=environment,
-        cwd=workspace,
-    )
+    stderr_path = tmp_path / "acp-stderr.log"
+    with stderr_path.open("wb") as stderr:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-u",
+            "-m",
+            "aster_acp",
+            "--select-model",
+            "--no-sandbox",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=stderr,
+            env=environment,
+            cwd=workspace,
+        )
 
     async def call(number, method, params):
         assert process.stdin is not None and process.stdout is not None
@@ -134,6 +137,9 @@ async def test_stdio_remembers_an_existing_model_without_rewriting_its_connectio
             "default_model": "stdio-test"
         }
         assert (model_path.read_bytes(), secrets_path.read_bytes()) == before
+    except Exception as exc:
+        exc.add_note("ACP stderr:\n" + stderr_path.read_text(encoding="utf-8", errors="replace"))
+        raise
     finally:
         if process.returncode is None:
             process.terminate()
