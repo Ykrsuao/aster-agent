@@ -195,9 +195,26 @@ def test_abstraction_with_reasoner_creates_skill_linked_to_episodes(store, emb):
     assert {e1.id, e2.id} <= targets
 
 
-def test_reconsolidate_archives_stale_and_keeps_current(store, emb):
-    older = _add(store, emb, "my 5k personal best is 27:00", type=MemoryType.INFO)
-    _add(store, emb, "my 5k personal best is now 25:50", type=MemoryType.INFO)
+@pytest.mark.parametrize("older_id,newer_id", [("a", "z"), ("z", "a")])
+def test_reconsolidate_archives_stale_and_keeps_current(store, emb, older_id, newer_id):
+    # Give the facts explicit chronology even when the host clock has coarse ticks.
+    now = time.time()
+    older = _add(
+        store,
+        emb,
+        "my 5k personal best is 27:00",
+        id=older_id,
+        type=MemoryType.INFO,
+        created_at=now - 1,
+    )
+    _add(
+        store,
+        emb,
+        "my 5k personal best is now 25:50",
+        id=newer_id,
+        type=MemoryType.INFO,
+        created_at=now,
+    )
 
     def reconciler(cluster):
         # cluster is oldest -> newest; supersede everything but the latest

@@ -149,7 +149,8 @@
 ## 复核与推进（2026-11-22）
 
 - 三个独立审查分别核对了用户流程、任务可靠性/记忆、发布/评测。结论支持继续推进，以上已合入范围和优先级修正。
-- 离线验证：记忆包 353 passed、13 optional-backend skipped、1 integration deselected；skills/slash/MCP/Plan 定向回归 45 passed、1 既有 xfailed；任务验收与宿主记忆责任回归 21 passed；冻结十任务的损坏种子全部拒绝、参考解全部通过。
+- 初次离线验证：记忆包 353 passed、13 optional-backend skipped、1 integration deselected；skills/slash/MCP/Plan 定向回归 45 passed、1 既有 xfailed；任务验收与宿主记忆责任回归 21 passed；冻结十任务的损坏种子全部拒绝、参考解全部通过。
 - 额外探针复现了跨回合未验收改动放行（A3）和默认 NumPy 后端混维写入后检索失败（M1a）。原始文本保留；未调用真实模型或付费服务。
-- 本批已实现 Q1 的 Rust 格式修复，以及 Q2 的默认记忆测试收集、Windows 记忆回归、Linux 原生终端 job 和 WSL 宿主配置修复。Windows fmt/Clippy、628 项 Rust 测试与 160 项交付/启动/ACP 回归已通过；默认测试收集选中 16,359 项，其中记忆包 366 项。
-- 最终完成状态还应关联同一干净候选的安装/升级与 CI 结果。远端旧 SHA 的失败与新候选验证须分别记录；同版本重装不得记作跨版本升级。
+- 本批已实现 Q1 的 Rust 格式修复，以及 Q2 的默认记忆测试收集、Windows 记忆回归、Linux 原生终端 job 和 WSL 宿主配置修复。首轮 Windows fmt/Clippy、628 项 Rust 测试与 160 项交付/启动/ACP 回归已通过；首轮默认测试收集选中 16,359 项，其中记忆包 366 项。
+- 新增的 Windows 记忆 CI 在候选 `f9e2be2a` 捕获一项测试时间假设：连续创建的新旧事实可能同时间，随机 ID 决定排序。冻结时钟可复现；测试现已显式设置先后时间，并覆盖两种 ID 顺序，保留原断言。修复后本地记忆回归 354 passed、13 skipped、1 integration deselected；默认收集选中 16,360 项，其中记忆包 367 项。生产排序未改动，M1a 仍未修复。失败证据见 [CI 44967334424](https://github.com/Ykrsuao/aster-agent/actions/runs/44967334424/job/137039226272)。
+- 最终完成状态还应关联同一干净候选的安装/升级与 CI 结果，后续证据汇总在 [质量基线 PR](https://github.com/Ykrsuao/aster-agent/pull/1)。远端旧 SHA 的失败与新候选验证须分别记录；同版本重装不得记作跨版本升级。
