@@ -84,6 +84,30 @@ async def test_stdio_remembers_an_existing_model_without_rewriting_its_connectio
         PYTHONIOENCODING="utf-8",
         ASTER_STARTUP_TIMING="1",
     )
+    if sys.platform == "win32":
+        # This journey measures model selection and persistence with prepared
+        # SDK code. The dedicated startup test exercises a genuinely cold cache.
+        environment.update(
+            XDG_CACHE_HOME=str(tmp_path / "cache"),
+            ASTER_PROVIDER_CODE_CACHE="1",
+        )
+        preparation = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            "from aster_acp._provider_code import activate_provider_code_cache; "
+            "assert activate_provider_code_cache()",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=environment,
+            cwd=workspace,
+        )
+        try:
+            _, preparation_stderr = await asyncio.wait_for(preparation.communicate(), timeout=120)
+        finally:
+            if preparation.returncode is None:
+                preparation.kill()
+                await preparation.wait()
+        assert preparation.returncode == 0, preparation_stderr.decode("utf-8", errors="replace")
     stderr_path = tmp_path / "acp-stderr.log"
     with stderr_path.open("wb") as stderr:
         process = await asyncio.create_subprocess_exec(

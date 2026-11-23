@@ -92,7 +92,17 @@ def test_null_secrets_env_is_populated(tmp_path):
 
 
 def _write_from_process(path, alias, first_inside, release_first, second_started, second_inside):
+    from contextlib import contextmanager
+
+    original_lock = connect.registry_write_lock
     original_write = connect._write_entry
+
+    @contextmanager
+    def observed_lock(path):
+        if alias == "second":
+            second_started.set()
+        with original_lock(path) as resolved:
+            yield resolved
 
     def held_write(entry, path, *, alias, **kwargs):
         if alias == "first":
@@ -102,10 +112,11 @@ def _write_from_process(path, alias, first_inside, release_first, second_started
             second_inside.set()
         original_write(entry, path, alias=alias, **kwargs)
 
+    connect.registry_write_lock = observed_lock
     connect._write_entry = held_write
-    if alias == "second":
-        second_started.set()
-    connect.write({"model_name": "openai/model"}, path, alias=alias)
+    # Keep SDK cold imports out of this file-lock test. Readiness above means
+    # the second writer is acquiring the lock, rather than preparing its config.
+    connect.write({"model_name": "openai/model", "client_type": "responses"}, path, alias=alias)
 
 
 def test_concurrent_registry_writers_serialize_the_entire_update(tmp_path):
