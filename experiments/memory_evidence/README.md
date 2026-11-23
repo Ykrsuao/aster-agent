@@ -105,17 +105,20 @@ identifiers, verdicts, token/cost metadata and hashed answer/record values are
 retained; prompts, raw note content and response transcripts are omitted.
 Temporary databases are closed and removed after the run.
 
-The committed summary is synthetic evidence from this harness. A dirty candidate
-records that the run occurred before the combined change was committed; exact
-source hashes identify the files used. It is not clean-release acceptance or a
-reconstruction of unpublished historical results.
+The committed summary is synthetic evidence from this harness. Candidate
+metadata records the commit, dirty flag and source diff; exact source hashes
+identify the files used. It is not clean-release acceptance or a reconstruction
+of unpublished historical results.
 
 ## Results summary
 
-Measured on **2026-11-23 at 00:41 +08:00** on native Windows with Python 3.12.13.
+Measured on **2026-11-23 at 13:47 +08:00** on native Windows with Python 3.12.13.
 The saved report is
 [`results/offline-windows-20261123.json`](results/offline-windows-20261123.json).
-It records the UTC timestamp, dirty candidate and exact source hashes.
+It records the timestamp with its UTC offset, candidate `5f728da2`,
+`dirty=true`, an empty tracked diff and no untracked source files. The fixture
+and four source hashes match the committed Git bytes; the dirty flag is retained
+and does not establish clean-release acceptance.
 
 ```bash
 uv run --offline --no-sync python -m experiments.memory_evidence.run --output experiments/memory_evidence/results/offline-windows-20261123.json --repeats 2 --timeout 60

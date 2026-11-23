@@ -3,31 +3,24 @@
   "measurement_kind": "offline-scripted",
   "evidence_scope": "storage-reopen-retrieval-scripted-answer-independent-scoring",
   "real_model_benefit_verified": false,
-  "created_at": "2026-11-22T16:41:29.397874+00:00",
+  "created_at": "2026-11-23T05:47:54.870663+00:00",
   "platform": {
     "system": "Windows",
     "python": "3.12.13"
   },
   "candidate": {
-    "commit": "271aa4c62c4f5b96381e594d722013c969bdfe3c",
+    "commit": "5f728da2cfadc3caeaa7530b368a5c682a39c21d",
     "dirty": true,
-    "diff_sha256": "4956d26a46c609b08552122a44271789fdd3664f009d1b79a5e3e646f364daa7",
-    "untracked_source_sha256": {
-      "experiments/memory_evidence/responder.py": "88abcfc67a288f54ebaed632e987b3741e36062d585ad8dad86dd9a9fc82be73",
-      "experiments/memory_evidence/run.py": "70d018b27de8cb14359a15be55aebce1c519d53286c82efa642d3022dba19d34",
-      "experiments/memory_evidence/scoring.py": "306c2447bf94017236846b45b31de5ba74a86125aaab2f6971539b88d9211bb4",
-      "packages/aster-memory/tests/memory/test_memory_evidence_harness.py": "02d8b327377faada3aa2921254401eb4ca1aedaa64190236effc37e836189533",
-      "util/eval_pipeline/src/eval_pipeline/usage.py": "eb9cd0bcd4751be10a8c06e72c6984025598a3606b0124330c41427a5ef5327c",
-      "util/eval_pipeline/tests/test_token_usage.py": "d94944ceb8ec702d3fa6dd0195188cce2708c941c11fcf325225f4df6176855b"
-    }
+    "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "untracked_source_sha256": {}
   },
   "fixture_sha256": "3c0589bf6b25a4d0c6bfeb38323e447aa975bc87c963dc1e341363ec63319ce2",
-  "runner_sha256": "0a8fc35122510a685a1ca90d4474033cc05644bc5700b91552923236d88417fb",
+  "runner_sha256": "4fb99ee1c73adbf522909c2c690fcf98ab07c7fdb4f06ac99516d7c83f8ab9d8",
   "source_files_sha256": {
-    "experiments/memory_evidence/run.py": "70d018b27de8cb14359a15be55aebce1c519d53286c82efa642d3022dba19d34",
+    "experiments/memory_evidence/run.py": "1403f89f6f330d133c0b8db2a050386f89c324bac3ab9a323a6580287edc9dfe",
     "experiments/memory_evidence/responder.py": "88abcfc67a288f54ebaed632e987b3741e36062d585ad8dad86dd9a9fc82be73",
     "experiments/memory_evidence/scoring.py": "306c2447bf94017236846b45b31de5ba74a86125aaab2f6971539b88d9211bb4",
-    "scripts/terminal_acceptance.py": "dffca95c4bd38d6ea8b44a86bc4395e47955450573ff9ed2935160441b105b06"
+    "scripts/terminal_acceptance.py": "7e3ef4e932d16a4ea7e57de0e0dcbad2a291ccb35dee46cca8d60a2212926b16"
   },
   "scripted_policy_sha256": "6c151b2d4301e25cfcd397f1d75e142e563c24151e5b3d64daf5e0ab3b16453c",
   "source": "Local fixture identified by fixture_sha256; fresh temporary SQLite databases per arm/repeat.",
@@ -77,7 +70,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 6.683166400001937,
+          "elapsed_seconds": 9.9084526000006,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -144,7 +137,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.031198299999232404,
+          "elapsed_seconds": 0.06568979999974545,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -211,7 +204,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.03012719999969704,
+          "elapsed_seconds": 0.06400550000034855,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -278,7 +271,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.033774300001823576,
+          "elapsed_seconds": 0.09271129999979166,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -345,7 +338,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.03295099999741069,
+          "elapsed_seconds": 0.05684740000106103,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -412,7 +405,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.03268419999949401,
+          "elapsed_seconds": 0.06054450000010547,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -479,7 +472,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.03154229999927338,
+          "elapsed_seconds": 0.04511209999873245,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -546,7 +539,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.033153299998957664,
+          "elapsed_seconds": 0.050996699999814155,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -613,7 +606,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.03267259999847738,
+          "elapsed_seconds": 0.040157200000976445,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -680,7 +673,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.028406200002791593,
+          "elapsed_seconds": 0.04775069999959669,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -747,7 +740,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.03027989999827696,
+          "elapsed_seconds": 0.04397359999893524,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -814,7 +807,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.03147829999943497,
+          "elapsed_seconds": 0.04887419999977283,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -947,7 +940,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.05318029999762075,
+          "elapsed_seconds": 0.07313629999953264,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -984,8 +977,8 @@
               "rollback_checkpoint": "7de142fbd0f925db7309bd7b41c3bea47dd2c52d9b330ba144ef89c13065b3cb"
             },
             "citations_sha256": {
-              "deploy_target": "50eddc53beb884024d5764dea9d6b3fcb888da86b89b46ba306d3e534c6ded15",
-              "rollback_checkpoint": "dd943317ae7d3b9673f54507b973c4c32a98779535e83017b3124e7ba98bb1c5"
+              "deploy_target": "dc59e1d5256f02f29ccd8d165d54d21b1321ef3fe4aaa7c88956797b818d7bc5",
+              "rollback_checkpoint": "3d0aab9bb175c9df18f48c2fef2729db3dc3789602bf52f6df273d8e7c679310"
             },
             "claimed_complete": true
           },
@@ -995,19 +988,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "50eddc53beb884024d5764dea9d6b3fcb888da86b89b46ba306d3e534c6ded15",
+                  "memory_id_sha256": "dc59e1d5256f02f29ccd8d165d54d21b1321ef3fe4aaa7c88956797b818d7bc5",
                   "key": "deploy_target",
                   "value_sha256": "6d8f06ca4e4bb18b098f8c0513251f32ffe1088bbeee09d43ac4ec65c1fa7e0d",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "c43959ee641b033993e91826150e76f33b276b34d06ca7b673f630194d5c8b3b",
+                  "memory_id_sha256": "eb8d54df11a6a9a4a388760d13be0af7f15302f4ce530a6b0886dd8c557cc9d5",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "1f6d7e62e284d11033f43e9ed2e483c37bac4d6bb8d8c64ffe54d83b0aeac16a",
+                  "memory_id_sha256": "1ad09d9b9ce1b0b1cfef9f14bed4acfdc88ddc9bbca57fcfa2a8654f6dbad0b5",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -1019,19 +1012,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "dd943317ae7d3b9673f54507b973c4c32a98779535e83017b3124e7ba98bb1c5",
+                  "memory_id_sha256": "3d0aab9bb175c9df18f48c2fef2729db3dc3789602bf52f6df273d8e7c679310",
                   "key": "rollback_checkpoint",
                   "value_sha256": "7de142fbd0f925db7309bd7b41c3bea47dd2c52d9b330ba144ef89c13065b3cb",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "50eddc53beb884024d5764dea9d6b3fcb888da86b89b46ba306d3e534c6ded15",
+                  "memory_id_sha256": "dc59e1d5256f02f29ccd8d165d54d21b1321ef3fe4aaa7c88956797b818d7bc5",
                   "key": "deploy_target",
                   "value_sha256": "6d8f06ca4e4bb18b098f8c0513251f32ffe1088bbeee09d43ac4ec65c1fa7e0d",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "1f6d7e62e284d11033f43e9ed2e483c37bac4d6bb8d8c64ffe54d83b0aeac16a",
+                  "memory_id_sha256": "1ad09d9b9ce1b0b1cfef9f14bed4acfdc88ddc9bbca57fcfa2a8654f6dbad0b5",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -1058,7 +1051,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.04978839999967022,
+          "elapsed_seconds": 0.07432229999903939,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -1095,8 +1088,8 @@
               "retention_policy": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007"
             },
             "citations_sha256": {
-              "backup_vault": "c43959ee641b033993e91826150e76f33b276b34d06ca7b673f630194d5c8b3b",
-              "retention_policy": "1f6d7e62e284d11033f43e9ed2e483c37bac4d6bb8d8c64ffe54d83b0aeac16a"
+              "backup_vault": "eb8d54df11a6a9a4a388760d13be0af7f15302f4ce530a6b0886dd8c557cc9d5",
+              "retention_policy": "1ad09d9b9ce1b0b1cfef9f14bed4acfdc88ddc9bbca57fcfa2a8654f6dbad0b5"
             },
             "claimed_complete": true
           },
@@ -1106,19 +1099,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "c43959ee641b033993e91826150e76f33b276b34d06ca7b673f630194d5c8b3b",
+                  "memory_id_sha256": "eb8d54df11a6a9a4a388760d13be0af7f15302f4ce530a6b0886dd8c557cc9d5",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "50eddc53beb884024d5764dea9d6b3fcb888da86b89b46ba306d3e534c6ded15",
+                  "memory_id_sha256": "dc59e1d5256f02f29ccd8d165d54d21b1321ef3fe4aaa7c88956797b818d7bc5",
                   "key": "deploy_target",
                   "value_sha256": "6d8f06ca4e4bb18b098f8c0513251f32ffe1088bbeee09d43ac4ec65c1fa7e0d",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "1f6d7e62e284d11033f43e9ed2e483c37bac4d6bb8d8c64ffe54d83b0aeac16a",
+                  "memory_id_sha256": "1ad09d9b9ce1b0b1cfef9f14bed4acfdc88ddc9bbca57fcfa2a8654f6dbad0b5",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -1130,13 +1123,13 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "1f6d7e62e284d11033f43e9ed2e483c37bac4d6bb8d8c64ffe54d83b0aeac16a",
+                  "memory_id_sha256": "1ad09d9b9ce1b0b1cfef9f14bed4acfdc88ddc9bbca57fcfa2a8654f6dbad0b5",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "c43959ee641b033993e91826150e76f33b276b34d06ca7b673f630194d5c8b3b",
+                  "memory_id_sha256": "eb8d54df11a6a9a4a388760d13be0af7f15302f4ce530a6b0886dd8c557cc9d5",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
@@ -1163,7 +1156,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.052223099999537226,
+          "elapsed_seconds": 0.08247300000039104,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -1200,8 +1193,8 @@
               "signing_profile": "eb2f986567b0d42accfd904fdd0dec258133c410d68287195e75c938019a7ab5"
             },
             "citations_sha256": {
-              "build_queue": "8c29b8f9c687dc8b302fce4aa4f9df39c91d829f9b628424ae6175dfb478b088",
-              "signing_profile": "a3226a914d5dd2d781023164f8772f8b2b47cbcd99abd865209a61625752f9f2"
+              "build_queue": "3564a27bd1b772abb4c2bdb9997f7ead2f956066deeb4da6184ee46bf68200d9",
+              "signing_profile": "0264b43e87bec7b04bf725d8cf838c6584f7ad01f3cdd442fc731caca96498b3"
             },
             "claimed_complete": true
           },
@@ -1211,19 +1204,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "8c29b8f9c687dc8b302fce4aa4f9df39c91d829f9b628424ae6175dfb478b088",
+                  "memory_id_sha256": "3564a27bd1b772abb4c2bdb9997f7ead2f956066deeb4da6184ee46bf68200d9",
                   "key": "build_queue",
                   "value_sha256": "c815dfc3aeedbeaa52cc83c6c65ebd202626e22c6857ef491ae202a3896d0ac1",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "c43959ee641b033993e91826150e76f33b276b34d06ca7b673f630194d5c8b3b",
+                  "memory_id_sha256": "eb8d54df11a6a9a4a388760d13be0af7f15302f4ce530a6b0886dd8c557cc9d5",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "1f6d7e62e284d11033f43e9ed2e483c37bac4d6bb8d8c64ffe54d83b0aeac16a",
+                  "memory_id_sha256": "1ad09d9b9ce1b0b1cfef9f14bed4acfdc88ddc9bbca57fcfa2a8654f6dbad0b5",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -1235,19 +1228,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "a3226a914d5dd2d781023164f8772f8b2b47cbcd99abd865209a61625752f9f2",
+                  "memory_id_sha256": "0264b43e87bec7b04bf725d8cf838c6584f7ad01f3cdd442fc731caca96498b3",
                   "key": "signing_profile",
                   "value_sha256": "eb2f986567b0d42accfd904fdd0dec258133c410d68287195e75c938019a7ab5",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "dd943317ae7d3b9673f54507b973c4c32a98779535e83017b3124e7ba98bb1c5",
+                  "memory_id_sha256": "3d0aab9bb175c9df18f48c2fef2729db3dc3789602bf52f6df273d8e7c679310",
                   "key": "rollback_checkpoint",
                   "value_sha256": "7de142fbd0f925db7309bd7b41c3bea47dd2c52d9b330ba144ef89c13065b3cb",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "8c29b8f9c687dc8b302fce4aa4f9df39c91d829f9b628424ae6175dfb478b088",
+                  "memory_id_sha256": "3564a27bd1b772abb4c2bdb9997f7ead2f956066deeb4da6184ee46bf68200d9",
                   "key": "build_queue",
                   "value_sha256": "c815dfc3aeedbeaa52cc83c6c65ebd202626e22c6857ef491ae202a3896d0ac1",
                   "revision": "current"
@@ -1274,7 +1267,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.054180899998755194,
+          "elapsed_seconds": 0.07645899999988615,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -1311,8 +1304,8 @@
               "handoff_label": "a0dea6a5a7299ab955d67d524492211cc5c05bceda7f1085f0a96036510f4fa4"
             },
             "citations_sha256": {
-              "escalation_route": "a84eabd0a1c66104688b3ffdfb2df66ed92562088df75736f0b288fa2a3ce74b",
-              "handoff_label": "360f1fd0ea1446fc272d22578c7215e03dc46c8e26134bbb6d1b471dd9c6ddc5"
+              "escalation_route": "e53e32195090325f082c8899c336b852e2f3d8461d8d95a9e4fb86ab988b9414",
+              "handoff_label": "154980774331d5f79080d5b6e4a1f6094e30fbdc8701e9710656c59b0dc3ceca"
             },
             "claimed_complete": true
           },
@@ -1322,19 +1315,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "a84eabd0a1c66104688b3ffdfb2df66ed92562088df75736f0b288fa2a3ce74b",
+                  "memory_id_sha256": "e53e32195090325f082c8899c336b852e2f3d8461d8d95a9e4fb86ab988b9414",
                   "key": "escalation_route",
                   "value_sha256": "6d6984e26910291d77928415af93f97689fc95b7c7753cb63c01819f648fbd52",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "360f1fd0ea1446fc272d22578c7215e03dc46c8e26134bbb6d1b471dd9c6ddc5",
+                  "memory_id_sha256": "154980774331d5f79080d5b6e4a1f6094e30fbdc8701e9710656c59b0dc3ceca",
                   "key": "handoff_label",
                   "value_sha256": "a0dea6a5a7299ab955d67d524492211cc5c05bceda7f1085f0a96036510f4fa4",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "1f6d7e62e284d11033f43e9ed2e483c37bac4d6bb8d8c64ffe54d83b0aeac16a",
+                  "memory_id_sha256": "1ad09d9b9ce1b0b1cfef9f14bed4acfdc88ddc9bbca57fcfa2a8654f6dbad0b5",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -1346,19 +1339,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "360f1fd0ea1446fc272d22578c7215e03dc46c8e26134bbb6d1b471dd9c6ddc5",
+                  "memory_id_sha256": "154980774331d5f79080d5b6e4a1f6094e30fbdc8701e9710656c59b0dc3ceca",
                   "key": "handoff_label",
                   "value_sha256": "a0dea6a5a7299ab955d67d524492211cc5c05bceda7f1085f0a96036510f4fa4",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "1f6d7e62e284d11033f43e9ed2e483c37bac4d6bb8d8c64ffe54d83b0aeac16a",
+                  "memory_id_sha256": "1ad09d9b9ce1b0b1cfef9f14bed4acfdc88ddc9bbca57fcfa2a8654f6dbad0b5",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "a84eabd0a1c66104688b3ffdfb2df66ed92562088df75736f0b288fa2a3ce74b",
+                  "memory_id_sha256": "e53e32195090325f082c8899c336b852e2f3d8461d8d95a9e4fb86ab988b9414",
                   "key": "escalation_route",
                   "value_sha256": "6d6984e26910291d77928415af93f97689fc95b7c7753cb63c01819f648fbd52",
                   "revision": "current"
@@ -1385,7 +1378,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.04993319999994128,
+          "elapsed_seconds": 0.08130899999923713,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -1422,8 +1415,8 @@
               "recovery_slot": "7723c41720810a8ce690a9a8c2cc410fb49e2b098be776014917ea76b3472cb6"
             },
             "citations_sha256": {
-              "shard_group": "dd031015bb3aa41c7d4402e991974276d68c425f9cf58c69676eba1fcccaff60",
-              "recovery_slot": "cd9981847d764a8384629dfa6a6c0f34bc19ddd1a25bcf17e1ffa3d62afd0154"
+              "shard_group": "b70f738a9e78cd91b97a43dd853ce029ac06a1d49fe023ecbd0084561d259328",
+              "recovery_slot": "748b42c0943eccd02b3c49df9bbe027d330fe68782625acc732f47c0cbc5de29"
             },
             "claimed_complete": true
           },
@@ -1433,19 +1426,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "dd031015bb3aa41c7d4402e991974276d68c425f9cf58c69676eba1fcccaff60",
+                  "memory_id_sha256": "b70f738a9e78cd91b97a43dd853ce029ac06a1d49fe023ecbd0084561d259328",
                   "key": "shard_group",
                   "value_sha256": "5980decf74eb142321e9d4684b0a47c88c242ac1a6bacde1b435827c15629b0c",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "c43959ee641b033993e91826150e76f33b276b34d06ca7b673f630194d5c8b3b",
+                  "memory_id_sha256": "eb8d54df11a6a9a4a388760d13be0af7f15302f4ce530a6b0886dd8c557cc9d5",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "50eddc53beb884024d5764dea9d6b3fcb888da86b89b46ba306d3e534c6ded15",
+                  "memory_id_sha256": "dc59e1d5256f02f29ccd8d165d54d21b1321ef3fe4aaa7c88956797b818d7bc5",
                   "key": "deploy_target",
                   "value_sha256": "6d8f06ca4e4bb18b098f8c0513251f32ffe1088bbeee09d43ac4ec65c1fa7e0d",
                   "revision": "current"
@@ -1457,19 +1450,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "cd9981847d764a8384629dfa6a6c0f34bc19ddd1a25bcf17e1ffa3d62afd0154",
+                  "memory_id_sha256": "748b42c0943eccd02b3c49df9bbe027d330fe68782625acc732f47c0cbc5de29",
                   "key": "recovery_slot",
                   "value_sha256": "7723c41720810a8ce690a9a8c2cc410fb49e2b098be776014917ea76b3472cb6",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "1f6d7e62e284d11033f43e9ed2e483c37bac4d6bb8d8c64ffe54d83b0aeac16a",
+                  "memory_id_sha256": "1ad09d9b9ce1b0b1cfef9f14bed4acfdc88ddc9bbca57fcfa2a8654f6dbad0b5",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "c43959ee641b033993e91826150e76f33b276b34d06ca7b673f630194d5c8b3b",
+                  "memory_id_sha256": "eb8d54df11a6a9a4a388760d13be0af7f15302f4ce530a6b0886dd8c557cc9d5",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
@@ -1496,7 +1489,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.05149440000241157,
+          "elapsed_seconds": 0.09035270000094897,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -1533,8 +1526,8 @@
               "purge_route": "5d13ca73f3f9df9a571d198d32e15acf08f7c6b09fe0e49dcfba98738b8c35bd"
             },
             "citations_sha256": {
-              "cache_pool": "5022ebc160095add1a10a3d0ac56e7a879c6e9192b4b52cdf9e2decc096c515a",
-              "purge_route": "b0eab0037359184adfcc98cc26c4866d57a86552fc7d23e8a0e9a5b57d4cd69a"
+              "cache_pool": "a16b124c831059ae3a6a78b27663d37ddbd4a907abd7df3ea8f4c9e2755b21ee",
+              "purge_route": "b75b576bf746074d24dea3e1498f2781608db32ea82cb8a490badff2499338a0"
             },
             "claimed_complete": true
           },
@@ -1544,19 +1537,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "5022ebc160095add1a10a3d0ac56e7a879c6e9192b4b52cdf9e2decc096c515a",
+                  "memory_id_sha256": "a16b124c831059ae3a6a78b27663d37ddbd4a907abd7df3ea8f4c9e2755b21ee",
                   "key": "cache_pool",
                   "value_sha256": "9c35f5f03ac09ed368dd92a4b0ae5523af44e879138219d41e350160d0bceaf9",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "1f6d7e62e284d11033f43e9ed2e483c37bac4d6bb8d8c64ffe54d83b0aeac16a",
+                  "memory_id_sha256": "1ad09d9b9ce1b0b1cfef9f14bed4acfdc88ddc9bbca57fcfa2a8654f6dbad0b5",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "a84eabd0a1c66104688b3ffdfb2df66ed92562088df75736f0b288fa2a3ce74b",
+                  "memory_id_sha256": "e53e32195090325f082c8899c336b852e2f3d8461d8d95a9e4fb86ab988b9414",
                   "key": "escalation_route",
                   "value_sha256": "6d6984e26910291d77928415af93f97689fc95b7c7753cb63c01819f648fbd52",
                   "revision": "current"
@@ -1568,19 +1561,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "b0eab0037359184adfcc98cc26c4866d57a86552fc7d23e8a0e9a5b57d4cd69a",
+                  "memory_id_sha256": "b75b576bf746074d24dea3e1498f2781608db32ea82cb8a490badff2499338a0",
                   "key": "purge_route",
                   "value_sha256": "5d13ca73f3f9df9a571d198d32e15acf08f7c6b09fe0e49dcfba98738b8c35bd",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "a84eabd0a1c66104688b3ffdfb2df66ed92562088df75736f0b288fa2a3ce74b",
+                  "memory_id_sha256": "e53e32195090325f082c8899c336b852e2f3d8461d8d95a9e4fb86ab988b9414",
                   "key": "escalation_route",
                   "value_sha256": "6d6984e26910291d77928415af93f97689fc95b7c7753cb63c01819f648fbd52",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "1f6d7e62e284d11033f43e9ed2e483c37bac4d6bb8d8c64ffe54d83b0aeac16a",
+                  "memory_id_sha256": "1ad09d9b9ce1b0b1cfef9f14bed4acfdc88ddc9bbca57fcfa2a8654f6dbad0b5",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -1607,7 +1600,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.04865129999961937,
+          "elapsed_seconds": 0.08544240000082937,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -1644,8 +1637,8 @@
               "rollback_checkpoint": "7de142fbd0f925db7309bd7b41c3bea47dd2c52d9b330ba144ef89c13065b3cb"
             },
             "citations_sha256": {
-              "deploy_target": "781fffec0da0135ace734675ec88205f5bef8501c67101e4d4354fcde898d97e",
-              "rollback_checkpoint": "b839264616582178383cccd5d6281ce97ba556dec260f37ef871d791a7bd9425"
+              "deploy_target": "1637c0bab04a6950c0eab04a73b2ff973e7b9a900b17823343ff106c01b422be",
+              "rollback_checkpoint": "6aec1fcfddd53138d7c055b47af34546fbea7f535b6dcfb6aa70ab8474ae680e"
             },
             "claimed_complete": true
           },
@@ -1655,19 +1648,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "781fffec0da0135ace734675ec88205f5bef8501c67101e4d4354fcde898d97e",
+                  "memory_id_sha256": "1637c0bab04a6950c0eab04a73b2ff973e7b9a900b17823343ff106c01b422be",
                   "key": "deploy_target",
                   "value_sha256": "6d8f06ca4e4bb18b098f8c0513251f32ffe1088bbeee09d43ac4ec65c1fa7e0d",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "7f649c1d5ea1754e23c970611a4c4503266d55bf0253bad086fde19d0c3c3c3e",
+                  "memory_id_sha256": "a25d49ec1c3d14f4f92d4a8e7640744267f8a4e0406aa4238247ee7c82a36599",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "09e6c400e2933aac9e86bee65faf42035444d9d2987f3965efa0a3a17086360b",
+                  "memory_id_sha256": "36f3ea74b407936814d5b2dc39b5e6cac3ba7fcff396240019eb8b2dab572760",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -1679,19 +1672,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "b839264616582178383cccd5d6281ce97ba556dec260f37ef871d791a7bd9425",
+                  "memory_id_sha256": "6aec1fcfddd53138d7c055b47af34546fbea7f535b6dcfb6aa70ab8474ae680e",
                   "key": "rollback_checkpoint",
                   "value_sha256": "7de142fbd0f925db7309bd7b41c3bea47dd2c52d9b330ba144ef89c13065b3cb",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "781fffec0da0135ace734675ec88205f5bef8501c67101e4d4354fcde898d97e",
+                  "memory_id_sha256": "1637c0bab04a6950c0eab04a73b2ff973e7b9a900b17823343ff106c01b422be",
                   "key": "deploy_target",
                   "value_sha256": "6d8f06ca4e4bb18b098f8c0513251f32ffe1088bbeee09d43ac4ec65c1fa7e0d",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "09e6c400e2933aac9e86bee65faf42035444d9d2987f3965efa0a3a17086360b",
+                  "memory_id_sha256": "36f3ea74b407936814d5b2dc39b5e6cac3ba7fcff396240019eb8b2dab572760",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -1718,7 +1711,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.04739309999786201,
+          "elapsed_seconds": 0.08590639999965788,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -1755,8 +1748,8 @@
               "retention_policy": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007"
             },
             "citations_sha256": {
-              "backup_vault": "7f649c1d5ea1754e23c970611a4c4503266d55bf0253bad086fde19d0c3c3c3e",
-              "retention_policy": "09e6c400e2933aac9e86bee65faf42035444d9d2987f3965efa0a3a17086360b"
+              "backup_vault": "a25d49ec1c3d14f4f92d4a8e7640744267f8a4e0406aa4238247ee7c82a36599",
+              "retention_policy": "36f3ea74b407936814d5b2dc39b5e6cac3ba7fcff396240019eb8b2dab572760"
             },
             "claimed_complete": true
           },
@@ -1766,19 +1759,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "7f649c1d5ea1754e23c970611a4c4503266d55bf0253bad086fde19d0c3c3c3e",
+                  "memory_id_sha256": "a25d49ec1c3d14f4f92d4a8e7640744267f8a4e0406aa4238247ee7c82a36599",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "781fffec0da0135ace734675ec88205f5bef8501c67101e4d4354fcde898d97e",
+                  "memory_id_sha256": "1637c0bab04a6950c0eab04a73b2ff973e7b9a900b17823343ff106c01b422be",
                   "key": "deploy_target",
                   "value_sha256": "6d8f06ca4e4bb18b098f8c0513251f32ffe1088bbeee09d43ac4ec65c1fa7e0d",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "09e6c400e2933aac9e86bee65faf42035444d9d2987f3965efa0a3a17086360b",
+                  "memory_id_sha256": "36f3ea74b407936814d5b2dc39b5e6cac3ba7fcff396240019eb8b2dab572760",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -1790,13 +1783,13 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "09e6c400e2933aac9e86bee65faf42035444d9d2987f3965efa0a3a17086360b",
+                  "memory_id_sha256": "36f3ea74b407936814d5b2dc39b5e6cac3ba7fcff396240019eb8b2dab572760",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "7f649c1d5ea1754e23c970611a4c4503266d55bf0253bad086fde19d0c3c3c3e",
+                  "memory_id_sha256": "a25d49ec1c3d14f4f92d4a8e7640744267f8a4e0406aa4238247ee7c82a36599",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
@@ -1823,7 +1816,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.04696779999721912,
+          "elapsed_seconds": 0.09080549999998766,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -1860,8 +1853,8 @@
               "signing_profile": "eb2f986567b0d42accfd904fdd0dec258133c410d68287195e75c938019a7ab5"
             },
             "citations_sha256": {
-              "build_queue": "2c8514b0af32eb6b46871096c817add471e384a7c08fea38df91e3cdfcb9a132",
-              "signing_profile": "6eeb2d4d3dce8fc24002f5b971ccb816c90a16a2c8b68bd0e733b45d12ef662c"
+              "build_queue": "ac608e122e09f432a41bb8d3c4c3ff5f4a5bbc6dbc29789f63ebd94a0d0b8e11",
+              "signing_profile": "936254e96f33e7d7955087d9f30b2055f2c1d7dbc07b8fce2b0fd413d5fbccc9"
             },
             "claimed_complete": true
           },
@@ -1871,19 +1864,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "2c8514b0af32eb6b46871096c817add471e384a7c08fea38df91e3cdfcb9a132",
+                  "memory_id_sha256": "ac608e122e09f432a41bb8d3c4c3ff5f4a5bbc6dbc29789f63ebd94a0d0b8e11",
                   "key": "build_queue",
                   "value_sha256": "c815dfc3aeedbeaa52cc83c6c65ebd202626e22c6857ef491ae202a3896d0ac1",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "7f649c1d5ea1754e23c970611a4c4503266d55bf0253bad086fde19d0c3c3c3e",
+                  "memory_id_sha256": "a25d49ec1c3d14f4f92d4a8e7640744267f8a4e0406aa4238247ee7c82a36599",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "09e6c400e2933aac9e86bee65faf42035444d9d2987f3965efa0a3a17086360b",
+                  "memory_id_sha256": "36f3ea74b407936814d5b2dc39b5e6cac3ba7fcff396240019eb8b2dab572760",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -1895,19 +1888,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "6eeb2d4d3dce8fc24002f5b971ccb816c90a16a2c8b68bd0e733b45d12ef662c",
+                  "memory_id_sha256": "936254e96f33e7d7955087d9f30b2055f2c1d7dbc07b8fce2b0fd413d5fbccc9",
                   "key": "signing_profile",
                   "value_sha256": "eb2f986567b0d42accfd904fdd0dec258133c410d68287195e75c938019a7ab5",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "b839264616582178383cccd5d6281ce97ba556dec260f37ef871d791a7bd9425",
+                  "memory_id_sha256": "6aec1fcfddd53138d7c055b47af34546fbea7f535b6dcfb6aa70ab8474ae680e",
                   "key": "rollback_checkpoint",
                   "value_sha256": "7de142fbd0f925db7309bd7b41c3bea47dd2c52d9b330ba144ef89c13065b3cb",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "2c8514b0af32eb6b46871096c817add471e384a7c08fea38df91e3cdfcb9a132",
+                  "memory_id_sha256": "ac608e122e09f432a41bb8d3c4c3ff5f4a5bbc6dbc29789f63ebd94a0d0b8e11",
                   "key": "build_queue",
                   "value_sha256": "c815dfc3aeedbeaa52cc83c6c65ebd202626e22c6857ef491ae202a3896d0ac1",
                   "revision": "current"
@@ -1934,7 +1927,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.18803370000023278,
+          "elapsed_seconds": 0.0910409999996773,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -1971,8 +1964,8 @@
               "handoff_label": "a0dea6a5a7299ab955d67d524492211cc5c05bceda7f1085f0a96036510f4fa4"
             },
             "citations_sha256": {
-              "escalation_route": "53709770d82a7efc7dde002d2c08c5a808f94be9c0da60f059e75168a70becd3",
-              "handoff_label": "3fef0dd50f2ccfb2477087aa60b42f7a3876426a936e5bf801d5ed3787914ca6"
+              "escalation_route": "39f101810590790e708bbfb0370983db312f3416e6bb987540bb4be8852c31d6",
+              "handoff_label": "e8e9b0a507e3389e218a86e20bbef9abf875602e030d9029849e5753b623b57b"
             },
             "claimed_complete": true
           },
@@ -1982,19 +1975,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "53709770d82a7efc7dde002d2c08c5a808f94be9c0da60f059e75168a70becd3",
+                  "memory_id_sha256": "39f101810590790e708bbfb0370983db312f3416e6bb987540bb4be8852c31d6",
                   "key": "escalation_route",
                   "value_sha256": "6d6984e26910291d77928415af93f97689fc95b7c7753cb63c01819f648fbd52",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "3fef0dd50f2ccfb2477087aa60b42f7a3876426a936e5bf801d5ed3787914ca6",
+                  "memory_id_sha256": "e8e9b0a507e3389e218a86e20bbef9abf875602e030d9029849e5753b623b57b",
                   "key": "handoff_label",
                   "value_sha256": "a0dea6a5a7299ab955d67d524492211cc5c05bceda7f1085f0a96036510f4fa4",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "09e6c400e2933aac9e86bee65faf42035444d9d2987f3965efa0a3a17086360b",
+                  "memory_id_sha256": "36f3ea74b407936814d5b2dc39b5e6cac3ba7fcff396240019eb8b2dab572760",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -2006,19 +1999,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "3fef0dd50f2ccfb2477087aa60b42f7a3876426a936e5bf801d5ed3787914ca6",
+                  "memory_id_sha256": "e8e9b0a507e3389e218a86e20bbef9abf875602e030d9029849e5753b623b57b",
                   "key": "handoff_label",
                   "value_sha256": "a0dea6a5a7299ab955d67d524492211cc5c05bceda7f1085f0a96036510f4fa4",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "09e6c400e2933aac9e86bee65faf42035444d9d2987f3965efa0a3a17086360b",
+                  "memory_id_sha256": "36f3ea74b407936814d5b2dc39b5e6cac3ba7fcff396240019eb8b2dab572760",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "53709770d82a7efc7dde002d2c08c5a808f94be9c0da60f059e75168a70becd3",
+                  "memory_id_sha256": "39f101810590790e708bbfb0370983db312f3416e6bb987540bb4be8852c31d6",
                   "key": "escalation_route",
                   "value_sha256": "6d6984e26910291d77928415af93f97689fc95b7c7753cb63c01819f648fbd52",
                   "revision": "current"
@@ -2045,7 +2038,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.048530899999605026,
+          "elapsed_seconds": 0.0985292000004847,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -2082,8 +2075,8 @@
               "recovery_slot": "7723c41720810a8ce690a9a8c2cc410fb49e2b098be776014917ea76b3472cb6"
             },
             "citations_sha256": {
-              "shard_group": "5c75981d9cd3f4d9a249bbe897f705a791f294c94066db3740e3cc44e1370902",
-              "recovery_slot": "9fdd422bf86634c0734897d6a6ee2e2b2370445d4558c56f5511ca60a86ab352"
+              "shard_group": "32e3107160a8ad25887386f2cfaa850402e701893a87c524b456348ba3f32535",
+              "recovery_slot": "70c67570932a7a7a756e0d35d44d2cdbb07d7e565cdfb1ab686b76dcf211a951"
             },
             "claimed_complete": true
           },
@@ -2093,19 +2086,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "5c75981d9cd3f4d9a249bbe897f705a791f294c94066db3740e3cc44e1370902",
+                  "memory_id_sha256": "32e3107160a8ad25887386f2cfaa850402e701893a87c524b456348ba3f32535",
                   "key": "shard_group",
                   "value_sha256": "5980decf74eb142321e9d4684b0a47c88c242ac1a6bacde1b435827c15629b0c",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "7f649c1d5ea1754e23c970611a4c4503266d55bf0253bad086fde19d0c3c3c3e",
+                  "memory_id_sha256": "a25d49ec1c3d14f4f92d4a8e7640744267f8a4e0406aa4238247ee7c82a36599",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "781fffec0da0135ace734675ec88205f5bef8501c67101e4d4354fcde898d97e",
+                  "memory_id_sha256": "1637c0bab04a6950c0eab04a73b2ff973e7b9a900b17823343ff106c01b422be",
                   "key": "deploy_target",
                   "value_sha256": "6d8f06ca4e4bb18b098f8c0513251f32ffe1088bbeee09d43ac4ec65c1fa7e0d",
                   "revision": "current"
@@ -2117,19 +2110,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "9fdd422bf86634c0734897d6a6ee2e2b2370445d4558c56f5511ca60a86ab352",
+                  "memory_id_sha256": "70c67570932a7a7a756e0d35d44d2cdbb07d7e565cdfb1ab686b76dcf211a951",
                   "key": "recovery_slot",
                   "value_sha256": "7723c41720810a8ce690a9a8c2cc410fb49e2b098be776014917ea76b3472cb6",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "09e6c400e2933aac9e86bee65faf42035444d9d2987f3965efa0a3a17086360b",
+                  "memory_id_sha256": "36f3ea74b407936814d5b2dc39b5e6cac3ba7fcff396240019eb8b2dab572760",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "7f649c1d5ea1754e23c970611a4c4503266d55bf0253bad086fde19d0c3c3c3e",
+                  "memory_id_sha256": "a25d49ec1c3d14f4f92d4a8e7640744267f8a4e0406aa4238247ee7c82a36599",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
@@ -2156,7 +2149,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.048819099996762816,
+          "elapsed_seconds": 0.08217040000090492,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -2193,8 +2186,8 @@
               "purge_route": "5d13ca73f3f9df9a571d198d32e15acf08f7c6b09fe0e49dcfba98738b8c35bd"
             },
             "citations_sha256": {
-              "cache_pool": "f18f05b38d4c8a8811ee5e5e880aa31f0f7bcd8af5a5b1f49e44f56bbcbf84e7",
-              "purge_route": "f9403d0a6ca296dfaaf5037dfe4299e81f908a15a55e10a3d7053b1733ed999f"
+              "cache_pool": "8ff0792dbfababb709d7870ddd5e11d42b823ddb920f729f871f5ab07e53c549",
+              "purge_route": "04a5c95e8ff87c8314f22bff0b477d603c9201dc5e512ea8530728104439d00a"
             },
             "claimed_complete": true
           },
@@ -2204,19 +2197,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "f18f05b38d4c8a8811ee5e5e880aa31f0f7bcd8af5a5b1f49e44f56bbcbf84e7",
+                  "memory_id_sha256": "8ff0792dbfababb709d7870ddd5e11d42b823ddb920f729f871f5ab07e53c549",
                   "key": "cache_pool",
                   "value_sha256": "9c35f5f03ac09ed368dd92a4b0ae5523af44e879138219d41e350160d0bceaf9",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "09e6c400e2933aac9e86bee65faf42035444d9d2987f3965efa0a3a17086360b",
+                  "memory_id_sha256": "36f3ea74b407936814d5b2dc39b5e6cac3ba7fcff396240019eb8b2dab572760",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "53709770d82a7efc7dde002d2c08c5a808f94be9c0da60f059e75168a70becd3",
+                  "memory_id_sha256": "39f101810590790e708bbfb0370983db312f3416e6bb987540bb4be8852c31d6",
                   "key": "escalation_route",
                   "value_sha256": "6d6984e26910291d77928415af93f97689fc95b7c7753cb63c01819f648fbd52",
                   "revision": "current"
@@ -2228,19 +2221,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "f9403d0a6ca296dfaaf5037dfe4299e81f908a15a55e10a3d7053b1733ed999f",
+                  "memory_id_sha256": "04a5c95e8ff87c8314f22bff0b477d603c9201dc5e512ea8530728104439d00a",
                   "key": "purge_route",
                   "value_sha256": "5d13ca73f3f9df9a571d198d32e15acf08f7c6b09fe0e49dcfba98738b8c35bd",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "53709770d82a7efc7dde002d2c08c5a808f94be9c0da60f059e75168a70becd3",
+                  "memory_id_sha256": "39f101810590790e708bbfb0370983db312f3416e6bb987540bb4be8852c31d6",
                   "key": "escalation_route",
                   "value_sha256": "6d6984e26910291d77928415af93f97689fc95b7c7753cb63c01819f648fbd52",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "09e6c400e2933aac9e86bee65faf42035444d9d2987f3965efa0a3a17086360b",
+                  "memory_id_sha256": "36f3ea74b407936814d5b2dc39b5e6cac3ba7fcff396240019eb8b2dab572760",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -2333,7 +2326,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.04652110000097309,
+          "elapsed_seconds": 0.0837561000007554,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -2370,8 +2363,8 @@
               "rollback_checkpoint": "0a207c567321376198c06822360452f3545f0a80315d4b39844a650ca3e70d7a"
             },
             "citations_sha256": {
-              "deploy_target": "6b8d8ff8e1c9f24b472f97a7afdae753f8be9d3b9baddbf349aea68d64b97b7e",
-              "rollback_checkpoint": "0ecac59a4164d22d2f5cf013f1dee24dc0492e3be19c37692a2fc791d8d25912"
+              "deploy_target": "c39842ccdf3dde19f3368ac71ae6a520fcbf5cf01ad01c229baf4fe4e95cdd5a",
+              "rollback_checkpoint": "c549349b63b1e65ee58ab90f131a9b86ef129dbc81ba3851f3ab7e0e916ddfcb"
             },
             "claimed_complete": true
           },
@@ -2381,19 +2374,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "6b8d8ff8e1c9f24b472f97a7afdae753f8be9d3b9baddbf349aea68d64b97b7e",
+                  "memory_id_sha256": "c39842ccdf3dde19f3368ac71ae6a520fcbf5cf01ad01c229baf4fe4e95cdd5a",
                   "key": "deploy_target",
                   "value_sha256": "799d8647b413c984b80872492f9db64ef54987c10d06d9a085770febbc3070f5",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "0ecac59a4164d22d2f5cf013f1dee24dc0492e3be19c37692a2fc791d8d25912",
+                  "memory_id_sha256": "c549349b63b1e65ee58ab90f131a9b86ef129dbc81ba3851f3ab7e0e916ddfcb",
                   "key": "rollback_checkpoint",
                   "value_sha256": "0a207c567321376198c06822360452f3545f0a80315d4b39844a650ca3e70d7a",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "84bff3d06d7da67b78e0a213538cd07f59fa7e05e7de809d176d5f920ce940c2",
+                  "memory_id_sha256": "3c35a59b517dbbde1cff31efce572335c003b20d35c27c6a2e367ff4a0924d3a",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
@@ -2405,19 +2398,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "0ecac59a4164d22d2f5cf013f1dee24dc0492e3be19c37692a2fc791d8d25912",
+                  "memory_id_sha256": "c549349b63b1e65ee58ab90f131a9b86ef129dbc81ba3851f3ab7e0e916ddfcb",
                   "key": "rollback_checkpoint",
                   "value_sha256": "0a207c567321376198c06822360452f3545f0a80315d4b39844a650ca3e70d7a",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "6b8d8ff8e1c9f24b472f97a7afdae753f8be9d3b9baddbf349aea68d64b97b7e",
+                  "memory_id_sha256": "c39842ccdf3dde19f3368ac71ae6a520fcbf5cf01ad01c229baf4fe4e95cdd5a",
                   "key": "deploy_target",
                   "value_sha256": "799d8647b413c984b80872492f9db64ef54987c10d06d9a085770febbc3070f5",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "84bff3d06d7da67b78e0a213538cd07f59fa7e05e7de809d176d5f920ce940c2",
+                  "memory_id_sha256": "3c35a59b517dbbde1cff31efce572335c003b20d35c27c6a2e367ff4a0924d3a",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
@@ -2444,7 +2437,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.04836789999899338,
+          "elapsed_seconds": 0.08032529999945837,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -2481,8 +2474,8 @@
               "retention_policy": "458ad759dffd368d4a920353b99c644947b46ce71db1cca2845ba85b0b9d729b"
             },
             "citations_sha256": {
-              "backup_vault": "84bff3d06d7da67b78e0a213538cd07f59fa7e05e7de809d176d5f920ce940c2",
-              "retention_policy": "dcd8864fd20787db0ec2920ffc10d0fc544b7682ad80cb2aff8294d9e1592c6d"
+              "backup_vault": "3c35a59b517dbbde1cff31efce572335c003b20d35c27c6a2e367ff4a0924d3a",
+              "retention_policy": "76e343e2ea2e7decba3d7575c4ac281308dea04a598aef7097a5236ad75a9ebe"
             },
             "claimed_complete": true
           },
@@ -2492,19 +2485,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "84bff3d06d7da67b78e0a213538cd07f59fa7e05e7de809d176d5f920ce940c2",
+                  "memory_id_sha256": "3c35a59b517dbbde1cff31efce572335c003b20d35c27c6a2e367ff4a0924d3a",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "0ecac59a4164d22d2f5cf013f1dee24dc0492e3be19c37692a2fc791d8d25912",
+                  "memory_id_sha256": "c549349b63b1e65ee58ab90f131a9b86ef129dbc81ba3851f3ab7e0e916ddfcb",
                   "key": "rollback_checkpoint",
                   "value_sha256": "0a207c567321376198c06822360452f3545f0a80315d4b39844a650ca3e70d7a",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "6b8d8ff8e1c9f24b472f97a7afdae753f8be9d3b9baddbf349aea68d64b97b7e",
+                  "memory_id_sha256": "c39842ccdf3dde19f3368ac71ae6a520fcbf5cf01ad01c229baf4fe4e95cdd5a",
                   "key": "deploy_target",
                   "value_sha256": "799d8647b413c984b80872492f9db64ef54987c10d06d9a085770febbc3070f5",
                   "revision": "obsolete"
@@ -2516,19 +2509,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "dcd8864fd20787db0ec2920ffc10d0fc544b7682ad80cb2aff8294d9e1592c6d",
+                  "memory_id_sha256": "76e343e2ea2e7decba3d7575c4ac281308dea04a598aef7097a5236ad75a9ebe",
                   "key": "retention_policy",
                   "value_sha256": "458ad759dffd368d4a920353b99c644947b46ce71db1cca2845ba85b0b9d729b",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "84bff3d06d7da67b78e0a213538cd07f59fa7e05e7de809d176d5f920ce940c2",
+                  "memory_id_sha256": "3c35a59b517dbbde1cff31efce572335c003b20d35c27c6a2e367ff4a0924d3a",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "0ecac59a4164d22d2f5cf013f1dee24dc0492e3be19c37692a2fc791d8d25912",
+                  "memory_id_sha256": "c549349b63b1e65ee58ab90f131a9b86ef129dbc81ba3851f3ab7e0e916ddfcb",
                   "key": "rollback_checkpoint",
                   "value_sha256": "0a207c567321376198c06822360452f3545f0a80315d4b39844a650ca3e70d7a",
                   "revision": "obsolete"
@@ -2555,7 +2548,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.0440082999994047,
+          "elapsed_seconds": 0.08034219999899506,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -2592,8 +2585,8 @@
               "signing_profile": "6e5f05630c82890d86fb2730755a6304cab84874e5b70dff5e959055a695de47"
             },
             "citations_sha256": {
-              "build_queue": "db683e5f3a30585fd75fc4ac3abb1a4defd00293d3c5d65a4af1ebd06060955c",
-              "signing_profile": "0ac87b29e22f380f29846b3631cbc7c3877057c8de15834de1b63b56627fd0c3"
+              "build_queue": "aa394ec24afc5caaaa8f46ab480dd57c77b68469283c0a54610939db21958700",
+              "signing_profile": "6cd3e57081de0261f430ca2f072104c49b364521c38b8949be8b3867b17a7b82"
             },
             "claimed_complete": true
           },
@@ -2603,19 +2596,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "db683e5f3a30585fd75fc4ac3abb1a4defd00293d3c5d65a4af1ebd06060955c",
+                  "memory_id_sha256": "aa394ec24afc5caaaa8f46ab480dd57c77b68469283c0a54610939db21958700",
                   "key": "build_queue",
                   "value_sha256": "6f727fbf771cc9133ec27543623986a05c376831d8b112fce6cc9e8246375e21",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "0ecac59a4164d22d2f5cf013f1dee24dc0492e3be19c37692a2fc791d8d25912",
+                  "memory_id_sha256": "c549349b63b1e65ee58ab90f131a9b86ef129dbc81ba3851f3ab7e0e916ddfcb",
                   "key": "rollback_checkpoint",
                   "value_sha256": "0a207c567321376198c06822360452f3545f0a80315d4b39844a650ca3e70d7a",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "84bff3d06d7da67b78e0a213538cd07f59fa7e05e7de809d176d5f920ce940c2",
+                  "memory_id_sha256": "3c35a59b517dbbde1cff31efce572335c003b20d35c27c6a2e367ff4a0924d3a",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
@@ -2627,13 +2620,13 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "0ac87b29e22f380f29846b3631cbc7c3877057c8de15834de1b63b56627fd0c3",
+                  "memory_id_sha256": "6cd3e57081de0261f430ca2f072104c49b364521c38b8949be8b3867b17a7b82",
                   "key": "signing_profile",
                   "value_sha256": "6e5f05630c82890d86fb2730755a6304cab84874e5b70dff5e959055a695de47",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "db683e5f3a30585fd75fc4ac3abb1a4defd00293d3c5d65a4af1ebd06060955c",
+                  "memory_id_sha256": "aa394ec24afc5caaaa8f46ab480dd57c77b68469283c0a54610939db21958700",
                   "key": "build_queue",
                   "value_sha256": "6f727fbf771cc9133ec27543623986a05c376831d8b112fce6cc9e8246375e21",
                   "revision": "obsolete"
@@ -2660,7 +2653,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.050062700000125915,
+          "elapsed_seconds": 0.08580830000028072,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -2697,8 +2690,8 @@
               "handoff_label": "ef36f2ad7b7926a32a579558f69cb45301e8993827454a12503d582262a20a38"
             },
             "citations_sha256": {
-              "escalation_route": "ae77ecba19dd22f3efa6b9d7007d85446d5cedbd1b75bbced833a9d993e78e41",
-              "handoff_label": "429f271471bf210cd7918772f98e678e1d929b805d8dd3ae8fb4b0c8c76343c1"
+              "escalation_route": "43082a559d120863bcbd42921763dba00c9a62de7893844024059006cfa46b23",
+              "handoff_label": "e22c1fee9de07b454a699bf4ea3b5964770c3055b6a0ac05275e301d05612085"
             },
             "claimed_complete": true
           },
@@ -2708,19 +2701,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "ae77ecba19dd22f3efa6b9d7007d85446d5cedbd1b75bbced833a9d993e78e41",
+                  "memory_id_sha256": "43082a559d120863bcbd42921763dba00c9a62de7893844024059006cfa46b23",
                   "key": "escalation_route",
                   "value_sha256": "99999d00f18078c1c28657852eec1bde4e4a571db0d3fea202d42f126a15bcf6",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "429f271471bf210cd7918772f98e678e1d929b805d8dd3ae8fb4b0c8c76343c1",
+                  "memory_id_sha256": "e22c1fee9de07b454a699bf4ea3b5964770c3055b6a0ac05275e301d05612085",
                   "key": "handoff_label",
                   "value_sha256": "ef36f2ad7b7926a32a579558f69cb45301e8993827454a12503d582262a20a38",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "84bff3d06d7da67b78e0a213538cd07f59fa7e05e7de809d176d5f920ce940c2",
+                  "memory_id_sha256": "3c35a59b517dbbde1cff31efce572335c003b20d35c27c6a2e367ff4a0924d3a",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
@@ -2732,19 +2725,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "429f271471bf210cd7918772f98e678e1d929b805d8dd3ae8fb4b0c8c76343c1",
+                  "memory_id_sha256": "e22c1fee9de07b454a699bf4ea3b5964770c3055b6a0ac05275e301d05612085",
                   "key": "handoff_label",
                   "value_sha256": "ef36f2ad7b7926a32a579558f69cb45301e8993827454a12503d582262a20a38",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "84bff3d06d7da67b78e0a213538cd07f59fa7e05e7de809d176d5f920ce940c2",
+                  "memory_id_sha256": "3c35a59b517dbbde1cff31efce572335c003b20d35c27c6a2e367ff4a0924d3a",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "0ecac59a4164d22d2f5cf013f1dee24dc0492e3be19c37692a2fc791d8d25912",
+                  "memory_id_sha256": "c549349b63b1e65ee58ab90f131a9b86ef129dbc81ba3851f3ab7e0e916ddfcb",
                   "key": "rollback_checkpoint",
                   "value_sha256": "0a207c567321376198c06822360452f3545f0a80315d4b39844a650ca3e70d7a",
                   "revision": "obsolete"
@@ -2771,7 +2764,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.05000419999851147,
+          "elapsed_seconds": 0.08685400000103982,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -2808,8 +2801,8 @@
               "recovery_slot": "0cb405a494166995a85ac6743b51d75c50429b5f8d26901c5624cec05c57c83e"
             },
             "citations_sha256": {
-              "shard_group": "64bb7b3ad2e0617fc2372fd5ba656e0e56e2fdd7e7ecc636fbc851433375d0bb",
-              "recovery_slot": "45933399fd3cad1bac7abcb172363f9b4d736497cd52be32354f3ab28ca15fd2"
+              "shard_group": "0701d048e1cff91894e046b3c14ef5048cab24c952edc62b9351821537f737b7",
+              "recovery_slot": "c74ba6d07ac9a723ee497323cb53c518681f16d8afbce2bcb112016ae5322b96"
             },
             "claimed_complete": true
           },
@@ -2819,19 +2812,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "64bb7b3ad2e0617fc2372fd5ba656e0e56e2fdd7e7ecc636fbc851433375d0bb",
+                  "memory_id_sha256": "0701d048e1cff91894e046b3c14ef5048cab24c952edc62b9351821537f737b7",
                   "key": "shard_group",
                   "value_sha256": "3c0623b323c5ef315fcc8537d1f6f1e49385d4660dceeb79a48434f102d9bec9",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "84bff3d06d7da67b78e0a213538cd07f59fa7e05e7de809d176d5f920ce940c2",
+                  "memory_id_sha256": "3c35a59b517dbbde1cff31efce572335c003b20d35c27c6a2e367ff4a0924d3a",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "0ecac59a4164d22d2f5cf013f1dee24dc0492e3be19c37692a2fc791d8d25912",
+                  "memory_id_sha256": "c549349b63b1e65ee58ab90f131a9b86ef129dbc81ba3851f3ab7e0e916ddfcb",
                   "key": "rollback_checkpoint",
                   "value_sha256": "0a207c567321376198c06822360452f3545f0a80315d4b39844a650ca3e70d7a",
                   "revision": "obsolete"
@@ -2843,19 +2836,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "45933399fd3cad1bac7abcb172363f9b4d736497cd52be32354f3ab28ca15fd2",
+                  "memory_id_sha256": "c74ba6d07ac9a723ee497323cb53c518681f16d8afbce2bcb112016ae5322b96",
                   "key": "recovery_slot",
                   "value_sha256": "0cb405a494166995a85ac6743b51d75c50429b5f8d26901c5624cec05c57c83e",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "84bff3d06d7da67b78e0a213538cd07f59fa7e05e7de809d176d5f920ce940c2",
+                  "memory_id_sha256": "3c35a59b517dbbde1cff31efce572335c003b20d35c27c6a2e367ff4a0924d3a",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "0ecac59a4164d22d2f5cf013f1dee24dc0492e3be19c37692a2fc791d8d25912",
+                  "memory_id_sha256": "c549349b63b1e65ee58ab90f131a9b86ef129dbc81ba3851f3ab7e0e916ddfcb",
                   "key": "rollback_checkpoint",
                   "value_sha256": "0a207c567321376198c06822360452f3545f0a80315d4b39844a650ca3e70d7a",
                   "revision": "obsolete"
@@ -2882,7 +2875,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.047674599998572376,
+          "elapsed_seconds": 0.08532180000111111,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -2919,8 +2912,8 @@
               "purge_route": "2dfad0b3debead93339704bd9c2bff1e08a6cc7f1155e27cd67b4fbaee5e3cfe"
             },
             "citations_sha256": {
-              "cache_pool": "9519772d426d95fe72d2bc95a0471d410edbaaff38f507371c262041820c7f56",
-              "purge_route": "5a4431bcaa7e6020b2a10665702b75c510b10953df3b7a968b0d911d29d2a844"
+              "cache_pool": "7cf50cc973476f8c88fe02921bd8bf3b2dab17c5ebecf4a39f91f84690cd7cb9",
+              "purge_route": "a58271f2cad327b53cdd3efd7cd16b0ee6b4c7051c8ec472e261471bc1e8cde0"
             },
             "claimed_complete": true
           },
@@ -2930,19 +2923,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "9519772d426d95fe72d2bc95a0471d410edbaaff38f507371c262041820c7f56",
+                  "memory_id_sha256": "7cf50cc973476f8c88fe02921bd8bf3b2dab17c5ebecf4a39f91f84690cd7cb9",
                   "key": "cache_pool",
                   "value_sha256": "47799dd0bf81e0e785407fa85e3e5fb734b6b074192b640f6b450bc3dc047550",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "5a4431bcaa7e6020b2a10665702b75c510b10953df3b7a968b0d911d29d2a844",
+                  "memory_id_sha256": "a58271f2cad327b53cdd3efd7cd16b0ee6b4c7051c8ec472e261471bc1e8cde0",
                   "key": "purge_route",
                   "value_sha256": "2dfad0b3debead93339704bd9c2bff1e08a6cc7f1155e27cd67b4fbaee5e3cfe",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "84bff3d06d7da67b78e0a213538cd07f59fa7e05e7de809d176d5f920ce940c2",
+                  "memory_id_sha256": "3c35a59b517dbbde1cff31efce572335c003b20d35c27c6a2e367ff4a0924d3a",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
@@ -2954,19 +2947,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "5a4431bcaa7e6020b2a10665702b75c510b10953df3b7a968b0d911d29d2a844",
+                  "memory_id_sha256": "a58271f2cad327b53cdd3efd7cd16b0ee6b4c7051c8ec472e261471bc1e8cde0",
                   "key": "purge_route",
                   "value_sha256": "2dfad0b3debead93339704bd9c2bff1e08a6cc7f1155e27cd67b4fbaee5e3cfe",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "84bff3d06d7da67b78e0a213538cd07f59fa7e05e7de809d176d5f920ce940c2",
+                  "memory_id_sha256": "3c35a59b517dbbde1cff31efce572335c003b20d35c27c6a2e367ff4a0924d3a",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "6b8d8ff8e1c9f24b472f97a7afdae753f8be9d3b9baddbf349aea68d64b97b7e",
+                  "memory_id_sha256": "c39842ccdf3dde19f3368ac71ae6a520fcbf5cf01ad01c229baf4fe4e95cdd5a",
                   "key": "deploy_target",
                   "value_sha256": "799d8647b413c984b80872492f9db64ef54987c10d06d9a085770febbc3070f5",
                   "revision": "obsolete"
@@ -2993,7 +2986,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.046885700001439545,
+          "elapsed_seconds": 0.07534030000169878,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -3030,8 +3023,8 @@
               "rollback_checkpoint": "0a207c567321376198c06822360452f3545f0a80315d4b39844a650ca3e70d7a"
             },
             "citations_sha256": {
-              "deploy_target": "83e5bc755811fa312a8f975a2872e886d440938cd129b283021191a861a01473",
-              "rollback_checkpoint": "1a75f69cd906a98daf9ec2b0e70614ca9d14d226f5294eb3ccce7e0a22c44351"
+              "deploy_target": "efcdee2a6c7b4d90098ec4f8822a0f8d9ee45af9737702d84a50a6b701cd04dc",
+              "rollback_checkpoint": "abaa49a230efde48b639f41cbb2867222aadb5d5b7719fcfb139326af69699b0"
             },
             "claimed_complete": true
           },
@@ -3041,19 +3034,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "83e5bc755811fa312a8f975a2872e886d440938cd129b283021191a861a01473",
+                  "memory_id_sha256": "efcdee2a6c7b4d90098ec4f8822a0f8d9ee45af9737702d84a50a6b701cd04dc",
                   "key": "deploy_target",
                   "value_sha256": "799d8647b413c984b80872492f9db64ef54987c10d06d9a085770febbc3070f5",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "1a75f69cd906a98daf9ec2b0e70614ca9d14d226f5294eb3ccce7e0a22c44351",
+                  "memory_id_sha256": "abaa49a230efde48b639f41cbb2867222aadb5d5b7719fcfb139326af69699b0",
                   "key": "rollback_checkpoint",
                   "value_sha256": "0a207c567321376198c06822360452f3545f0a80315d4b39844a650ca3e70d7a",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "d9a33205e59abb7143fd4f017957d5bfe39d67412281258e7129113930bdb1c7",
+                  "memory_id_sha256": "914f35ad723110e2d0c0d37d41b3737ab7a91d9f018baf4aff5b50517c3491c2",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
@@ -3065,19 +3058,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "1a75f69cd906a98daf9ec2b0e70614ca9d14d226f5294eb3ccce7e0a22c44351",
+                  "memory_id_sha256": "abaa49a230efde48b639f41cbb2867222aadb5d5b7719fcfb139326af69699b0",
                   "key": "rollback_checkpoint",
                   "value_sha256": "0a207c567321376198c06822360452f3545f0a80315d4b39844a650ca3e70d7a",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "83e5bc755811fa312a8f975a2872e886d440938cd129b283021191a861a01473",
+                  "memory_id_sha256": "efcdee2a6c7b4d90098ec4f8822a0f8d9ee45af9737702d84a50a6b701cd04dc",
                   "key": "deploy_target",
                   "value_sha256": "799d8647b413c984b80872492f9db64ef54987c10d06d9a085770febbc3070f5",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "d9a33205e59abb7143fd4f017957d5bfe39d67412281258e7129113930bdb1c7",
+                  "memory_id_sha256": "914f35ad723110e2d0c0d37d41b3737ab7a91d9f018baf4aff5b50517c3491c2",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
@@ -3104,7 +3097,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.04623849999916274,
+          "elapsed_seconds": 0.07796349999989616,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -3141,8 +3134,8 @@
               "retention_policy": "458ad759dffd368d4a920353b99c644947b46ce71db1cca2845ba85b0b9d729b"
             },
             "citations_sha256": {
-              "backup_vault": "d9a33205e59abb7143fd4f017957d5bfe39d67412281258e7129113930bdb1c7",
-              "retention_policy": "0219bc588264193123f070f941bab2d83703508c2cd9c6e484e528650a4d2ba5"
+              "backup_vault": "914f35ad723110e2d0c0d37d41b3737ab7a91d9f018baf4aff5b50517c3491c2",
+              "retention_policy": "34772d19a422afe02d115aae8267d34de1e08ceee4043ff73d64dbd9c129be09"
             },
             "claimed_complete": true
           },
@@ -3152,19 +3145,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "d9a33205e59abb7143fd4f017957d5bfe39d67412281258e7129113930bdb1c7",
+                  "memory_id_sha256": "914f35ad723110e2d0c0d37d41b3737ab7a91d9f018baf4aff5b50517c3491c2",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "1a75f69cd906a98daf9ec2b0e70614ca9d14d226f5294eb3ccce7e0a22c44351",
+                  "memory_id_sha256": "abaa49a230efde48b639f41cbb2867222aadb5d5b7719fcfb139326af69699b0",
                   "key": "rollback_checkpoint",
                   "value_sha256": "0a207c567321376198c06822360452f3545f0a80315d4b39844a650ca3e70d7a",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "83e5bc755811fa312a8f975a2872e886d440938cd129b283021191a861a01473",
+                  "memory_id_sha256": "efcdee2a6c7b4d90098ec4f8822a0f8d9ee45af9737702d84a50a6b701cd04dc",
                   "key": "deploy_target",
                   "value_sha256": "799d8647b413c984b80872492f9db64ef54987c10d06d9a085770febbc3070f5",
                   "revision": "obsolete"
@@ -3176,19 +3169,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "0219bc588264193123f070f941bab2d83703508c2cd9c6e484e528650a4d2ba5",
+                  "memory_id_sha256": "34772d19a422afe02d115aae8267d34de1e08ceee4043ff73d64dbd9c129be09",
                   "key": "retention_policy",
                   "value_sha256": "458ad759dffd368d4a920353b99c644947b46ce71db1cca2845ba85b0b9d729b",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "d9a33205e59abb7143fd4f017957d5bfe39d67412281258e7129113930bdb1c7",
+                  "memory_id_sha256": "914f35ad723110e2d0c0d37d41b3737ab7a91d9f018baf4aff5b50517c3491c2",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "1a75f69cd906a98daf9ec2b0e70614ca9d14d226f5294eb3ccce7e0a22c44351",
+                  "memory_id_sha256": "abaa49a230efde48b639f41cbb2867222aadb5d5b7719fcfb139326af69699b0",
                   "key": "rollback_checkpoint",
                   "value_sha256": "0a207c567321376198c06822360452f3545f0a80315d4b39844a650ca3e70d7a",
                   "revision": "obsolete"
@@ -3215,7 +3208,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.04552940000212402,
+          "elapsed_seconds": 0.0920269999987795,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -3252,8 +3245,8 @@
               "signing_profile": "6e5f05630c82890d86fb2730755a6304cab84874e5b70dff5e959055a695de47"
             },
             "citations_sha256": {
-              "build_queue": "6fdd98828fd704a1ee86ba5af931d94081d9ff776a6414c6289ddb6b69991b86",
-              "signing_profile": "a3c35f40a7b0ee834af2d8e00e77c4bdd4b29a68c382ec9bf3c156d45edb5fa6"
+              "build_queue": "f262325f781f7d1e0a69046ec96b4af507bddff63b8b40e2ca5141f6c691daee",
+              "signing_profile": "40df6bbb9a10c142042729c35965801f1fd8e067a1905a275c52175d4621ad24"
             },
             "claimed_complete": true
           },
@@ -3263,19 +3256,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "6fdd98828fd704a1ee86ba5af931d94081d9ff776a6414c6289ddb6b69991b86",
+                  "memory_id_sha256": "f262325f781f7d1e0a69046ec96b4af507bddff63b8b40e2ca5141f6c691daee",
                   "key": "build_queue",
                   "value_sha256": "6f727fbf771cc9133ec27543623986a05c376831d8b112fce6cc9e8246375e21",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "1a75f69cd906a98daf9ec2b0e70614ca9d14d226f5294eb3ccce7e0a22c44351",
+                  "memory_id_sha256": "abaa49a230efde48b639f41cbb2867222aadb5d5b7719fcfb139326af69699b0",
                   "key": "rollback_checkpoint",
                   "value_sha256": "0a207c567321376198c06822360452f3545f0a80315d4b39844a650ca3e70d7a",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "d9a33205e59abb7143fd4f017957d5bfe39d67412281258e7129113930bdb1c7",
+                  "memory_id_sha256": "914f35ad723110e2d0c0d37d41b3737ab7a91d9f018baf4aff5b50517c3491c2",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
@@ -3287,13 +3280,13 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "a3c35f40a7b0ee834af2d8e00e77c4bdd4b29a68c382ec9bf3c156d45edb5fa6",
+                  "memory_id_sha256": "40df6bbb9a10c142042729c35965801f1fd8e067a1905a275c52175d4621ad24",
                   "key": "signing_profile",
                   "value_sha256": "6e5f05630c82890d86fb2730755a6304cab84874e5b70dff5e959055a695de47",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "6fdd98828fd704a1ee86ba5af931d94081d9ff776a6414c6289ddb6b69991b86",
+                  "memory_id_sha256": "f262325f781f7d1e0a69046ec96b4af507bddff63b8b40e2ca5141f6c691daee",
                   "key": "build_queue",
                   "value_sha256": "6f727fbf771cc9133ec27543623986a05c376831d8b112fce6cc9e8246375e21",
                   "revision": "obsolete"
@@ -3320,7 +3313,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.04836090000026161,
+          "elapsed_seconds": 0.09821199999896635,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -3357,8 +3350,8 @@
               "handoff_label": "ef36f2ad7b7926a32a579558f69cb45301e8993827454a12503d582262a20a38"
             },
             "citations_sha256": {
-              "escalation_route": "326139295b3c9cbe5bf9a6baec65a183e970f5f1106f98e58bf74f9afd99e90d",
-              "handoff_label": "0d1d9dd892a36dc845ed517d7fa1e7185b38834a89acd3e1f3aa8f303829060c"
+              "escalation_route": "21f70cdafdaa58fd286a6d75360ffd50e500a6ffb3a56d3dd5a06a72635daac6",
+              "handoff_label": "8982947ad5b807b6147d787d4a5c2b8e8ec50cba577eb56a373aeee61698dcf1"
             },
             "claimed_complete": true
           },
@@ -3368,19 +3361,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "326139295b3c9cbe5bf9a6baec65a183e970f5f1106f98e58bf74f9afd99e90d",
+                  "memory_id_sha256": "21f70cdafdaa58fd286a6d75360ffd50e500a6ffb3a56d3dd5a06a72635daac6",
                   "key": "escalation_route",
                   "value_sha256": "99999d00f18078c1c28657852eec1bde4e4a571db0d3fea202d42f126a15bcf6",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "0d1d9dd892a36dc845ed517d7fa1e7185b38834a89acd3e1f3aa8f303829060c",
+                  "memory_id_sha256": "8982947ad5b807b6147d787d4a5c2b8e8ec50cba577eb56a373aeee61698dcf1",
                   "key": "handoff_label",
                   "value_sha256": "ef36f2ad7b7926a32a579558f69cb45301e8993827454a12503d582262a20a38",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "d9a33205e59abb7143fd4f017957d5bfe39d67412281258e7129113930bdb1c7",
+                  "memory_id_sha256": "914f35ad723110e2d0c0d37d41b3737ab7a91d9f018baf4aff5b50517c3491c2",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
@@ -3392,19 +3385,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "0d1d9dd892a36dc845ed517d7fa1e7185b38834a89acd3e1f3aa8f303829060c",
+                  "memory_id_sha256": "8982947ad5b807b6147d787d4a5c2b8e8ec50cba577eb56a373aeee61698dcf1",
                   "key": "handoff_label",
                   "value_sha256": "ef36f2ad7b7926a32a579558f69cb45301e8993827454a12503d582262a20a38",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "d9a33205e59abb7143fd4f017957d5bfe39d67412281258e7129113930bdb1c7",
+                  "memory_id_sha256": "914f35ad723110e2d0c0d37d41b3737ab7a91d9f018baf4aff5b50517c3491c2",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "1a75f69cd906a98daf9ec2b0e70614ca9d14d226f5294eb3ccce7e0a22c44351",
+                  "memory_id_sha256": "abaa49a230efde48b639f41cbb2867222aadb5d5b7719fcfb139326af69699b0",
                   "key": "rollback_checkpoint",
                   "value_sha256": "0a207c567321376198c06822360452f3545f0a80315d4b39844a650ca3e70d7a",
                   "revision": "obsolete"
@@ -3431,7 +3424,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.049467699998785974,
+          "elapsed_seconds": 0.2710514000009425,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -3468,8 +3461,8 @@
               "recovery_slot": "0cb405a494166995a85ac6743b51d75c50429b5f8d26901c5624cec05c57c83e"
             },
             "citations_sha256": {
-              "shard_group": "d257b2daa754a1510657a6af1a23b3aa46e9d5e0fc09c391738a82dde01fc5a8",
-              "recovery_slot": "cf1ade171c4d5fae8a307908b3b9cc0bcdc642e5b5e83fff3bb8d61db14ab92b"
+              "shard_group": "662d931c5759464deaf62160deff772cf0fa26fae116a9a04ab67f3253b642ac",
+              "recovery_slot": "899d3d2d7ac9e70f52746a1593901a0006c43f59122cebeda796f663e9bf7d95"
             },
             "claimed_complete": true
           },
@@ -3479,19 +3472,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "d257b2daa754a1510657a6af1a23b3aa46e9d5e0fc09c391738a82dde01fc5a8",
+                  "memory_id_sha256": "662d931c5759464deaf62160deff772cf0fa26fae116a9a04ab67f3253b642ac",
                   "key": "shard_group",
                   "value_sha256": "3c0623b323c5ef315fcc8537d1f6f1e49385d4660dceeb79a48434f102d9bec9",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "d9a33205e59abb7143fd4f017957d5bfe39d67412281258e7129113930bdb1c7",
+                  "memory_id_sha256": "914f35ad723110e2d0c0d37d41b3737ab7a91d9f018baf4aff5b50517c3491c2",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "1a75f69cd906a98daf9ec2b0e70614ca9d14d226f5294eb3ccce7e0a22c44351",
+                  "memory_id_sha256": "abaa49a230efde48b639f41cbb2867222aadb5d5b7719fcfb139326af69699b0",
                   "key": "rollback_checkpoint",
                   "value_sha256": "0a207c567321376198c06822360452f3545f0a80315d4b39844a650ca3e70d7a",
                   "revision": "obsolete"
@@ -3503,19 +3496,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "cf1ade171c4d5fae8a307908b3b9cc0bcdc642e5b5e83fff3bb8d61db14ab92b",
+                  "memory_id_sha256": "899d3d2d7ac9e70f52746a1593901a0006c43f59122cebeda796f663e9bf7d95",
                   "key": "recovery_slot",
                   "value_sha256": "0cb405a494166995a85ac6743b51d75c50429b5f8d26901c5624cec05c57c83e",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "d9a33205e59abb7143fd4f017957d5bfe39d67412281258e7129113930bdb1c7",
+                  "memory_id_sha256": "914f35ad723110e2d0c0d37d41b3737ab7a91d9f018baf4aff5b50517c3491c2",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "1a75f69cd906a98daf9ec2b0e70614ca9d14d226f5294eb3ccce7e0a22c44351",
+                  "memory_id_sha256": "abaa49a230efde48b639f41cbb2867222aadb5d5b7719fcfb139326af69699b0",
                   "key": "rollback_checkpoint",
                   "value_sha256": "0a207c567321376198c06822360452f3545f0a80315d4b39844a650ca3e70d7a",
                   "revision": "obsolete"
@@ -3542,7 +3535,7 @@
           "verification_passed": false,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.04850380000061705,
+          "elapsed_seconds": 0.09351060000153666,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -3579,8 +3572,8 @@
               "purge_route": "2dfad0b3debead93339704bd9c2bff1e08a6cc7f1155e27cd67b4fbaee5e3cfe"
             },
             "citations_sha256": {
-              "cache_pool": "40867c1dcf0a31657630d29a9fe721566f9e8ce66c4daf8459818b79bf667f26",
-              "purge_route": "0a77743e8af448477db89de922a4588dd91c0779c0d1c4b8fdaddd8c7fe4797a"
+              "cache_pool": "7869ed5a76a987212d6590e1d1b586e6efb93c843800ba5db52f998a8a8c05ac",
+              "purge_route": "761cc43ad3c8ed9dde46d47284ae756dd7c6c644cbb33ccfabd8ee5c31dbaf45"
             },
             "claimed_complete": true
           },
@@ -3590,19 +3583,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "40867c1dcf0a31657630d29a9fe721566f9e8ce66c4daf8459818b79bf667f26",
+                  "memory_id_sha256": "7869ed5a76a987212d6590e1d1b586e6efb93c843800ba5db52f998a8a8c05ac",
                   "key": "cache_pool",
                   "value_sha256": "47799dd0bf81e0e785407fa85e3e5fb734b6b074192b640f6b450bc3dc047550",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "0a77743e8af448477db89de922a4588dd91c0779c0d1c4b8fdaddd8c7fe4797a",
+                  "memory_id_sha256": "761cc43ad3c8ed9dde46d47284ae756dd7c6c644cbb33ccfabd8ee5c31dbaf45",
                   "key": "purge_route",
                   "value_sha256": "2dfad0b3debead93339704bd9c2bff1e08a6cc7f1155e27cd67b4fbaee5e3cfe",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "d9a33205e59abb7143fd4f017957d5bfe39d67412281258e7129113930bdb1c7",
+                  "memory_id_sha256": "914f35ad723110e2d0c0d37d41b3737ab7a91d9f018baf4aff5b50517c3491c2",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
@@ -3614,19 +3607,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "0a77743e8af448477db89de922a4588dd91c0779c0d1c4b8fdaddd8c7fe4797a",
+                  "memory_id_sha256": "761cc43ad3c8ed9dde46d47284ae756dd7c6c644cbb33ccfabd8ee5c31dbaf45",
                   "key": "purge_route",
                   "value_sha256": "2dfad0b3debead93339704bd9c2bff1e08a6cc7f1155e27cd67b4fbaee5e3cfe",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "d9a33205e59abb7143fd4f017957d5bfe39d67412281258e7129113930bdb1c7",
+                  "memory_id_sha256": "914f35ad723110e2d0c0d37d41b3737ab7a91d9f018baf4aff5b50517c3491c2",
                   "key": "backup_vault",
                   "value_sha256": "06ffe8aa87cf7c68c8bb5fb8b05fcb5b526d65a93fdbd19cd388fb772dd784c5",
                   "revision": "obsolete"
                 },
                 {
-                  "memory_id_sha256": "83e5bc755811fa312a8f975a2872e886d440938cd129b283021191a861a01473",
+                  "memory_id_sha256": "efcdee2a6c7b4d90098ec4f8822a0f8d9ee45af9737702d84a50a6b701cd04dc",
                   "key": "deploy_target",
                   "value_sha256": "799d8647b413c984b80872492f9db64ef54987c10d06d9a085770febbc3070f5",
                   "revision": "obsolete"
@@ -3719,7 +3712,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.04679699999906006,
+          "elapsed_seconds": 0.08912939999936498,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -3756,8 +3749,8 @@
               "rollback_checkpoint": "7de142fbd0f925db7309bd7b41c3bea47dd2c52d9b330ba144ef89c13065b3cb"
             },
             "citations_sha256": {
-              "deploy_target": "2d3a44d14ba389f7f1ccb6cab3ff05841939c21cd46990b6269695a642b1348c",
-              "rollback_checkpoint": "4d0a3f6b5b2234d9e1dbabd0aae988321662c13750bdfe4e96f9d8fe5c697126"
+              "deploy_target": "f16192eb08d2bfedcaccf54625d30a7a888a0d3b756f36ddd80b096da17047eb",
+              "rollback_checkpoint": "d5494832c40404e38ffc4ff84e37737737d5351cbf04e0cec47670029ba109eb"
             },
             "claimed_complete": true
           },
@@ -3767,19 +3760,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "2d3a44d14ba389f7f1ccb6cab3ff05841939c21cd46990b6269695a642b1348c",
+                  "memory_id_sha256": "f16192eb08d2bfedcaccf54625d30a7a888a0d3b756f36ddd80b096da17047eb",
                   "key": "deploy_target",
                   "value_sha256": "6d8f06ca4e4bb18b098f8c0513251f32ffe1088bbeee09d43ac4ec65c1fa7e0d",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "80359aa7636fafa5450785499685e8b8b69ce07b25ee875b549049dccbbdce90",
+                  "memory_id_sha256": "76079f9acadd1baedeb082dff34769367401905f4092199fcb3da23971d098af",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "9141de41503be597846f19422b806317855a691f2419b7f796a0402972e57c4e",
+                  "memory_id_sha256": "47f1c98259c997f5b4bc09788518f7bc53c5a9af273aabfbb085cb4b2403324b",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -3791,19 +3784,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "4d0a3f6b5b2234d9e1dbabd0aae988321662c13750bdfe4e96f9d8fe5c697126",
+                  "memory_id_sha256": "d5494832c40404e38ffc4ff84e37737737d5351cbf04e0cec47670029ba109eb",
                   "key": "rollback_checkpoint",
                   "value_sha256": "7de142fbd0f925db7309bd7b41c3bea47dd2c52d9b330ba144ef89c13065b3cb",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "2d3a44d14ba389f7f1ccb6cab3ff05841939c21cd46990b6269695a642b1348c",
+                  "memory_id_sha256": "f16192eb08d2bfedcaccf54625d30a7a888a0d3b756f36ddd80b096da17047eb",
                   "key": "deploy_target",
                   "value_sha256": "6d8f06ca4e4bb18b098f8c0513251f32ffe1088bbeee09d43ac4ec65c1fa7e0d",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "9141de41503be597846f19422b806317855a691f2419b7f796a0402972e57c4e",
+                  "memory_id_sha256": "47f1c98259c997f5b4bc09788518f7bc53c5a9af273aabfbb085cb4b2403324b",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -3830,7 +3823,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.046651599997858284,
+          "elapsed_seconds": 0.0696074999996199,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -3867,8 +3860,8 @@
               "retention_policy": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007"
             },
             "citations_sha256": {
-              "backup_vault": "80359aa7636fafa5450785499685e8b8b69ce07b25ee875b549049dccbbdce90",
-              "retention_policy": "9141de41503be597846f19422b806317855a691f2419b7f796a0402972e57c4e"
+              "backup_vault": "76079f9acadd1baedeb082dff34769367401905f4092199fcb3da23971d098af",
+              "retention_policy": "47f1c98259c997f5b4bc09788518f7bc53c5a9af273aabfbb085cb4b2403324b"
             },
             "claimed_complete": true
           },
@@ -3878,19 +3871,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "80359aa7636fafa5450785499685e8b8b69ce07b25ee875b549049dccbbdce90",
+                  "memory_id_sha256": "76079f9acadd1baedeb082dff34769367401905f4092199fcb3da23971d098af",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "2d3a44d14ba389f7f1ccb6cab3ff05841939c21cd46990b6269695a642b1348c",
+                  "memory_id_sha256": "f16192eb08d2bfedcaccf54625d30a7a888a0d3b756f36ddd80b096da17047eb",
                   "key": "deploy_target",
                   "value_sha256": "6d8f06ca4e4bb18b098f8c0513251f32ffe1088bbeee09d43ac4ec65c1fa7e0d",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "9141de41503be597846f19422b806317855a691f2419b7f796a0402972e57c4e",
+                  "memory_id_sha256": "47f1c98259c997f5b4bc09788518f7bc53c5a9af273aabfbb085cb4b2403324b",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -3902,13 +3895,13 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "9141de41503be597846f19422b806317855a691f2419b7f796a0402972e57c4e",
+                  "memory_id_sha256": "47f1c98259c997f5b4bc09788518f7bc53c5a9af273aabfbb085cb4b2403324b",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "80359aa7636fafa5450785499685e8b8b69ce07b25ee875b549049dccbbdce90",
+                  "memory_id_sha256": "76079f9acadd1baedeb082dff34769367401905f4092199fcb3da23971d098af",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
@@ -3935,7 +3928,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.046138400000927504,
+          "elapsed_seconds": 0.07101650000004156,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -3972,8 +3965,8 @@
               "signing_profile": "eb2f986567b0d42accfd904fdd0dec258133c410d68287195e75c938019a7ab5"
             },
             "citations_sha256": {
-              "build_queue": "e63a9870bd02286716e3d3f88b235a733193a567812827140a3322bd02fea220",
-              "signing_profile": "ff0d3056fb0e6d83f01cf8caa2270d0ffce5724533b77b023fec7e65c0fd9f1a"
+              "build_queue": "c3bb945ed63f4e0548ed622e33791dab471f54901704fd6f23608eaf00302f9a",
+              "signing_profile": "5e3116445847b0917ec67ce2097d1ff3723e3c1eb3cb99944b75d56f164df606"
             },
             "claimed_complete": true
           },
@@ -3983,19 +3976,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "e63a9870bd02286716e3d3f88b235a733193a567812827140a3322bd02fea220",
+                  "memory_id_sha256": "c3bb945ed63f4e0548ed622e33791dab471f54901704fd6f23608eaf00302f9a",
                   "key": "build_queue",
                   "value_sha256": "c815dfc3aeedbeaa52cc83c6c65ebd202626e22c6857ef491ae202a3896d0ac1",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "80359aa7636fafa5450785499685e8b8b69ce07b25ee875b549049dccbbdce90",
+                  "memory_id_sha256": "76079f9acadd1baedeb082dff34769367401905f4092199fcb3da23971d098af",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "9141de41503be597846f19422b806317855a691f2419b7f796a0402972e57c4e",
+                  "memory_id_sha256": "47f1c98259c997f5b4bc09788518f7bc53c5a9af273aabfbb085cb4b2403324b",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -4007,19 +4000,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "ff0d3056fb0e6d83f01cf8caa2270d0ffce5724533b77b023fec7e65c0fd9f1a",
+                  "memory_id_sha256": "5e3116445847b0917ec67ce2097d1ff3723e3c1eb3cb99944b75d56f164df606",
                   "key": "signing_profile",
                   "value_sha256": "eb2f986567b0d42accfd904fdd0dec258133c410d68287195e75c938019a7ab5",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "4d0a3f6b5b2234d9e1dbabd0aae988321662c13750bdfe4e96f9d8fe5c697126",
+                  "memory_id_sha256": "d5494832c40404e38ffc4ff84e37737737d5351cbf04e0cec47670029ba109eb",
                   "key": "rollback_checkpoint",
                   "value_sha256": "7de142fbd0f925db7309bd7b41c3bea47dd2c52d9b330ba144ef89c13065b3cb",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "e63a9870bd02286716e3d3f88b235a733193a567812827140a3322bd02fea220",
+                  "memory_id_sha256": "c3bb945ed63f4e0548ed622e33791dab471f54901704fd6f23608eaf00302f9a",
                   "key": "build_queue",
                   "value_sha256": "c815dfc3aeedbeaa52cc83c6c65ebd202626e22c6857ef491ae202a3896d0ac1",
                   "revision": "current"
@@ -4046,7 +4039,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.049288700000033714,
+          "elapsed_seconds": 0.08661390000088431,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -4083,8 +4076,8 @@
               "handoff_label": "a0dea6a5a7299ab955d67d524492211cc5c05bceda7f1085f0a96036510f4fa4"
             },
             "citations_sha256": {
-              "escalation_route": "5c7dcffa2548c6db169a19fd5df58305d14cedd48b965486e15d48e9324a9b9f",
-              "handoff_label": "cf5c0b11ed01f1af565ba23dc041ba735171cba3ce708882d3af21dda3730ff8"
+              "escalation_route": "1aece6438112edf02c653967b934bea3a2128a428b72250e3322516886f321e2",
+              "handoff_label": "f7490521d9420f8be6261adf9aa624c788dbb766a2d3b0bb9342bad64a02ab64"
             },
             "claimed_complete": true
           },
@@ -4094,19 +4087,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "5c7dcffa2548c6db169a19fd5df58305d14cedd48b965486e15d48e9324a9b9f",
+                  "memory_id_sha256": "1aece6438112edf02c653967b934bea3a2128a428b72250e3322516886f321e2",
                   "key": "escalation_route",
                   "value_sha256": "6d6984e26910291d77928415af93f97689fc95b7c7753cb63c01819f648fbd52",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "cf5c0b11ed01f1af565ba23dc041ba735171cba3ce708882d3af21dda3730ff8",
+                  "memory_id_sha256": "f7490521d9420f8be6261adf9aa624c788dbb766a2d3b0bb9342bad64a02ab64",
                   "key": "handoff_label",
                   "value_sha256": "a0dea6a5a7299ab955d67d524492211cc5c05bceda7f1085f0a96036510f4fa4",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "9141de41503be597846f19422b806317855a691f2419b7f796a0402972e57c4e",
+                  "memory_id_sha256": "47f1c98259c997f5b4bc09788518f7bc53c5a9af273aabfbb085cb4b2403324b",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -4118,19 +4111,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "cf5c0b11ed01f1af565ba23dc041ba735171cba3ce708882d3af21dda3730ff8",
+                  "memory_id_sha256": "f7490521d9420f8be6261adf9aa624c788dbb766a2d3b0bb9342bad64a02ab64",
                   "key": "handoff_label",
                   "value_sha256": "a0dea6a5a7299ab955d67d524492211cc5c05bceda7f1085f0a96036510f4fa4",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "9141de41503be597846f19422b806317855a691f2419b7f796a0402972e57c4e",
+                  "memory_id_sha256": "47f1c98259c997f5b4bc09788518f7bc53c5a9af273aabfbb085cb4b2403324b",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "80359aa7636fafa5450785499685e8b8b69ce07b25ee875b549049dccbbdce90",
+                  "memory_id_sha256": "76079f9acadd1baedeb082dff34769367401905f4092199fcb3da23971d098af",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
@@ -4157,7 +4150,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.049760499998228624,
+          "elapsed_seconds": 0.09232289999999921,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -4194,8 +4187,8 @@
               "recovery_slot": "7723c41720810a8ce690a9a8c2cc410fb49e2b098be776014917ea76b3472cb6"
             },
             "citations_sha256": {
-              "shard_group": "118a504a5242dc4455c66c4ca7669b1dce16785aac7e990293da2a1c4c4b6662",
-              "recovery_slot": "7d523b0f20474b2b74b02a39c1e96ca9fe4e245281fe8f38d4e6bcb3ceb4fd8c"
+              "shard_group": "36467811a8117f0aceb4962a8c767395714cb0963304a5db134b0c163065b5e0",
+              "recovery_slot": "e374c5121297539c28cac771af87424896db3c90f5af8c60891526420e9e956c"
             },
             "claimed_complete": true
           },
@@ -4205,19 +4198,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "118a504a5242dc4455c66c4ca7669b1dce16785aac7e990293da2a1c4c4b6662",
+                  "memory_id_sha256": "36467811a8117f0aceb4962a8c767395714cb0963304a5db134b0c163065b5e0",
                   "key": "shard_group",
                   "value_sha256": "5980decf74eb142321e9d4684b0a47c88c242ac1a6bacde1b435827c15629b0c",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "80359aa7636fafa5450785499685e8b8b69ce07b25ee875b549049dccbbdce90",
+                  "memory_id_sha256": "76079f9acadd1baedeb082dff34769367401905f4092199fcb3da23971d098af",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "2d3a44d14ba389f7f1ccb6cab3ff05841939c21cd46990b6269695a642b1348c",
+                  "memory_id_sha256": "f16192eb08d2bfedcaccf54625d30a7a888a0d3b756f36ddd80b096da17047eb",
                   "key": "deploy_target",
                   "value_sha256": "6d8f06ca4e4bb18b098f8c0513251f32ffe1088bbeee09d43ac4ec65c1fa7e0d",
                   "revision": "current"
@@ -4229,19 +4222,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "7d523b0f20474b2b74b02a39c1e96ca9fe4e245281fe8f38d4e6bcb3ceb4fd8c",
+                  "memory_id_sha256": "e374c5121297539c28cac771af87424896db3c90f5af8c60891526420e9e956c",
                   "key": "recovery_slot",
                   "value_sha256": "7723c41720810a8ce690a9a8c2cc410fb49e2b098be776014917ea76b3472cb6",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "9141de41503be597846f19422b806317855a691f2419b7f796a0402972e57c4e",
+                  "memory_id_sha256": "47f1c98259c997f5b4bc09788518f7bc53c5a9af273aabfbb085cb4b2403324b",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "80359aa7636fafa5450785499685e8b8b69ce07b25ee875b549049dccbbdce90",
+                  "memory_id_sha256": "76079f9acadd1baedeb082dff34769367401905f4092199fcb3da23971d098af",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
@@ -4268,7 +4261,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.04852000000028056,
+          "elapsed_seconds": 0.08518679999906453,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -4305,8 +4298,8 @@
               "purge_route": "5d13ca73f3f9df9a571d198d32e15acf08f7c6b09fe0e49dcfba98738b8c35bd"
             },
             "citations_sha256": {
-              "cache_pool": "585d1835e08c053ec1a4c89543c0e3eb70b9f986160a66f787f33fc4f60d4a3c",
-              "purge_route": "13ad36a688ca86fd4d771e092422c766e1797a230b14ac3a8a3edd9bb1aaa85b"
+              "cache_pool": "a94e71a38038cf2e37871d19345b48b1082f94d19bfd70f15c578b9e856f83f3",
+              "purge_route": "b1903345c9c119638cf8af3e4086a9520c8165f2269c7996cd2ef20aed731cdc"
             },
             "claimed_complete": true
           },
@@ -4316,19 +4309,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "585d1835e08c053ec1a4c89543c0e3eb70b9f986160a66f787f33fc4f60d4a3c",
+                  "memory_id_sha256": "a94e71a38038cf2e37871d19345b48b1082f94d19bfd70f15c578b9e856f83f3",
                   "key": "cache_pool",
                   "value_sha256": "9c35f5f03ac09ed368dd92a4b0ae5523af44e879138219d41e350160d0bceaf9",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "9141de41503be597846f19422b806317855a691f2419b7f796a0402972e57c4e",
+                  "memory_id_sha256": "47f1c98259c997f5b4bc09788518f7bc53c5a9af273aabfbb085cb4b2403324b",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "13ad36a688ca86fd4d771e092422c766e1797a230b14ac3a8a3edd9bb1aaa85b",
+                  "memory_id_sha256": "b1903345c9c119638cf8af3e4086a9520c8165f2269c7996cd2ef20aed731cdc",
                   "key": "purge_route",
                   "value_sha256": "5d13ca73f3f9df9a571d198d32e15acf08f7c6b09fe0e49dcfba98738b8c35bd",
                   "revision": "current"
@@ -4340,19 +4333,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "13ad36a688ca86fd4d771e092422c766e1797a230b14ac3a8a3edd9bb1aaa85b",
+                  "memory_id_sha256": "b1903345c9c119638cf8af3e4086a9520c8165f2269c7996cd2ef20aed731cdc",
                   "key": "purge_route",
                   "value_sha256": "5d13ca73f3f9df9a571d198d32e15acf08f7c6b09fe0e49dcfba98738b8c35bd",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "9141de41503be597846f19422b806317855a691f2419b7f796a0402972e57c4e",
+                  "memory_id_sha256": "47f1c98259c997f5b4bc09788518f7bc53c5a9af273aabfbb085cb4b2403324b",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "80359aa7636fafa5450785499685e8b8b69ce07b25ee875b549049dccbbdce90",
+                  "memory_id_sha256": "76079f9acadd1baedeb082dff34769367401905f4092199fcb3da23971d098af",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
@@ -4379,7 +4372,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.0499180000006163,
+          "elapsed_seconds": 0.0932042000004003,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -4416,8 +4409,8 @@
               "rollback_checkpoint": "7de142fbd0f925db7309bd7b41c3bea47dd2c52d9b330ba144ef89c13065b3cb"
             },
             "citations_sha256": {
-              "deploy_target": "7f665af8701321496915d70bfc075e919999d19f0463b749baa54b616c0c2213",
-              "rollback_checkpoint": "86a59a642f4ada15e7d0d55a47e4eb6f270c2dfddaf40ce2722190f2667dc4fd"
+              "deploy_target": "d66375d86ff8dd8c980c80d77cfb0fab8988801a8cb32773e3e9cfcfe6efff0b",
+              "rollback_checkpoint": "ac2bc63d18759c2f44552b71857f94f1e15fd397c636693a463ec4b4ee9461be"
             },
             "claimed_complete": true
           },
@@ -4427,19 +4420,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "7f665af8701321496915d70bfc075e919999d19f0463b749baa54b616c0c2213",
+                  "memory_id_sha256": "d66375d86ff8dd8c980c80d77cfb0fab8988801a8cb32773e3e9cfcfe6efff0b",
                   "key": "deploy_target",
                   "value_sha256": "6d8f06ca4e4bb18b098f8c0513251f32ffe1088bbeee09d43ac4ec65c1fa7e0d",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "d4bd6b7f6b6d236c357196d7f4a3045b21de9eb580d634fee542bedc86d7adc1",
+                  "memory_id_sha256": "6b0e27c98c45c19bf89ff7031f76082d5b6cb026b7bae4e1aae759acf032e1ad",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "03cc03b61435bdaff940d6217d21ff4b01c0f1194dd261e465446aacc4a7db2e",
+                  "memory_id_sha256": "156bda1abcd302484afcf0a531adb96b9545925500b34432d53e1fd2e54806fb",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -4451,19 +4444,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "86a59a642f4ada15e7d0d55a47e4eb6f270c2dfddaf40ce2722190f2667dc4fd",
+                  "memory_id_sha256": "ac2bc63d18759c2f44552b71857f94f1e15fd397c636693a463ec4b4ee9461be",
                   "key": "rollback_checkpoint",
                   "value_sha256": "7de142fbd0f925db7309bd7b41c3bea47dd2c52d9b330ba144ef89c13065b3cb",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "7f665af8701321496915d70bfc075e919999d19f0463b749baa54b616c0c2213",
+                  "memory_id_sha256": "d66375d86ff8dd8c980c80d77cfb0fab8988801a8cb32773e3e9cfcfe6efff0b",
                   "key": "deploy_target",
                   "value_sha256": "6d8f06ca4e4bb18b098f8c0513251f32ffe1088bbeee09d43ac4ec65c1fa7e0d",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "03cc03b61435bdaff940d6217d21ff4b01c0f1194dd261e465446aacc4a7db2e",
+                  "memory_id_sha256": "156bda1abcd302484afcf0a531adb96b9545925500b34432d53e1fd2e54806fb",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -4490,7 +4483,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.04794240000046557,
+          "elapsed_seconds": 0.08270170000105281,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -4527,8 +4520,8 @@
               "retention_policy": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007"
             },
             "citations_sha256": {
-              "backup_vault": "d4bd6b7f6b6d236c357196d7f4a3045b21de9eb580d634fee542bedc86d7adc1",
-              "retention_policy": "03cc03b61435bdaff940d6217d21ff4b01c0f1194dd261e465446aacc4a7db2e"
+              "backup_vault": "6b0e27c98c45c19bf89ff7031f76082d5b6cb026b7bae4e1aae759acf032e1ad",
+              "retention_policy": "156bda1abcd302484afcf0a531adb96b9545925500b34432d53e1fd2e54806fb"
             },
             "claimed_complete": true
           },
@@ -4538,19 +4531,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "d4bd6b7f6b6d236c357196d7f4a3045b21de9eb580d634fee542bedc86d7adc1",
+                  "memory_id_sha256": "6b0e27c98c45c19bf89ff7031f76082d5b6cb026b7bae4e1aae759acf032e1ad",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "7f665af8701321496915d70bfc075e919999d19f0463b749baa54b616c0c2213",
+                  "memory_id_sha256": "d66375d86ff8dd8c980c80d77cfb0fab8988801a8cb32773e3e9cfcfe6efff0b",
                   "key": "deploy_target",
                   "value_sha256": "6d8f06ca4e4bb18b098f8c0513251f32ffe1088bbeee09d43ac4ec65c1fa7e0d",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "03cc03b61435bdaff940d6217d21ff4b01c0f1194dd261e465446aacc4a7db2e",
+                  "memory_id_sha256": "156bda1abcd302484afcf0a531adb96b9545925500b34432d53e1fd2e54806fb",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -4562,13 +4555,13 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "03cc03b61435bdaff940d6217d21ff4b01c0f1194dd261e465446aacc4a7db2e",
+                  "memory_id_sha256": "156bda1abcd302484afcf0a531adb96b9545925500b34432d53e1fd2e54806fb",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "d4bd6b7f6b6d236c357196d7f4a3045b21de9eb580d634fee542bedc86d7adc1",
+                  "memory_id_sha256": "6b0e27c98c45c19bf89ff7031f76082d5b6cb026b7bae4e1aae759acf032e1ad",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
@@ -4595,7 +4588,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.05603229999906034,
+          "elapsed_seconds": 0.10503220000100555,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -4632,8 +4625,8 @@
               "signing_profile": "eb2f986567b0d42accfd904fdd0dec258133c410d68287195e75c938019a7ab5"
             },
             "citations_sha256": {
-              "build_queue": "bf75e81579f53bcf8e97013b1c216b1f9b35318850f43947576a4408e740d6b8",
-              "signing_profile": "f2c4d3c1087191d53a76e6760434a1da128033f87ff1a958222c43559d1396d9"
+              "build_queue": "0fc567c28dda1bcd645b69ab36c4ea90a94f970e248aa536262fc9bcc96ad288",
+              "signing_profile": "e0ecfe04456932dc452185498eb0b8406431861a545e8697cad6f07a26d21f9a"
             },
             "claimed_complete": true
           },
@@ -4643,19 +4636,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "bf75e81579f53bcf8e97013b1c216b1f9b35318850f43947576a4408e740d6b8",
+                  "memory_id_sha256": "0fc567c28dda1bcd645b69ab36c4ea90a94f970e248aa536262fc9bcc96ad288",
                   "key": "build_queue",
                   "value_sha256": "c815dfc3aeedbeaa52cc83c6c65ebd202626e22c6857ef491ae202a3896d0ac1",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "d4bd6b7f6b6d236c357196d7f4a3045b21de9eb580d634fee542bedc86d7adc1",
+                  "memory_id_sha256": "6b0e27c98c45c19bf89ff7031f76082d5b6cb026b7bae4e1aae759acf032e1ad",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "03cc03b61435bdaff940d6217d21ff4b01c0f1194dd261e465446aacc4a7db2e",
+                  "memory_id_sha256": "156bda1abcd302484afcf0a531adb96b9545925500b34432d53e1fd2e54806fb",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -4667,19 +4660,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "f2c4d3c1087191d53a76e6760434a1da128033f87ff1a958222c43559d1396d9",
+                  "memory_id_sha256": "e0ecfe04456932dc452185498eb0b8406431861a545e8697cad6f07a26d21f9a",
                   "key": "signing_profile",
                   "value_sha256": "eb2f986567b0d42accfd904fdd0dec258133c410d68287195e75c938019a7ab5",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "86a59a642f4ada15e7d0d55a47e4eb6f270c2dfddaf40ce2722190f2667dc4fd",
+                  "memory_id_sha256": "ac2bc63d18759c2f44552b71857f94f1e15fd397c636693a463ec4b4ee9461be",
                   "key": "rollback_checkpoint",
                   "value_sha256": "7de142fbd0f925db7309bd7b41c3bea47dd2c52d9b330ba144ef89c13065b3cb",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "bf75e81579f53bcf8e97013b1c216b1f9b35318850f43947576a4408e740d6b8",
+                  "memory_id_sha256": "0fc567c28dda1bcd645b69ab36c4ea90a94f970e248aa536262fc9bcc96ad288",
                   "key": "build_queue",
                   "value_sha256": "c815dfc3aeedbeaa52cc83c6c65ebd202626e22c6857ef491ae202a3896d0ac1",
                   "revision": "current"
@@ -4706,7 +4699,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.05038530000092578,
+          "elapsed_seconds": 0.09910280000076455,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -4743,8 +4736,8 @@
               "handoff_label": "a0dea6a5a7299ab955d67d524492211cc5c05bceda7f1085f0a96036510f4fa4"
             },
             "citations_sha256": {
-              "escalation_route": "2aea44a8188318b41524c50b50f5d2de03e3c388ebdff213f95203e074673475",
-              "handoff_label": "a24f1be051d3ff3c1de41f30c3c7091d6a9007737a46c0d2b92fb2ccf654eaef"
+              "escalation_route": "1f9a1fc28bb823fce29d512b5b34894188555df0c90eaef59292d18e41a5f2ea",
+              "handoff_label": "28b87de6986e9e8dc26885c7fbaeaffb4b4ae76e67160899bad491b9f445c864"
             },
             "claimed_complete": true
           },
@@ -4754,19 +4747,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "2aea44a8188318b41524c50b50f5d2de03e3c388ebdff213f95203e074673475",
+                  "memory_id_sha256": "1f9a1fc28bb823fce29d512b5b34894188555df0c90eaef59292d18e41a5f2ea",
                   "key": "escalation_route",
                   "value_sha256": "6d6984e26910291d77928415af93f97689fc95b7c7753cb63c01819f648fbd52",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "a24f1be051d3ff3c1de41f30c3c7091d6a9007737a46c0d2b92fb2ccf654eaef",
+                  "memory_id_sha256": "28b87de6986e9e8dc26885c7fbaeaffb4b4ae76e67160899bad491b9f445c864",
                   "key": "handoff_label",
                   "value_sha256": "a0dea6a5a7299ab955d67d524492211cc5c05bceda7f1085f0a96036510f4fa4",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "03cc03b61435bdaff940d6217d21ff4b01c0f1194dd261e465446aacc4a7db2e",
+                  "memory_id_sha256": "156bda1abcd302484afcf0a531adb96b9545925500b34432d53e1fd2e54806fb",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
@@ -4778,19 +4771,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "a24f1be051d3ff3c1de41f30c3c7091d6a9007737a46c0d2b92fb2ccf654eaef",
+                  "memory_id_sha256": "28b87de6986e9e8dc26885c7fbaeaffb4b4ae76e67160899bad491b9f445c864",
                   "key": "handoff_label",
                   "value_sha256": "a0dea6a5a7299ab955d67d524492211cc5c05bceda7f1085f0a96036510f4fa4",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "03cc03b61435bdaff940d6217d21ff4b01c0f1194dd261e465446aacc4a7db2e",
+                  "memory_id_sha256": "156bda1abcd302484afcf0a531adb96b9545925500b34432d53e1fd2e54806fb",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "d4bd6b7f6b6d236c357196d7f4a3045b21de9eb580d634fee542bedc86d7adc1",
+                  "memory_id_sha256": "6b0e27c98c45c19bf89ff7031f76082d5b6cb026b7bae4e1aae759acf032e1ad",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
@@ -4817,7 +4810,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.052397899999050424,
+          "elapsed_seconds": 0.08921969999937573,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -4854,8 +4847,8 @@
               "recovery_slot": "7723c41720810a8ce690a9a8c2cc410fb49e2b098be776014917ea76b3472cb6"
             },
             "citations_sha256": {
-              "shard_group": "76fddfbd7c1e003f734067f4ad809c2d0e38726f61be3ec2017dc579cec4f882",
-              "recovery_slot": "55b1f9cf9e58c795b7a8e0d0edda4f4206e089d5efca05fe60c03eb50329f4ab"
+              "shard_group": "f24863391d1cc1e650f777fda8c0e666d320dbcd17df1bd78b1bc203e251ed4a",
+              "recovery_slot": "57f93aca518df635f436ca0be34459f1ee736dd872984ab069ca40d829d0b4bd"
             },
             "claimed_complete": true
           },
@@ -4865,19 +4858,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "76fddfbd7c1e003f734067f4ad809c2d0e38726f61be3ec2017dc579cec4f882",
+                  "memory_id_sha256": "f24863391d1cc1e650f777fda8c0e666d320dbcd17df1bd78b1bc203e251ed4a",
                   "key": "shard_group",
                   "value_sha256": "5980decf74eb142321e9d4684b0a47c88c242ac1a6bacde1b435827c15629b0c",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "d4bd6b7f6b6d236c357196d7f4a3045b21de9eb580d634fee542bedc86d7adc1",
+                  "memory_id_sha256": "6b0e27c98c45c19bf89ff7031f76082d5b6cb026b7bae4e1aae759acf032e1ad",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "7f665af8701321496915d70bfc075e919999d19f0463b749baa54b616c0c2213",
+                  "memory_id_sha256": "d66375d86ff8dd8c980c80d77cfb0fab8988801a8cb32773e3e9cfcfe6efff0b",
                   "key": "deploy_target",
                   "value_sha256": "6d8f06ca4e4bb18b098f8c0513251f32ffe1088bbeee09d43ac4ec65c1fa7e0d",
                   "revision": "current"
@@ -4889,19 +4882,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "55b1f9cf9e58c795b7a8e0d0edda4f4206e089d5efca05fe60c03eb50329f4ab",
+                  "memory_id_sha256": "57f93aca518df635f436ca0be34459f1ee736dd872984ab069ca40d829d0b4bd",
                   "key": "recovery_slot",
                   "value_sha256": "7723c41720810a8ce690a9a8c2cc410fb49e2b098be776014917ea76b3472cb6",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "03cc03b61435bdaff940d6217d21ff4b01c0f1194dd261e465446aacc4a7db2e",
+                  "memory_id_sha256": "156bda1abcd302484afcf0a531adb96b9545925500b34432d53e1fd2e54806fb",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "d4bd6b7f6b6d236c357196d7f4a3045b21de9eb580d634fee542bedc86d7adc1",
+                  "memory_id_sha256": "6b0e27c98c45c19bf89ff7031f76082d5b6cb026b7bae4e1aae759acf032e1ad",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"
@@ -4928,7 +4921,7 @@
           "verification_passed": true,
           "manual_interventions": 0,
           "recovery_scope": "new-agent-existing-memory-store",
-          "elapsed_seconds": 0.05752109999957611,
+          "elapsed_seconds": 0.07358790000034787,
           "error_type": null,
           "model_calls": 1,
           "model_calls_complete": true,
@@ -4965,8 +4958,8 @@
               "purge_route": "5d13ca73f3f9df9a571d198d32e15acf08f7c6b09fe0e49dcfba98738b8c35bd"
             },
             "citations_sha256": {
-              "cache_pool": "c22119ae7d8e31dfba269ef2dfc17d906c1f1adb2200dad18c55e64f6bd998a1",
-              "purge_route": "2470b6dda3066488fd7e0d999ac70f6e517c480ee49bc4e6b70517358583fc76"
+              "cache_pool": "489250947d01a86f996ebdcc0dd5602193c4bfaba6262e3fbbfdd6d801a748d8",
+              "purge_route": "e217b568af7f207ae85a2d1d1557f7f30ad12948583748b9b30150d22b80b084"
             },
             "claimed_complete": true
           },
@@ -4976,19 +4969,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "c22119ae7d8e31dfba269ef2dfc17d906c1f1adb2200dad18c55e64f6bd998a1",
+                  "memory_id_sha256": "489250947d01a86f996ebdcc0dd5602193c4bfaba6262e3fbbfdd6d801a748d8",
                   "key": "cache_pool",
                   "value_sha256": "9c35f5f03ac09ed368dd92a4b0ae5523af44e879138219d41e350160d0bceaf9",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "03cc03b61435bdaff940d6217d21ff4b01c0f1194dd261e465446aacc4a7db2e",
+                  "memory_id_sha256": "156bda1abcd302484afcf0a531adb96b9545925500b34432d53e1fd2e54806fb",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "2470b6dda3066488fd7e0d999ac70f6e517c480ee49bc4e6b70517358583fc76",
+                  "memory_id_sha256": "e217b568af7f207ae85a2d1d1557f7f30ad12948583748b9b30150d22b80b084",
                   "key": "purge_route",
                   "value_sha256": "5d13ca73f3f9df9a571d198d32e15acf08f7c6b09fe0e49dcfba98738b8c35bd",
                   "revision": "current"
@@ -5000,19 +4993,19 @@
               "complete": true,
               "facts": [
                 {
-                  "memory_id_sha256": "2470b6dda3066488fd7e0d999ac70f6e517c480ee49bc4e6b70517358583fc76",
+                  "memory_id_sha256": "e217b568af7f207ae85a2d1d1557f7f30ad12948583748b9b30150d22b80b084",
                   "key": "purge_route",
                   "value_sha256": "5d13ca73f3f9df9a571d198d32e15acf08f7c6b09fe0e49dcfba98738b8c35bd",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "03cc03b61435bdaff940d6217d21ff4b01c0f1194dd261e465446aacc4a7db2e",
+                  "memory_id_sha256": "156bda1abcd302484afcf0a531adb96b9545925500b34432d53e1fd2e54806fb",
                   "key": "retention_policy",
                   "value_sha256": "48bd368e3f340994fd50262382c20134f3b92182c26f0b6d449804a5a6d12007",
                   "revision": "current"
                 },
                 {
-                  "memory_id_sha256": "d4bd6b7f6b6d236c357196d7f4a3045b21de9eb580d634fee542bedc86d7adc1",
+                  "memory_id_sha256": "6b0e27c98c45c19bf89ff7031f76082d5b6cb026b7bae4e1aae759acf032e1ad",
                   "key": "backup_vault",
                   "value_sha256": "c1cf57a09fcbd0f96cba4df57e8e52c308e1daf2ad9cb992b56514e204b4a787",
                   "revision": "current"

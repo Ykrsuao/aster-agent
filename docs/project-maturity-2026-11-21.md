@@ -272,4 +272,18 @@
 - checker 从 GitHub API 核验仓库与 head-repository、workflow 路径/ID、dispatch run、当前 attempt、同一 SHA、必需成功 jobs 和 artifact digest。十任务报告要求独立完成/代码验收、固定预算、实际模型五键 identity/fingerprint、fixture/runner 哈希及可信来源 run/attempt；拒绝 fork、旧 attempt、过期或篡改产物。下载重定向不转发 token，解包校验路径、链接和体积。
 - 发布继续沿用 `release: published` 到 PyPI、手工 dispatch 到 TestPyPI；未新增 tag push 自动发布或凭据。发布说明精确指定一个 `Candidate artifact: ID`。runner 与冻结 fixture 的 Git 属性固定为 LF，保证 Windows checkout 的源码字节哈希与冻结 Git blob 一致。
 - Windows Python 3.12 离线 gate、terminal release smoke、make-release 合同及候选 harness 共 **237 passed**；Linux Python 3.13 同范围 **233 passed、4 skipped**，四项跳过属于 Windows 专用安装旅程。全仓 Ruff、格式、**1,388** 个源码 Python 文件 SPDX 与差异检查通过。未执行 make_release 主流程、publish workflow、真实模型、tag 或 release 操作。
+- 最终 R1 候选 `dfe0e1f6` 的 [CI](https://github.com/Ykrsuao/aster-agent/actions/runs/45118812407) 与 [WSL full](https://github.com/Ykrsuao/aster-agent/actions/runs/45118816888) 均成功。Linux unit 与 WSL 各 **17,275 passed、56 skipped、584 deselected、3 xfailed**；Windows 完整终端包安装/重装、Linux 原生终端、Linux sandbox 及其余启用检查通过。严格发行候选与 macOS 条件任务未启用。
 - 完成边界：门槛实现与离线验收已完成，端到端发行验收仍未完成。可信 `.github/workflows/terminal-acceptance.yml` 真实任务 producer 尚未提供，历史已发布完整 Windows 包及真实跨版本安装仍缺材料；当前严格 gate 因而保持拒绝。离线替身、旧 dirty 包或同版本重装不能代替这些材料。
+
+## R2 计量、来源与离线对照验收（2026-11-23）
+
+- 实施分支：`codex/eval-evidence-20261122`，基于最终 R1 候选 `dfe0e1f6`。从 raw spans、TraceExplorer、worker 结果到实验 JSON/JSONL，分别保存已知 token 小计与完整性；缺失用量和费用保持未知，明确的零仍为已知零。各指标保留观察数与未知数，不把未知算成成功或零费用。
+- 磁盘 worker 的本地 JSONL exporter 现在独立于 OTLP 初始化；实际子进程的零用量、部分用量与未知用量贯穿 raw spans、worker JSON 和实验 JSONL。受限 worker 在结果输出前卡于无需执行的 `tracemalloc.clear_traces()` 已独立复现；该进程随即退出，移除清理后原失败与非有限 timeout 探针 **4 passed**，保留原 **30 秒**协议上限和实际内存监控。
+- 终端验收记录实际五键模型 identity/fingerprint、候选 SHA/dirty/diff、fixture/runner 字节哈希、预算与 repeat，分别判断代理完成和独立代码验收。严格聚合拒绝身份、来源或限制不可比较及记录不完整的结果；NaN/无穷 timeout 在模型调用前拒绝。源码与 fixture 固定 LF，保持 Windows checkout 字节与 Git blob 一致。
+- 新增 [离线记忆对照](../experiments/memory_evidence/README.md)：实际 MemoryManager、MemorySkill、SQLite、NumPy 与 hashing embedder，六个合成任务各重复两次，分别运行 off/current/stale/corrected 四组。FakeLLM 脚本从真实检索复制事实并引用实际 ID，不含 fixture 答案；独立 scorer 判定答案、完整任务、引用与过期事实采用。
+- 原始报告来自 native Windows/Python 3.12 的 `5f728da2`，测量时间 **2026-11-23 13:47 +08:00**，共 **48 次任务观察和 48 次 FakeLLM 接口调用**，无调用失败或未知评分；current 与 corrected 各 **12/12** 完整任务，off 为 **0/12**，stale 为 **0/12** 且 **12/12** 采用过期事实。更正组执行 **24 次**显式更新；token/费用为 `null`，完整性为 false，外部供应商调用为零。
+- 报告保留真实 dirty 标记、空 tracked diff 与空 untracked-source 集合；四个源码与 fixture 的 SHA 已验证对应同一 Git 字节，runner/策略/模型指纹均验证通过。仅保存判定与哈希；六个原始问题和 24 个新旧事实值未进入报告。旧实验结果保留在提交历史，不将离线对照当作干净发行验收。
+- Windows eval_pipeline 全目录、TraceExplorer token 与终端验收 **364 passed、47 skipped**；记忆 harness 与 README **10 passed**。范围有重叠，不相加。默认 testpaths 现已纳入 eval_pipeline，Windows 默认收集 **17,736/18,320** 项、**584 deselected**，包括新增 worker/usage 回归；真实模型测试仍默认跳过，须显式开启 `RUN_MODEL_TESTS`。
+- Linux 首轮关联范围 **873 passed、51 skipped、1 failed**，唯一失败是超时 span 测试启用了缺席 OTLP collector。独立复现确认任务按 1 秒限额取消，随后网络导出与同步等待超过 30 秒协议上限；用例现使用本地 JSONL，保留原 **30 秒**和全部 span 断言，生产 worker 未因此改动。修后 Windows/Linux timeout 与 worker 各 **22 passed**；完整 Linux Python 3.13 关联复验 **874 passed、51 skipped**。这些范围有重叠，不相加；首轮失败日志保留。
+- 独立审查未发现指定计量/来源链路的新增阻断问题；全仓 Ruff、格式、全部 **1,395** 个源码 Python 文件 SPDX 与差异检查通过。日志、JUnit 与报告完整性核验保存在本机 `aster-audit-delivery-da31de6dc7` 临时目录，远端结果在草稿 PR 中绑定最终候选。
+- 完成边界：本项固化计量、可比较来源与离线记忆存取/接线/评分对照；未运行真实付费模型，也没有新的真实模型重复可靠率、自动反思或学习收益。真实仓库/终端旅程的可信 producer、同一候选的真实模型重复基线和 R1 跨版本发行材料仍待补齐；A1 保持候选方向。

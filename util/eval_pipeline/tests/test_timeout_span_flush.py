@@ -41,7 +41,7 @@ def _build_timeout_task_input(trace_dir: str, timeout_seconds: float = 1.0) -> d
         "display_name": "timeout_test/001/dummy/run1",
         "tier": "stable",
         "trace_dir": trace_dir,
-        "use_otlp": True,
+        "use_otlp": False,  # Verify local span flush without an external collector.
         "write_trace_file": True,
         "otlp_endpoint": "http://localhost:59999/v1/traces",
         "pass_threshold": 0.5,
