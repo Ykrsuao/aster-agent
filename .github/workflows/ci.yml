@@ -670,7 +670,6 @@ jobs:
       UPGRADE_FROM_TAG: ${{ inputs.upgrade_from_tag }}
       TASK_ARTIFACT_ID: ${{ inputs.task_report_artifact_id }}
       MODEL_FINGERPRINT: ${{ inputs.model_fingerprint }}
-      RELEASE_DIR: ${{ runner.temp }}/release-candidate
     steps:
       - uses: actions/checkout@v4
         with:
@@ -682,16 +681,18 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: dist
-          path: ${{ env.RELEASE_DIR }}/dist/
+          path: ${{ runner.temp }}/release-candidate/dist/
       - uses: actions/download-artifact@v4
         with:
           name: aster-terminal-windows
-          path: ${{ env.RELEASE_DIR }}/terminal/
+          path: ${{ runner.temp }}/release-candidate/terminal/
       - uses: actions/download-artifact@v4
         with:
           name: release-upgrade-evidence
-          path: ${{ env.RELEASE_DIR }}/evidence/
+          path: ${{ runner.temp }}/release-candidate/evidence/
       - name: Smoke-test the exact Python distributions outside the checkout
+        env:
+          RELEASE_DIR: ${{ runner.temp }}/release-candidate
         run: |
           uv venv "$RUNNER_TEMP/release-python" --python 3.12
           VIRTUAL_ENV="$RUNNER_TEMP/release-python" uv pip install "$RELEASE_DIR"/dist/*.whl
@@ -716,6 +717,8 @@ jobs:
           "$RUNNER_TEMP/release-python/bin/aster-acp" --help
       - name: Seal the exact accepted distributions and evidence
         id: seal
+        env:
+          RELEASE_DIR: ${{ runner.temp }}/release-candidate
         run: |
           mv "$RELEASE_DIR/terminal/install.json" "$RELEASE_DIR/evidence/install.json"
           uv run --no-project --with packaging==25.0 python scripts/check_release_evidence.py seal \
@@ -726,7 +729,7 @@ jobs:
         id: candidate
         with:
           name: ${{ steps.seal.outputs.artifact_name }}
-          path: ${{ env.RELEASE_DIR }}/
+          path: ${{ runner.temp }}/release-candidate/
           if-no-files-found: error
           retention-days: 90
       - name: Record the explicit publication locator
