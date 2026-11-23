@@ -36,7 +36,7 @@ test_suite: []
     def test_loads_tests_with_exact_match_scorer(self, tmp_path):
         """Tests with ExactMatchScorer are loaded correctly."""
         # Create minimal agent module
-        agent_dir = tmp_path / "agents"
+        agent_dir = tmp_path / "eval_config_test_agents"
         agent_dir.mkdir()
         (agent_dir / "__init__.py").write_text("")
         (agent_dir / "test_agent.py").write_text("""
@@ -69,7 +69,7 @@ output_dir: results
 test_suite:
   - name: test1
     agent:
-      module: agents.test_agent
+      module: eval_config_test_agents.test_agent
       class: TestAgent
     method: classify
     data_file: {data_file}
@@ -91,12 +91,14 @@ test_suite:
             assert len(evaluator.tests["test1"].scorers) == 1
             assert evaluator.tests["test1"].scorers[0].name == "exact"
         finally:
+            sys.modules.pop("eval_config_test_agents.test_agent", None)
+            sys.modules.pop("eval_config_test_agents", None)
             sys.path.remove(str(tmp_path))
 
     def test_loads_tests_with_llm_judge_scorer(self, tmp_path):
         """Tests with LLMJudgeScorer are loaded correctly with model reference."""
         # Create minimal agent module
-        agent_dir = tmp_path / "agents"
+        agent_dir = tmp_path / "eval_config_test_agents"
         agent_dir.mkdir()
         (agent_dir / "__init__.py").write_text("")
         (agent_dir / "test_agent.py").write_text("""
@@ -133,7 +135,7 @@ output_dir: results
 test_suite:
   - name: test1
     agent:
-      module: agents.test_agent
+      module: eval_config_test_agents.test_agent
       class: TestAgent
     method: classify
     data_file: {data_file}
@@ -161,12 +163,14 @@ test_suite:
             assert hasattr(scorer_cfg.scorer, "_llm")
             assert hasattr(scorer_cfg.scorer, "_rubric")
         finally:
+            sys.modules.pop("eval_config_test_agents.test_agent", None)
+            sys.modules.pop("eval_config_test_agents", None)
             sys.path.remove(str(tmp_path))
 
     def test_llm_judge_scorer_missing_model_raises(self, tmp_path):
         """LLMJudgeScorer with missing model reference raises error."""
         # Create minimal agent module
-        agent_dir = tmp_path / "agents"
+        agent_dir = tmp_path / "eval_config_test_agents"
         agent_dir.mkdir()
         (agent_dir / "__init__.py").write_text("")
         (agent_dir / "test_agent.py").write_text("""
@@ -199,7 +203,7 @@ output_dir: results
 test_suite:
   - name: test1
     agent:
-      module: agents.test_agent
+      module: eval_config_test_agents.test_agent
       class: TestAgent
     method: classify
     data_file: {data_file}
@@ -220,6 +224,8 @@ test_suite:
             with pytest.raises(ValueError, match="model 'nonexistent-model' not found"):
                 evaluator_from_config(config_file)
         finally:
+            sys.modules.pop("eval_config_test_agents.test_agent", None)
+            sys.modules.pop("eval_config_test_agents", None)
             sys.path.remove(str(tmp_path))
 
 
