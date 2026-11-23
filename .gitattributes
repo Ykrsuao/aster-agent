@@ -5,3 +5,7 @@ src/aster/viewer/frontend-react/dist/index.html text eol=lf
 # Candidate provenance compares these source bytes with the frozen Git blobs.
 scripts/terminal_acceptance.py text eol=lf
 tests/fixtures/terminal_acceptance/tasks.json text eol=lf
+
+# Memory controls retain source hashes that must survive cross-platform checkouts.
+experiments/memory_evidence/*.py text eol=lf
+experiments/memory_evidence/fixtures.json text eol=lf
