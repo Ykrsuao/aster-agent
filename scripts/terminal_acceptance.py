@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -29,6 +30,7 @@ SAMPLING_FIELDS = frozenset(
         "seed",
         "max_tokens",
         "max_completion_tokens",
+        "max_output_tokens",
         "frequency_penalty",
         "presence_penalty",
         "reasoning_effort",
@@ -77,7 +79,7 @@ def fingerprint_model(identity: Mapping) -> str:
     for name, value in sampling.items():
         if name == "reasoning_effort":
             valid = isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.\-]{1,64}", value)
-        elif name in {"seed", "max_tokens", "max_completion_tokens"}:
+        elif name in {"seed", "max_tokens", "max_completion_tokens", "max_output_tokens"}:
             valid = type(value) is int and (name == "seed" or value > 0)
         else:
             valid = type(value) in (int, float) and math.isfinite(value)
@@ -314,6 +316,9 @@ async def worker(payload: dict) -> None:
     class CallBudgetExceeded(BaseException):
         pass
 
+    class ConcurrentCallRejected(BaseException):
+        pass
+
     meter = Path(payload["meter"])
     usages = []
     calls = 0
@@ -352,14 +357,24 @@ async def worker(payload: dict) -> None:
         identity = model_identity(llm)
         fingerprint = fingerprint_model(identity)
         measurement_kind = "offline-scripted" if isinstance(llm, FakeLLMClient) else "live-model"
+        expected_fingerprint = payload.get("expected_model_fingerprint")
+        if payload.get("require_live_model") and measurement_kind != "live-model":
+            raise ValueError("live acceptance requires a real model client")
+        if expected_fingerprint and fingerprint != expected_fingerprint:
+            raise ValueError("resolved model does not match the approved fingerprint")
         original_acall = llm.acall
         original_call = llm.call
+        # Both entry points share one gate; generated helpers can use either one.
+        call_lock = threading.Lock() if payload.get("serial_calls") else None
+        async_gate = asyncio.Lock()
 
         def admit(request):
             nonlocal calls, identity, fingerprint
             if calls >= payload["max_calls"]:
                 raise CallBudgetExceeded()
             actual_identity = model_identity(llm, overrides=request)
+            if expected_fingerprint and fingerprint_model(actual_identity) != expected_fingerprint:
+                raise ValueError("request does not match the approved model fingerprint")
             if calls and actual_identity != identity:
                 raise ValueError("model settings changed within a measured task")
             identity = actual_identity
@@ -374,12 +389,48 @@ async def worker(payload: dict) -> None:
             return response
 
         async def acall(*args, **kwargs):
-            admit(kwargs)
-            return record(await original_acall(*args, **kwargs))
+            if call_lock is None:
+                admit(kwargs)
+                return record(await original_acall(*args, **kwargs))
+            async with async_gate:
+                # A sync call during this await must fail instead of blocking the loop.
+                if not call_lock.acquire(blocking=False):
+                    raise ConcurrentCallRejected()
+
+                async def measured_call():
+                    admit(kwargs)
+                    return record(await original_acall(*args, **kwargs))
+
+                request = asyncio.create_task(measured_call())
+                try:
+                    return await asyncio.shield(request)
+                except asyncio.CancelledError:
+                    # Providers shield their own tasks. Keep capacity until the
+                    # owned call ends, even if its caller is cancelled repeatedly.
+                    while not request.done():
+                        try:
+                            await asyncio.shield(request)
+                        except asyncio.CancelledError:
+                            continue
+                        except BaseException:
+                            break
+                    if not request.cancelled():
+                        request.exception()
+                    raise
+                finally:
+                    call_lock.release()
 
         def call(*args, **kwargs):
-            admit(kwargs)
-            return record(original_call(*args, **kwargs))
+            if call_lock is None:
+                admit(kwargs)
+                return record(original_call(*args, **kwargs))
+            if not call_lock.acquire(blocking=False):
+                raise ConcurrentCallRejected()
+            try:
+                admit(kwargs)
+                return record(original_call(*args, **kwargs))
+            finally:
+                call_lock.release()
 
         llm.acall = acall
         llm.call = call
@@ -406,6 +457,8 @@ async def worker(payload: dict) -> None:
         )
     except CallBudgetExceeded:
         status = "call_limit"
+    except ConcurrentCallRejected:
+        status = "concurrent_call_rejected"
     except BaseException as exc:
         status = "worker_error"
         error = type(exc).__name__
@@ -516,6 +569,9 @@ def run_suite(args, tasks: list[dict], fixture_hash: str) -> int:
             + "\nWork only inside the supplied workspace. Use standard-library code; no package installation or internet is needed. Run your own checks before reporting completion.",
             "max_calls": args.max_calls,
             "max_output_tokens": args.max_output_tokens,
+            "expected_model_fingerprint": getattr(args, "expected_model_fingerprint", None),
+            "require_live_model": getattr(args, "require_live_model", False),
+            "serial_calls": getattr(args, "serial_calls", False),
         }
         start = time.monotonic()
         code, _, timed_out = run_process(
@@ -703,6 +759,7 @@ def aggregate_reports(
             if task.get("status") not in {
                 "completed",
                 "call_limit",
+                "concurrent_call_rejected",
                 "needs_input",
                 "worker_error",
                 "timeout",
@@ -832,6 +889,11 @@ def main(argv=None) -> int:
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--max-calls", type=int, default=8)
     parser.add_argument("--max-output-tokens", type=int, default=4096)
+    parser.add_argument("--expected-model-fingerprint", help="reject unapproved resolved settings")
+    parser.add_argument("--require-live-model", action="store_true")
+    parser.add_argument(
+        "--serial-calls", action="store_true", help="allow one shared-client call at a time"
+    )
     parser.add_argument("--repeat-id", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument(
@@ -878,6 +940,10 @@ def main(argv=None) -> int:
         or args.max_output_tokens <= 0
     ):
         parser.error("all limits must be finite and positive")
+    if args.expected_model_fingerprint and not re.fullmatch(
+        r"[0-9a-f]{64}", args.expected_model_fingerprint
+    ):
+        parser.error("model fingerprint must be a lowercase SHA256")
     if os.name != "nt":
         parser.error("live acceptance currently requires native Windows process-tree containment")
     return run_repeats(args, tasks, fixture_hash)

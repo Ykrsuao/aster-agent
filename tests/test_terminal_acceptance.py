@@ -313,6 +313,17 @@ def _aggregate(reports, expected_repeats=2):
     )
 
 
+def test_serial_call_rejection_remains_an_aggregatable_failed_observation():
+    report = _evidence_report(1)
+    report["tasks"][0].update(
+        status="concurrent_call_rejected", agent_completed=False, passed=False
+    )
+    result = _aggregate([report], expected_repeats=1)
+    assert result["observations"] == 10
+    assert result["agent_completed"] == result["passed"] == 9
+    assert result["verification_passed"] == 10
+
+
 def test_usage_preserves_partial_subtotals_and_dispatched_requests_without_responses():
     usage = _known_usage()
     complete = acceptance.usage_totals([usage])

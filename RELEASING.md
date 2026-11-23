@@ -170,13 +170,13 @@ executable, restored conversation and subsequent turn before making files
 available to the existing publishing jobs. A same-version reinstall is useful
 ordinary CI evidence but cannot satisfy the upgrade requirement.
 
-**Current prerequisite gap:** this repository does not yet contain the trusted
-real-model producer `.github/workflows/terminal-acceptance.yml`. Strict candidate
-acceptance therefore fails closed until that separately reviewed workflow and a
-previously distributed complete Windows bundle exist. A manually uploaded JSON,
-an offline scripted run, a historical dirty build or `passed: true` cannot fill
-the gap. These changes do not establish a distribution channel or claim that a
-real-version upgrade or real-model candidate has been accepted.
+The manual real-model producer is
+`.github/workflows/terminal-acceptance.yml`; its setup and dispatch are described
+below. Strict candidate acceptance still needs a successful live report for the
+exact candidate and a previously distributed complete Windows bundle. A manually
+uploaded JSON, an offline scripted run, a historical dirty build or `passed: true`
+cannot replace those results. Adding the workflow does not establish a
+distribution channel or prove a real-version upgrade or real-model candidate.
 
 Ordinary push and pull-request CI still runs without release inputs. Once the
 prerequisites are available, a maintainer can use the following sequence:
@@ -247,6 +247,79 @@ The checker performs no model requests, builds, uploads or release creation.
 Offline regression tests simulate GitHub responses and exercise rejected
 provenance, tampered files, incomplete tasks and insufficient upgrade evidence.
 Passing those tests validates the gate, not a distributable candidate.
+
+## Run the trusted task producer
+
+The workflow accepts only `workflow_dispatch`, with `confirm_live` defaulting to
+false. Configure the GitHub environment `terminal-acceptance` with required
+reviewers and deployment branch/tag rules appropriate to the release policy.
+Declaring the environment in YAML does not configure its protections. Keep
+model credentials in the environment secret `TERMINAL_ACCEPTANCE_API_KEY` and
+one non-secret model entry in its variable `TERMINAL_ACCEPTANCE_MODEL_CONFIG`:
+
+```json
+{
+  "model_name": "openai/your-exact-model-id",
+  "client_type": "completion",
+  "api_base": "https://your-approved-gateway.example/v1"
+}
+```
+
+The entry accepts only `model_name`, `client_type`, `api_base`, and optional
+`temperature`, `top_p`, `reasoning_effort`, `context_window`. Completion routes
+use an explicit `openai/` or `anthropic/` prefix; Responses routes use `openai/`
+and `client_type: responses`. The endpoint must use HTTPS without embedded
+credentials, query or fragment. Unknown fields are rejected. The producer fixes
+the key environment reference, reply cap, disabled endpoint retries and text-only
+media policy. Responses also fixes `store: false` and encrypted reasoning state
+replay. Other provider or transport settings require a reviewed producer change.
+
+On the same candidate, supply the identical non-secret JSON through
+`TERMINAL_ACCEPTANCE_MODEL_CONFIG` and resolve its fingerprint offline:
+
+```powershell
+uv run --no-sync python scripts/terminal_acceptance_ci.py --describe-model
+```
+
+This command requires no API key and sends no inference requests. It prints only
+the resolved model identity and fingerprint. Review these settings before a live
+dispatch; this is not a connection or model-quality test.
+
+Select a branch or final tag whose commit is already reachable from the default
+branch, then dispatch `terminal-acceptance.yml` on that ref with its complete
+`candidate_sha`, the resolved `model_fingerprint` and `confirm_live=true`. The
+workflow checks out `github.sha`; the driver requires that SHA, the dispatch input
+and the clean checkout to agree. It creates a temporary saved alias outside the
+checkout and isolates user/project registry, settings and secrets discovery.
+The worker checks the approved fingerprint again before every shared-client call.
+
+All ten tasks run sequentially, once each. Runs share one workflow concurrency
+group, with cancellation disabled; a pending GitHub run may still be replaced by
+a newer pending run. Within a task, async calls through the measured client queue
+one at a time; overlapping synchronous calls fail before dispatch. Cancelling an
+async caller retains its slot until the provider call finishes, or the task's
+Windows process-tree deadline terminates it. This keeps
+this producer's measured calls below a two-request gateway limit, but does not
+coordinate other applications using that gateway. Native generated code remains
+trusted test-environment code, not an OS sandbox or a network-wide rate limiter.
+
+The fixed per-task limits are 180 seconds, eight model calls and 4,096 output
+tokens per call with zero endpoint retries: at most 80 admitted calls and 327,680
+requested output tokens across ten tasks. These are request limits, not a dollar
+spending cap; provider-side limits and explicit approval remain necessary when
+cost or unreported usage needs a hard bound. Each fixture runs once; any
+strategy-level retry still consumes one of its eight admitted model calls.
+
+Only `report.json` is uploaded as `terminal-task-acceptance`, retained for 30 days.
+Workspaces, prompts, responses, registry files and credentials are not uploaded.
+Failed runs retain an available report for diagnosis, but cannot satisfy release
+acceptance. Success requires all ten independently verified tasks, live model
+identity, unchanged source and the same report checks used by the release consumer.
+Preserve the successful artifact ID through publication, and retain each failed
+attempt instead of replacing it with a later result.
+
+Implementation and offline contract tests do not create the GitHub environment,
+set its variables/secrets, approve a run or generate live-model evidence.
 
 ## Configure a release channel
 
