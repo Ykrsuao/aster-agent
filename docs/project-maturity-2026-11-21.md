@@ -251,3 +251,14 @@
 - Windows 首轮的两处失败分别是 SDK 缓存冷建占用协议等待，以及配置测试在第二个进程仍准备 SDK 时判断锁竞争。模型选择现在先在隔离目录准备真实安装 SDK 的可复用缓存，保持每次协议请求的 **30 秒**上限；专用冷启动测试仍从空缓存验证 loader、资源和原生扩展。配置测试把就绪信号移到实际取锁前，使用显式 Responses 配置避免无关 SDK 冷导入，保留所有原超时和数据断言。离线缓存 profiling 为冷建 **14.245 秒**、复用 **0.043 秒**，不把测试范围调整称为生产冷启动提速。
 - 全仓 Ruff、格式及差异检查通过，SPDX 检查通过 **1,382** 个源码 Python 文件。日志与 JUnit 保存在本机临时目录 `aster-audit-delivery-da31de6dc7`；草稿 PR 的远端检查绑定其最终候选。
 - 边界：响应可超过剩余 token 额度，后续调用才停止；本项不是供应商硬 token 上限或最终账单。async deadline 不能抢占阻塞事件循环的同步 Python，有时间限额时同步 provider 派发会预先拒绝。预算对象跨独立进程、guest 自建模型客户端或未结算的 broker 导出显式拒绝；任意用户程序直连供应商不在框架计量范围。模型均为离线替身，M1b 与 R1/R2 继续独立验收，A1 保持候选方向。
+
+## M1b 实施与验收（2026-11-23）
+
+- 实施分支：`codex/project-memory-20261122`，基于 A5 候选 `439d0488`。默认关闭；只有受信任项目的 `.aster/settings.yaml` 显式配置，才挂载现有 `MemorySkill`/`MemoryManager`。每个 canonical workspace 使用独立 SQLite 库，数据库名与路径受宿主约束，检查数据库、目录与 WAL 的符号链接。使用方式见 [CLI 项目记忆](../packages/aster-cli/README.md)。
+- 提供 remember/recall/search 与 `/memory status/list/view/delete/off/reload/rebuild`。宿主负责 manager 生命周期，快照不保存开放连接或执行对象；新建/恢复会话重新绑定当前项目。不开启原始事件自动保存或后台反思，关闭后卸载 hooks、提示上下文和 SQLite 句柄。
+- `/memory off` 原子写回项目设置，现有 manager 和已取得的 store/事务句柄也不能继续读写。删除后不再检索；其他项目的记录保持隔离。更换 embedding 模型或维度要求显式重建到新库，保留原库且不自动切换；模型别名和 `api_key_env` 复用已有配置，未新增凭据。
+- 与预算联动的反例已修复：到限后五种本地管理动作曾全部被拦住；远程 embedding 检查只依赖 ContextVar，直接宿主操作曾绕过已有 session owner。现在 status/list/view/delete/off 仅按绑定的宿主方法和 action 放行，不调用模型、不退款；reload/rebuild 与同名用户技能继续受限。远程 embedder 同时检查当前 scope 和 agent 的持久 owner，已绑定任务预算时明确要求 hashing embedder。
+- Windows 接入实现阶段完整 CLI **2,433 passed、47 skipped、1 deselected**；接到最终 A5 后，预算/恢复/记忆管理联合范围 **71 passed、4 skipped**，最终完整 ACP **1,007 passed、9 deselected、3 xfailed**。Linux Python 3.13 最终完整 CLI **2,474 passed、6 skipped、1 deselected**；完整 ACP 与记忆包联合范围 **1,487 passed、16 skipped、10 deselected、3 xfailed**，其中 ACP **1,006 passed**，记忆包 **481 passed**。范围重叠，不相加。
+- 真实 ACP 离线旅程覆盖 trusted project 启用、写入、关闭进程、重开检索、不同项目隔离、删除、持久关闭、恢复后的 hook/连接清理与重新启用。Windows 本机不能创建符号链接的四项用例明确跳过，Linux 完整 CLI 已实际通过这四项；没有把 Windows 跳过当作通过。
+- 全仓 Ruff、格式与差异检查通过，SPDX 检查通过 **1,386** 个源码 Python 文件。初轮联合测试中旧 mock 整块替换预算模块导致四项失败，现只替换所需符号；保持真实 owner/ledger 路径，单文件 **30 passed、4 skipped**，后续联合与完整协议验证通过。日志与 JUnit 位于本机临时目录 `aster-audit-delivery-da31de6dc7`。
+- 平台边界限定为已验证的本地 hashing/NumPy/SQLite 项目记忆和 native Windows/Linux 宿主流程；未调用真实 embedding 或模型 API，未验收真实 Chroma 服务或全部可选后端，不据此扩大通用 memory 包的平台声明。记忆收益与过期事实判断归 R2，发行安装/跨版升级仍归 R1；A1 保持候选方向。
