@@ -70,6 +70,31 @@ async def test_write_and_replace_emit_bounded_structured_file_edits(tmp_path):
     assert edits[1].diff_complete is True
 
 
+@pytest.mark.parametrize("operation", ["replace", "write_file"])
+async def test_utf8_file_activity_preserves_original_text_and_line_numbers(tmp_path, operation):
+    shell, events = _observed_shell(tmp_path)
+    path = tmp_path / "example.txt"
+    before = "\u4f60\u597d \U0001f600"
+    after = "\u518d\u89c1 \U0001f642"
+    original = "header\n" + before + "\n"
+    replacement = "header\n" + after + "\n"
+    path.write_bytes(original.encode("utf-8"))
+    try:
+        if operation == "replace":
+            await shell.replace("example.txt", before, after)
+        else:
+            await shell.write_file("example.txt", replacement)
+    finally:
+        await shell.close()
+    edit = next(event for event in events if isinstance(event, FileEdit))
+    assert edit.old_text == (before if operation == "replace" else original)
+    assert (edit.start_line, edit.end_line) == ((2, 2) if operation == "replace" else (1, 2))
+    assert edit.diff_complete and edit.content_complete
+    assert "-" + before in edit.diff
+    assert "+" + after in edit.diff
+    assert path.read_text(encoding="utf-8") == replacement
+
+
 async def test_match_replace_emits_actual_before_and_after_text(tmp_path):
     shell, events = _observed_shell(tmp_path)
     (tmp_path / "example.txt").write_text("one\ntwo\nthree\n")

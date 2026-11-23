@@ -8,20 +8,20 @@ should gracefully handle it instead of crashing.
 
 Tests cover:
 - _is_pydantic_compatible() correctly classifies types
-- _create_return_model() returns (model, is_validated) correctly
+- _create_return_model() validates opaque Python instances and nested containers
 - _build_return_result_tool() doesn't crash, schema falls back to Any, description guides LLM
-- _handle_return_result() does isinstance validation for non-Pydantic types
-- _try_validate_return_value() does isinstance validation for non-Pydantic types
+- _handle_return_result() retains the return contract for non-JSON types
+- _try_validate_return_value() retains the return contract for non-JSON types
 - Annotated[NonPydanticType, "description"] works across all paths
 - Full agent integration: CodeAct with non-Pydantic return type works end-to-end
 - Error messages guide the LLM when type doesn't match
 """
 
 import json
-from typing import Annotated, Any
+from typing import Annotated, Any, Never, Protocol
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from aster import Agent, strategy
 from aster.config import CodeActConfig
@@ -51,6 +51,10 @@ class DataContainer:
 
     def __init__(self, data):
         self.data = data
+
+
+class NonRuntimeResult(Protocol):
+    def value(self) -> int: ...
 
 
 # --- Test helpers ---
@@ -127,25 +131,21 @@ class TestIsPydanticCompatible:
 
 
 class TestCreateReturnModel:
-    """_create_return_model should return (model, is_validated) correctly."""
+    """Runtime models retain the declared type, including opaque Python objects."""
 
-    def test_pydantic_type_returns_validated_true(self):
-        strat = CodeActStrategy(config=CodeActConfig())
-        model, is_validated = strat._create_return_model(str, "my_method")
-        assert is_validated is True
+    def test_pydantic_type_is_validated(self):
+        model = CodeActStrategy()._create_return_model(str, "my_method")
+        assert model(result="answer").result == "answer"
 
-    def test_non_pydantic_type_returns_validated_false(self):
-        strat = CodeActStrategy(config=CodeActConfig())
-        model, is_validated = strat._create_return_model(CustomResult, "my_method")
-        assert is_validated is False
+    def test_non_pydantic_type_preserves_instance(self):
+        model = CodeActStrategy()._create_return_model(CustomResult, "my_method")
+        value = CustomResult(42, "answer")
+        assert model(result=value).result is value
 
-    def test_non_pydantic_model_accepts_any_value(self):
-        """When is_validated=False the model field uses Any, so any value passes Pydantic."""
-        strat = CodeActStrategy(config=CodeActConfig())
-        model, _ = strat._create_return_model(CustomResult, "my_method")
-        # Should not raise — the model accepts anything
-        instance = model(result="literally anything")
-        assert instance.result == "literally anything"
+    def test_non_pydantic_model_rejects_wrong_value(self):
+        model = CodeActStrategy()._create_return_model(CustomResult, "my_method")
+        with pytest.raises(ValidationError, match="CustomResult"):
+            model(result="literally anything")
 
 
 # === Unit tests for _build_return_result_tool ===
@@ -241,7 +241,7 @@ class TestDataclassStillWorksThroughPydantic:
 
 
 class TestTryValidateNonPydantic:
-    """_try_validate_return_value should handle non-Pydantic types via isinstance."""
+    """_try_validate_return_value validates opaque types without JSON schemas."""
 
     def test_accepts_correct_instance(self):
         """Should accept a value that is an instance of the expected non-Pydantic type."""
@@ -274,6 +274,40 @@ class TestTryValidateNonPydantic:
             "wrong", Annotated[CustomResult, "The result"], "my_method"
         )
         assert success is False
+
+    @pytest.mark.parametrize(
+        "return_type,value,expected",
+        [
+            (CustomResult, None, False),
+            (CustomResult | None, None, True),
+            (list[CustomResult], [CustomResult(42, "ok")], True),
+            (list[CustomResult], [None], False),
+            (dict[str, CustomResult], {"item": CustomResult(42, "ok")}, True),
+            (dict[str, CustomResult], {"item": "wrong"}, False),
+        ],
+    )
+    def test_nested_and_nullable_return_contract(self, return_type, value, expected):
+        success, validated = CodeActStrategy()._try_validate_return_value(
+            value, return_type, "compute"
+        )
+        assert success is expected
+        if expected:
+            assert validated == value
+
+    @pytest.mark.parametrize(
+        "annotation,value",
+        [
+            (Never, object()),
+            (list[Never], [object()]),
+            (NonRuntimeResult, object()),
+            ("UndefinedReturnType", object()),
+        ],
+    )
+    def test_unsupported_annotation_does_not_accept_arbitrary_values(self, annotation, value):
+        assert CodeActStrategy()._try_validate_return_value(value, annotation, "compute") == (
+            False,
+            None,
+        )
 
 
 # === Integration tests: full agent run with CodeAct ===
@@ -313,6 +347,48 @@ class TestCodeActNonPydanticReturnType:
         assert isinstance(result, CustomResult)
         assert result.value == 42
         assert result.label == "answer"
+
+    @pytest.mark.asyncio
+    async def test_none_retries_until_required_instance_is_returned(self):
+        fake_llm = FakeLLMClient(
+            scripted_responses=[
+                _resp("", tool_calls=[_return_result(result=None)]),
+                _resp(
+                    "",
+                    tool_calls=[
+                        _tool_call("return_result(CustomResult(value=42, label='answer'))")
+                    ],
+                ),
+            ]
+        )
+
+        class TestAgent(Agent, llm=_TEST_LLM):
+            async def compute(self) -> CustomResult:
+                """Return a CustomResult."""
+                ...
+
+        result = await TestAgent(llm=fake_llm).compute()
+        assert isinstance(result, CustomResult)
+        assert result.value == 42
+
+    @pytest.mark.asyncio
+    async def test_nested_collection_retries_wrong_element_then_returns_valid_result(self):
+        fake_llm = FakeLLMClient(
+            scripted_responses=[
+                _resp(
+                    "", tool_calls=[_tool_call("return_result([CustomResult(42, 'answer'), None])")]
+                ),
+                _resp("", tool_calls=[_tool_call("return_result([CustomResult(42, 'answer')])")]),
+            ]
+        )
+
+        class TestAgent(Agent, llm=_TEST_LLM):
+            async def compute(self) -> list[CustomResult]:
+                """Return a list of CustomResult instances."""
+                ...
+
+        result = await TestAgent(llm=fake_llm).compute()
+        assert result == [CustomResult(42, "answer")]
 
 
 # === Tests for Annotated[NonPydanticType, "description"] ===

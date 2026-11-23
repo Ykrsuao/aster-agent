@@ -21,6 +21,7 @@ import re
 import secrets
 import shutil
 import stat
+import tempfile
 import time
 import webbrowser
 from collections.abc import Awaitable, Callable
@@ -32,6 +33,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
+
+from aster.secrets import _secret_lock
 
 logger = logging.getLogger(__name__)
 
@@ -1005,9 +1008,10 @@ def _token_cache_path() -> Path:
 
 def _load_cached_token(server_url: str) -> OAuthToken | None:
     """Load a cached OAuth token for ``server_url`` if present and well-formed."""
-    path = _token_cache_path()
     try:
-        data = json.loads(path.read_text())
+        # An open Windows read handle prevents atomic replacement by a writer.
+        with _secret_lock(_token_cache_path()) as path:
+            data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict):
@@ -1030,36 +1034,52 @@ def _load_cached_token(server_url: str) -> OAuthToken | None:
 
 
 def _save_cached_token(server_url: str, token: OAuthToken) -> None:
-    """Persist ``token`` to the project cache, with owner-only mode on POSIX.
+    """Merge credentials under a process lock and atomically publish the cache.
 
-    Windows access control is inherited from the containing directory's ACL.
+    The replacement has owner-only mode on POSIX. Windows access control is
+    inherited from the containing directory's ACL.
     """
-    path = _token_cache_path()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            data = json.loads(path.read_text())
-            if not isinstance(data, dict):
+        with _secret_lock(_token_cache_path()) as path:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    data = {}
+            except (OSError, ValueError):
                 data = {}
-        except (OSError, ValueError):
-            data = {}
-        data[server_url] = {
-            "access_token": token.access_token,
-            "token_type": token.token_type,
-            "expires_in": token.expires_in,
-            "refresh_token": token.refresh_token,
-            "obtained_at": token.obtained_at,
-            "client_id": token.client_id,
-            "client_secret": token.client_secret,
-            "authorization_server": token.authorization_server,
-            "token_endpoint": token.token_endpoint,
-            "resource": token.resource,
-        }
-        path.write_text(json.dumps(data, indent=2))
-        with contextlib.suppress(OSError):
-            path.chmod(stat.S_IRUSR | stat.S_IWUSR)
-    except OSError as e:
-        logger.warning(f"Could not persist MCP OAuth token cache: {e}")
+            data[server_url] = {
+                "access_token": token.access_token,
+                "token_type": token.token_type,
+                "expires_in": token.expires_in,
+                "refresh_token": token.refresh_token,
+                "obtained_at": token.obtained_at,
+                "client_id": token.client_id,
+                "client_secret": token.client_secret,
+                "authorization_server": token.authorization_server,
+                "token_endpoint": token.token_endpoint,
+                "resource": token.resource,
+            }
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    dir=path.parent,
+                    prefix=f".{path.name}.",
+                    suffix=".tmp",
+                    delete=False,
+                ) as stream:
+                    temporary = Path(stream.name)
+                    temporary.chmod(stat.S_IRUSR | stat.S_IWUSR)
+                    json.dump(data, stream, indent=2)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, path)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("Could not persist MCP OAuth token cache: %s", exc)
 
 
 async def _refresh_access_token(
@@ -1096,12 +1116,12 @@ async def _refresh_access_token(
         )
     except httpx.HTTPStatusError as exc:
         logger.info(
-            "Refresh token exchange failed (HTTP %s); falling back to full auth",
+            "Refresh token exchange failed (HTTP %s)",
             exc.response.status_code,
         )
         return None
     except Exception:
-        logger.info("Refresh token exchange failed; falling back to full auth")
+        logger.info("Refresh token exchange failed")
         return None
 
 
@@ -1117,6 +1137,8 @@ async def handle_mcp_oauth(
     browser_open: "Callable[[str], Awaitable[bool]] | None" = None,
     use_cache: bool = True,
     timeout: float | None = None,
+    *,
+    refresh_only: bool = False,
 ) -> OAuthToken:
     """Handle OAuth flow for MCP server, reusing a cached token when possible.
 
@@ -1144,6 +1166,8 @@ async def handle_mcp_oauth(
         code_prompt: Async callback returning the pasted code (manual mode)
         browser_open: Async hook to open the auth URL in a reachable browser (host handoff)
         use_cache: Read/write the per-project token cache
+        refresh_only: Exchange cached refresh credentials even if the access token
+            looks unexpired; fail instead of starting a full authorization flow.
 
     Returns:
         OAuthToken object containing the access token and metadata
@@ -1209,7 +1233,7 @@ async def handle_mcp_oauth(
                 "server configuration, then remove this server's entry from "
                 ".aster/mcp_tokens.json and reconnect to authorize again."
             )
-        if cached and not cached.is_expired():
+        if cached and not refresh_only and not cached.is_expired():
             logger.info("Using cached MCP OAuth token")
             return cached
         refresh_client_id = client_id or cached.client_id if cached else None
@@ -1228,6 +1252,9 @@ async def handle_mcp_oauth(
                 logger.info("Refreshed MCP OAuth token from cache")
                 _save_cached_token(server_url, refreshed)
                 return refreshed
+
+    if refresh_only:
+        raise RuntimeError("MCP OAuth token could not be refreshed; reconnect to authorize again.")
 
     final_client_id = client_id
     final_client_secret = client_secret

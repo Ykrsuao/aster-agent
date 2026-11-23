@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Run inside WSL 2 by .github/workflows/wsl.yml, from the Windows checkout.
+# Host coverage only; real microVM tests run in ci.yml's Linux sandbox job.
 # As root it installs system packages, copies the checkout to a normal user's
 # home and re-runs itself as that user; the tests never run as root (root
 # bypasses file-permission checks).

@@ -3,11 +3,14 @@
 """Cached OAuth credentials must never follow changed discovery metadata."""
 
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
 from aster.mcp import oauth
+from aster.mcp.tool import MCPTool
 
 SERVER_URL = "https://resource.example/mcp"
 AUTH_SERVER = "https://auth.example"
@@ -53,7 +56,7 @@ def oauth_server(monkeypatch, tmp_path):
             )
         if request.method == "POST" and url == state["token_endpoint"]:
             return httpx.Response(
-                200,
+                state.get("token_status", 200),
                 json={
                     "access_token": "fresh-access-marker",
                     "refresh_token": "rotated-refresh-marker",
@@ -148,6 +151,79 @@ async def test_same_binding_refreshes_and_persists_rotated_credentials(oauth_ser
         "refresh_token": "old-refresh-marker",
         "resource": SERVER_URL,
     }
+
+
+@pytest.mark.parametrize("expires_in", [None, 3600])
+async def test_401_refreshes_a_rejected_token_even_without_local_expiry(
+    oauth_server, monkeypatch, expires_in
+):
+    _, requests = oauth_server
+    cached = _cached_token(expired=False)
+    cached.expires_in = expires_in
+    oauth._save_cached_token(SERVER_URL, cached)
+    seen_headers = []
+    tool = MCPTool(
+        SimpleNamespace(headers={"Authorization": f"Bearer {cached.access_token}"}),
+        "test-server",
+        refresh_ctx={"server_url": SERVER_URL, "client_id": cached.client_id},
+    )
+
+    async def invoke(name, arguments):
+        header = tool._client.headers["Authorization"]
+        seen_headers.append(header)
+        if header != "Bearer fresh-access-marker":
+            request = httpx.Request("POST", SERVER_URL)
+            raise httpx.HTTPStatusError(
+                "Unauthorized", request=request, response=httpx.Response(401, request=request)
+            )
+        return "ok"
+
+    monkeypatch.setattr(tool, "_invoke", invoke)
+    monkeypatch.setattr(
+        "aster.mcp.tool.create_mcp_client",
+        lambda **kwargs: SimpleNamespace(headers=kwargs["headers"]),
+    )
+
+    assert await tool._call_tool("read", {}) == "ok"
+    assert seen_headers == ["Bearer old-access-marker", "Bearer fresh-access-marker"]
+    exchanges = [request for request in requests if str(request.url) == TOKEN_ENDPOINT]
+    assert len(exchanges) == 1
+    assert b"grant_type=refresh_token" in exchanges[0].content
+    assert oauth._load_cached_token(SERVER_URL).refresh_token == "rotated-refresh-marker"
+
+
+@pytest.mark.parametrize(
+    "failure", ["missing-cache", "missing-refresh", "exchange-failed", "changed-binding"]
+)
+async def test_401_refresh_failure_never_starts_full_authorization(
+    oauth_server, monkeypatch, failure
+):
+    state, requests = oauth_server
+    cached = _cached_token(expired=False)
+    cached.expires_in = None
+    if failure == "missing-refresh":
+        cached.refresh_token = None
+    if failure != "missing-cache":
+        oauth._save_cached_token(SERVER_URL, cached)
+    if failure == "exchange-failed":
+        state["token_status"] = 400
+    if failure == "changed-binding":
+        state["authorization_server"] = "https://different-auth.example"
+    authorize = AsyncMock(side_effect=AssertionError("unexpected full authorization"))
+    register = AsyncMock(side_effect=AssertionError("unexpected client registration"))
+    monkeypatch.setattr(oauth.OAuthHandler, "complete_flow", authorize)
+    monkeypatch.setattr(oauth.OAuthHandler, "_register_dynamic_client", register)
+    tool = MCPTool(
+        object(),
+        "test-server",
+        refresh_ctx={"server_url": SERVER_URL, "client_id": cached.client_id},
+    )
+
+    assert await tool._refresh_access_token() is False
+    authorize.assert_not_awaited()
+    register.assert_not_awaited()
+    exchanges = [request for request in requests if str(request.url) == TOKEN_ENDPOINT]
+    assert len(exchanges) == (1 if failure == "exchange-failed" else 0)
 
 
 @pytest.mark.asyncio

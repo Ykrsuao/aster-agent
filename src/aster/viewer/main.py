@@ -31,6 +31,7 @@ load_dotenv()
 from . import FRONTEND_DIR, memory_routes, otlp_store  # noqa: E402
 from .annotation_routes import router as annotation_router  # noqa: E402
 from .eval_routes import router as eval_router  # noqa: E402
+from .explorer_routes import clear_explorer_cache  # noqa: E402
 from .explorer_routes import router as explorer_router  # noqa: E402
 from .memory_routes import router as memory_router  # noqa: E402
 from .trace_routes import router as trace_router  # noqa: E402
@@ -588,7 +589,8 @@ def get_session_calls(session_id: str):
 
 @app.post("/api/refresh", dependencies=_protected)
 def refresh_all():
-    """Return current store stats."""
+    """Discard cached trace snapshots and return current store stats."""
+    clear_explorer_cache()
     stats = otlp_store.get_stats()
     return {
         "status": "ok",
