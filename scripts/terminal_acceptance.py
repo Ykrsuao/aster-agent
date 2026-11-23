@@ -871,10 +871,15 @@ def main(argv=None) -> int:
         return 0
     if not args.model or not args.output:
         parser.error("live runs require --model and --output")
+    if (
+        not math.isfinite(args.timeout)
+        or args.timeout <= 0
+        or args.max_calls <= 0
+        or args.max_output_tokens <= 0
+    ):
+        parser.error("all limits must be finite and positive")
     if os.name != "nt":
         parser.error("live acceptance currently requires native Windows process-tree containment")
-    if args.timeout <= 0 or args.max_calls <= 0 or args.max_output_tokens <= 0:
-        parser.error("all limits must be positive")
     return run_repeats(args, tasks, fixture_hash)
 
 

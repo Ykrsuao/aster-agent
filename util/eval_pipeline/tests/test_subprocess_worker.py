@@ -58,6 +58,7 @@ DummyAgent = None  # imported from _test_fixtures by subprocess workers, not nee
 class TestSubprocessWorker:
     """Test the subprocess_worker.py script via Popen."""
 
+    @pytest.mark.parametrize("memory_limit_mb", [None, 4096])
     @pytest.mark.parametrize(
         "usages, known, total, complete",
         [
@@ -67,7 +68,7 @@ class TestSubprocessWorker:
         ],
     )
     def test_usage_survives_raw_spans_worker_json_and_experiment_file(
-        self, tmp_path, usages, known, total, complete
+        self, tmp_path, usages, known, total, complete, memory_limit_mb
     ):
         from eval_pipeline.eval_parser import EvalFileParser
         from eval_pipeline.eval_types import EvalTestResult
@@ -75,6 +76,7 @@ class TestSubprocessWorker:
 
         task_input = _build_task_input(
             trace_dir=str(tmp_path / "traces"),
+            memory_limit_mb=memory_limit_mb,
             agent_spec={
                 "agent_module": "eval_pipeline._test_fixtures",
                 "agent_class": "UsageTraceAgent",
@@ -194,10 +196,12 @@ class TestSubprocessWorker:
         assert "error" in result
         assert result["error_type"] == "WorkerError"
 
-    def test_missing_agent_module(self, tmp_path):
+    @pytest.mark.parametrize("memory_limit_mb", [None, 4096])
+    def test_missing_agent_module(self, tmp_path, memory_limit_mb):
         """Worker returns error result when agent module doesn't exist."""
         task_input = _build_task_input(
             trace_dir=str(tmp_path),
+            memory_limit_mb=memory_limit_mb,
             agent_spec={
                 "agent_module": "nonexistent.module",
                 "agent_class": "FakeAgent",

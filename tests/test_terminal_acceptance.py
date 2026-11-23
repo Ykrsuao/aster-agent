@@ -540,3 +540,16 @@ def test_timeout_overrides_a_stale_completed_meter(tmp_path, monkeypatch):
     assert row["verification_passed"] is True and row["passed"] is False
     assert row["input_tokens"] is None and row["input_tokens_complete"] is False
     assert row["known_input_tokens"] == 8 and row["cost_complete"] is False
+
+
+@pytest.mark.parametrize("timeout", ["nan", "inf", "-inf"])
+def test_nonfinite_timeout_is_rejected_before_worker_dispatch(
+    tmp_path, monkeypatch, capsys, timeout
+):
+    monkeypatch.setattr(
+        acceptance, "run_repeats", lambda *args: pytest.fail("must reject before model work")
+    )
+    with pytest.raises(SystemExit) as error:
+        acceptance.main(["--model", "unused", "--output", str(tmp_path), f"--timeout={timeout}"])
+    assert error.value.code == 2
+    assert "all limits must be finite and positive" in capsys.readouterr().err

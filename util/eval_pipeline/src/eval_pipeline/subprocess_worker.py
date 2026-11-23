@@ -626,12 +626,9 @@ def main() -> None:
                     monitor.stop()
                 if task_input and task_input.memory_limit_mb and _memory_mod:
                     _memory_mod.clear_hard_limit()
-                    try:
-                        import tracemalloc
-
-                        tracemalloc.clear_traces()
-                    except Exception:
-                        pass
+                    # This worker exits after writing its result. Clearing the
+                    # tracemalloc bookkeeping is unnecessary and can stall
+                    # result delivery while tracing is active.
 
             # When memory limiting is active, write result atomically via
             # os.write() (single syscall, no Python buffering) then exit
