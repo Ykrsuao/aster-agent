@@ -751,18 +751,13 @@ def _extract_reasoning_content(attrs: dict[str, Any]) -> str:
 
 
 def _extract_token_counts(attrs: dict[str, Any]) -> dict[str, int] | None:
-    """Extract token usage from span attributes."""
-    prompt = attrs.get("llm.token_count.prompt")
-    completion = attrs.get("llm.token_count.completion")
-    total = attrs.get("llm.token_count.total")
-
-    if prompt is not None or completion is not None or total is not None:
-        return {
-            "prompt": prompt or 0,
-            "completion": completion or 0,
-            "total": total or 0,
-        }
-    return None
+    """Extract reported counts; absent dimensions remain unknown, not zero."""
+    counts = {
+        name: value
+        for name in ("prompt", "completion", "total")
+        if type(value := attrs.get(f"llm.token_count.{name}")) is int and value >= 0
+    }
+    return counts or None
 
 
 def _extract_invocation_parameters(attrs: dict[str, Any]) -> dict[str, Any]:

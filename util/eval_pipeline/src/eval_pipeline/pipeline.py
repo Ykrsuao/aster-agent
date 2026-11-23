@@ -392,6 +392,7 @@ async def process_sample(
         input_tokens=ctx.input_tokens,
         output_tokens=ctx.output_tokens,
         total_tokens=ctx.total_tokens,
+        token_usage=ctx.token_usage,
         error=output_error or ctx.error,
         # Note: result.error is a string, so we can't get the original exception type.
         # We classify based on error message patterns instead.

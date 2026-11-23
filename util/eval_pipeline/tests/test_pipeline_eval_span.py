@@ -76,6 +76,13 @@ class TestProcessSampleEvalSpan:
         mock_ctx.input_tokens = 10
         mock_ctx.output_tokens = 20
         mock_ctx.total_tokens = 30
+        from eval_pipeline.usage import TokenUsageSummary
+
+        mock_ctx.token_usage = TokenUsageSummary.from_counts(
+            input_tokens=10,
+            output_tokens=20,
+            total_tokens=30,
+        )
 
         monkeypatch.setattr(
             "eval_pipeline.pipeline.build_scoring_context",
@@ -111,6 +118,7 @@ class TestProcessSampleEvalSpan:
             config=config,
             writer=mock_writer,
         )
+        assert mock_writer.append_result.call_args.args[0].token_usage == mock_ctx.token_usage
 
         # Find the generated trace file
         trace_files = [

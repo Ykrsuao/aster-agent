@@ -30,6 +30,7 @@ from aster.strategies import PredictStrategy
 
 from .model_factory import client as model_client
 from .models import ExecutionResult, ScoreResult, ScoringContext
+from .usage import TokenUsageSummary
 
 if TYPE_CHECKING:
     from aster.trace_explorer import TraceExplorer
@@ -124,20 +125,20 @@ def _iter_all_sessions(trace: TraceExplorer):
         yield from _recurse(root)
 
 
-def _count_tokens(trace: TraceExplorer) -> tuple[int, int, int] | None:
-    """Sum token counts across all LLM turns in the trace."""
+def _count_tokens(trace: TraceExplorer) -> TokenUsageSummary:
+    """Keep each missing turn or dimension visible when summing reported usage."""
     from aster.trace_explorer.explorer import LLMTurn as _LLMTurn
 
-    input_t = output_t = total_t = 0
-    for session in _iter_all_sessions(trace):
-        for turn in session.turns:
-            if isinstance(turn, _LLMTurn) and turn.token_counts:
-                input_t += turn.token_counts.get("prompt", 0)
-                output_t += turn.token_counts.get("completion", 0)
-                total_t += turn.token_counts.get("total", 0)
-    if input_t or output_t or total_t:
-        return (input_t, output_t, total_t)
-    return None
+    return TokenUsageSummary.merge(
+        TokenUsageSummary.from_counts(
+            input_tokens=(turn.token_counts or {}).get("prompt"),
+            output_tokens=(turn.token_counts or {}).get("completion"),
+            total_tokens=(turn.token_counts or {}).get("total"),
+        )
+        for session in _iter_all_sessions(trace)
+        for turn in session.turns
+        if isinstance(turn, _LLMTurn)
+    )
 
 
 def _get_code_executions(
@@ -205,13 +206,7 @@ def build_scoring_context(
             rubrics, difficulty tags, etc.
         trace: TraceExplorer instance for token extraction and code analysis.
     """
-    token_data = _count_tokens(trace) if trace is not None else None
-
-    input_tokens = None
-    output_tokens = None
-    total_tokens = None
-    if token_data:
-        input_tokens, output_tokens, total_tokens = token_data
+    token_usage = _count_tokens(trace) if trace is not None else TokenUsageSummary()
 
     return ScoringContext(
         task_id=result.task_id,
@@ -220,9 +215,8 @@ def build_scoring_context(
         actual=result.actual,
         trace=trace,
         latency_ms=result.latency_ms,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        total_tokens=total_tokens,
+        **token_usage.totals(),
+        token_usage=token_usage,
         metadata=metadata or {},
         error=result.error,
         session_id=result.session_id,

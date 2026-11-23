@@ -491,23 +491,34 @@ agent.event_manager.on("MemoryWritten", lambda e: print("wrote", e.memory_id, e.
 
 ## When does memory help?
 
-Measured internally with gpt-5.4 + text-embedding-3-large (the bench harness is
-not published in this repository). For a runnable offline demo see
-[`examples/quickstart/12_memory.py`](../../../../examples/quickstart/12_memory.py):
+This checkout includes a reproducible
+[offline memory control experiment](../../../../experiments/memory_evidence/README.md).
+It imports fixed synthetic facts through `MemoryManager`, closes the writer and
+retrieves them through `MemorySkill` in fresh agents. Separate memory-off,
+current, obsolete and explicitly corrected arms use the same scripted reader.
+An independent scorer checks retrieval coverage, obsolete-fact adoption, answer
+correctness and completion of the entire evidence-backed task. Reports retain
+source/fixture hashes and distinguish unknown usage from reported zero.
 
-| demo | what it isolates | result |
-|---|---|---|
-| `recall_qa.py` | unguessable cross-session facts | memory **+75%** (ON 75% / OFF 0%) |
-| `locomo.py` | LoCoMo, agent-authored | memory **+44–60%** vs no-memory |
-| `reflecting.py` | synthesis under a tight retrieval budget | reflection **+50%** |
-| `longmemeval.py` | LongMemEval + reconsolidation | memory **+70%**, reflection neutral (+0%) |
-| `locomo.py --reflect` | pinpoint lookup | reflection **−20%** |
-| `memory_effect.py` | useful *and* detrimental | memory can backfire when stale |
+These controls verify storage, retrieval and evaluation wiring with a
+`FakeLLMClient` and local hashing. They do not establish the benefit or reliability
+of memory for a real model, remote embedding provider or representative workload.
+An explicit update in the correction arm does not test reflection or automatic
+freshness judgment. See the experiment README for the actual offline results and
+their saved evidence. For a smaller API demo, see
+[`examples/quickstart/12_memory.py`](../../../../examples/quickstart/12_memory.py).
 
-**Principle:** memory helps when the answer isn't derivable in-context (past-session
-or unguessable facts). Consolidation (reflection) is a deliberate tool — it helps
-synthesis/aggregation under a retrieval bottleneck, is neutral when memories already
-fit the budget, and *hurts* pinpoint lookups.
+Earlier versions of this section quoted internal GPT-5.4 and
+text-embedding-3-large measurements named `recall_qa.py`, `locomo.py`,
+`reflecting.py`, `longmemeval.py` and `memory_effect.py`. Their benchmark harness,
+raw outcomes and complete run configuration were not published in this
+repository. Those historical reports cannot be independently reproduced from
+this checkout and are not current acceptance evidence. The new synthetic report
+does not recreate or validate those missing measurements.
+
+Whether memory improves a real task, whether stale facts are adopted and whether
+reflection preserves useful detail require controlled comparisons on the intended
+workload, with independent grading and comparable model, prompt and budget settings.
 
 ---
 
@@ -532,12 +543,13 @@ Tests: [`tests/memory/`](../../tests/memory/).
 
 ## Limitations
 
-- **Agentic authoring costs LLM calls** (one per session/task) — the deterministic
-  offline path (hashing embedder, no reasoner/reconciler) is free and good for tests.
+- **Agentic authoring can require LLM calls.** The deterministic offline path
+  (hashing embedder, no reasoner/reconciler) requires no remote model calls.
 - **Reconsolidation** only fires when contradictory memories cluster *and* the agent
   authored both values; a missing fact can't be reconciled.
-- **Reflection's win** needs a real retrieval bottleneck (large/noisy store under a
-  tight budget); on small stores a strong model reconciles in-context, so it's neutral.
+- **Reflection changes stored evidence.** Its usefulness and potential loss of
+  detail need workload-specific evaluation; the offline correction control does
+  not measure reflection.
 - `numpy`/`sqlite-vec` backends are exact/brute-force — fine to ~10⁵ vectors; beyond
   that prefer a Chroma backend.
 

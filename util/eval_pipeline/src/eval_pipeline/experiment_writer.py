@@ -33,6 +33,7 @@ from .eval_types import (
     EvalTestResult,
     ModelSpec,
 )
+from .usage import TokenUsageSummary
 
 
 class NullExperimentWriter:
@@ -100,10 +101,7 @@ class ExperimentWriter:
         self.passed_count = 0
         self._start_time: datetime | None = None
 
-        # Token tracking
-        self.total_input_tokens = 0
-        self.total_output_tokens = 0
-        self.total_tokens = 0
+        self._token_usage: TokenUsageSummary | None = None
 
     def start(
         self,
@@ -175,6 +173,13 @@ class ExperimentWriter:
         if isinstance(result, dict):
             result = EvalTestResult.model_validate(result)
 
+        usage = result.token_usage or TokenUsageSummary.from_counts(
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            total_tokens=result.total_tokens,
+        )
+        result = result.model_copy(update={"token_usage": usage, **usage.totals()})
+
         # Write as JSONL line with _type alias
         with open(self.file_path, "a") as f:
             f.write(result.model_dump_json(by_alias=True))
@@ -184,13 +189,11 @@ class ExperimentWriter:
         if result.passed:
             self.passed_count += 1
 
-        # Accumulate token counts
-        if result.input_tokens is not None:
-            self.total_input_tokens += result.input_tokens
-        if result.output_tokens is not None:
-            self.total_output_tokens += result.output_tokens
-        if result.total_tokens is not None:
-            self.total_tokens += result.total_tokens
+        self._token_usage = (
+            TokenUsageSummary.merge([self._token_usage, usage])
+            if self._token_usage is not None
+            else usage
+        )
 
     def finalize(
         self,
@@ -217,6 +220,8 @@ class ExperimentWriter:
         if self.result_count > 0:
             success_rate = self.passed_count / self.result_count
 
+        usage = self._token_usage or TokenUsageSummary()
+        totals = usage.totals()
         # Build typed completion line
         # Note: status is typed as Literal["completed", "failed"] so we cast
         completion = EvalCompletionLine(
@@ -226,9 +231,10 @@ class ExperimentWriter:
             passed_count=self.passed_count,
             success_rate=success_rate,
             duration_seconds=duration_seconds,
-            total_input_tokens=self.total_input_tokens if self.total_input_tokens > 0 else None,
-            total_output_tokens=self.total_output_tokens if self.total_output_tokens > 0 else None,
-            total_tokens=self.total_tokens if self.total_tokens > 0 else None,
+            total_input_tokens=totals["input_tokens"],
+            total_output_tokens=totals["output_tokens"],
+            total_tokens=totals["total_tokens"],
+            token_usage=usage,
         )
 
         # Write completion line (exclude None values to keep JSON clean)

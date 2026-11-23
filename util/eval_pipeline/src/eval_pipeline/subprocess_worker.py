@@ -113,24 +113,25 @@ async def run_task(task_input: SubprocessTaskInput) -> EvalTestResult:
     session_id = trace_file.stem
 
     # Set up tracing (fresh process — no inherited state)
-    if task_input.use_otlp:
-        try:
-            from aster.tracing import (
-                enable_tracing,
-                exporters,
-                set_session,
-            )
+    try:
+        from aster.tracing import (
+            enable_tracing,
+            exporters,
+            set_session,
+        )
 
-            # Always send to headless backend (otlp_endpoint); also to external viewer if running.
-            _exporter_list = [exporters.journal(endpoint=task_input.otlp_endpoint)]
+        _exporter_list = []
+        if task_input.use_otlp:
+            # Always send to headless backend; also to external viewer if running.
+            _exporter_list.append(exporters.journal(endpoint=task_input.otlp_endpoint))
             if task_input.viewer_endpoint:
                 _exporter_list.append(exporters.journal(endpoint=task_input.viewer_endpoint))
-            if task_input.write_trace_file:
-                _exporter_list.append(exporters.jsonl(trace_dir))
-            enable_tracing(exporters=_exporter_list, experiment=task_input.experiment_name)
-            set_session(session_id)
-        except Exception as e:
-            log.warning(f"Failed to set up tracing: {e}")
+        if task_input.write_trace_file:
+            _exporter_list.append(exporters.jsonl(trace_dir))
+        enable_tracing(exporters=_exporter_list, experiment=task_input.experiment_name)
+        set_session(session_id)
+    except Exception as e:
+        log.warning(f"Failed to set up tracing: {e}")
 
     # Reconstruct agent and scorers
     try:
@@ -291,7 +292,7 @@ async def run_task(task_input: SubprocessTaskInput) -> EvalTestResult:
             )
         except Exception as e:
             log.warning(f"Failed to post eval span: {e}")
-    if not task_input.use_otlp:
+    if not task_input.use_otlp and task_input.write_trace_file:
         try:
             from .trace_eval_span import write_eval_span_to_trace
 
@@ -340,6 +341,7 @@ async def run_task(task_input: SubprocessTaskInput) -> EvalTestResult:
         input_tokens=ctx.input_tokens,
         output_tokens=ctx.output_tokens,
         total_tokens=ctx.total_tokens,
+        token_usage=ctx.token_usage,
         error=output_error or ctx.error,
         error_type=classify_error_type(output_error or ctx.error)
         if (output_error or ctx.error)

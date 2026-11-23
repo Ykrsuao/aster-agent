@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .usage import TokenUsageSummary
+
 if TYPE_CHECKING:
     from aster.trace_explorer import TraceExplorer
 
@@ -105,6 +107,7 @@ class ScoringContext:
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
+    token_usage: TokenUsageSummary | None = None
 
     # Task metadata from the task JSON — forwarded from Task.metadata.
     # Use this for per-task rubrics, difficulty tags, or any data a custom
