@@ -41,10 +41,12 @@ class SessionRuntime[T]:
         value: T,
         *,
         close: CloseCallback[T] | None = None,
+        before_close: CloseCallback[T] | None = None,
     ) -> None:
         self.session_id = session_id
         self.value = value
         self._close_callback = close
+        self._before_close = before_close
         self._turn_lock = asyncio.Lock()
         self._state_lock = asyncio.Lock()
         self._state = _RuntimeState.OPEN
@@ -113,13 +115,19 @@ class SessionRuntime[T]:
         await asyncio.shield(close_task)
 
     async def _close_once(self) -> None:
-        await self._turn_lock.acquire()
         try:
-            await self._close_value()
+            if self._before_close is not None:
+                result = self._before_close(self.value)
+                if inspect.isawaitable(result):
+                    await result
         finally:
-            self._turn_lock.release()
-            async with self._state_lock:
-                self._state = _RuntimeState.CLOSED
+            await self._turn_lock.acquire()
+            try:
+                await self._close_value()
+            finally:
+                self._turn_lock.release()
+                async with self._state_lock:
+                    self._state = _RuntimeState.CLOSED
 
     async def _close_value(self) -> None:
         callback = self._close_callback
@@ -151,6 +159,7 @@ class SessionRuntimePool[T]:
         value: T,
         *,
         close: CloseCallback[T] | None = None,
+        before_close: CloseCallback[T] | None = None,
         available: bool = True,
     ) -> SessionRuntime[T]:
         async with self._lock:
@@ -158,7 +167,7 @@ class SessionRuntimePool[T]:
                 raise SessionRuntimeClosedError("ACP session runtime pool is closed")
             if session_id in self._runtimes:
                 raise ValueError(f"Session {session_id!r} is already registered")
-            runtime = SessionRuntime(session_id, value, close=close)
+            runtime = SessionRuntime(session_id, value, close=close, before_close=before_close)
             self._runtimes[session_id] = runtime
             if available:
                 self._available.add(session_id)

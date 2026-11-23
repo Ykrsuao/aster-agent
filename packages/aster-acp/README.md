@@ -95,9 +95,10 @@ This is a known Zed limitation, tracked in
 plumbing largely exists and the work is queued, but as of this writing it is
 unresolved.
 
-Configure the MCP server directly for Aster instead — through Aster's own
-`.mcp.json` — and it works normally, because the agent then owns the
-connection and its credentials rather than borrowing Zed's.
+Configure servers with explicit credentials in Aster's own
+[`.mcp.json`](#mcp-configuration-and-recovery). The adapter supports stdio,
+HTTP and SSE and does not borrow Zed's OAuth tokens. Interactive OAuth login
+and automatic OAuth refresh are not enabled by this terminal integration.
 
 ## Launching the server yourself
 
@@ -214,7 +215,7 @@ Runtime status also reports `permissionMode`. Set it through
 | `auto` | Allow generated code and file changes for this live session. |
 | `manual` | Request approval before generated execution. |
 | `accept_edits` | Automatically handle supported file reads and edits; request approval for commands and other code. |
-| `plan` | Use supplied context to plan, with generated execution disabled. |
+| `plan` | Inspect workspace files through bounded host reads, listing and search; generated execution and changes remain disabled. |
 
 Selecting the first three modes also enters Code mode. The legacy `mode` and
 `approval` fields remain available; do not combine them with `permissionMode`
@@ -227,6 +228,18 @@ subsequent generated execution without cancelling the current task. An open appr
 must still be resolved or cancelled first: changing modes never approves that request.
 Requests combined with model, reasoning, or other settings retain the idle-session
 requirement.
+
+Plan recognizes one literal `await self.files.read(path, start_line=1, end_line=200)`,
+`await self.files.list(path='.')`, or `await self.files.search(query, path='.', glob='*')`
+request per cell. These requests use a host-owned reader, never Python evaluation or
+the agent's mutable `files` binding. The runtime retains validation, middleware,
+hooks and normal tool output; changed source or permission invalidates a prepared
+request. Arbitrary code, shell, MCP calls, assignments and mixed cells are refused.
+The fixed boundary is the selected workspace, including when the Python backend
+uses a sandbox. Links, junctions, multiple hard links and special files are refused.
+UTF-8 reads and literal searches are bounded and report incomplete results. See the
+[terminal inspection limits](../aster-tui/README.md#session-settings-and-approvals).
+Explicit user slash commands retain their separate host permission contract.
 
 Accept edits recognizes a single direct `await self.shell.read(...)`,
 `await self.shell.write_file(...)`, or path-based `await self.shell.replace(...)`
@@ -475,8 +488,9 @@ one-process-per-agent daemon will make that isolation an OS process boundary.
 
 Installed `aster.skills` entry points are loaded into the shared skill registry
 but remain opt-in. The agent can activate a relevant skill with
-`self.skills.activate(["name"])`. Stdio MCP servers supplied by an ACP client
-are registered and activated as `mcp.<name>` skills for that session.
+`self.skills.activate(["name"])`. MCP servers selected from Aster configuration
+or supplied by an ACP client are registered and activated as `mcp.<name>` skills
+for that session.
 
 Workspace and user skill roots are shared with the terminal host through
 layered `settings.yaml`. New configuration should use:
@@ -495,12 +509,133 @@ Loaded `@slash_command` methods are advertised through ACP and matching
 `/command arguments` prompts are dispatched through the shared typed command
 router. Command discovery is refreshed when loaded skills change.
 
+Text skills are advertised as individual commands. Use `/aster-agent-authoring
+Add a classifier`, or mention `$aster-agent-authoring` anywhere in a task.
+The command uses a valid frontmatter `name`, falling back to the directory ID;
+the directory ID also remains an alias. Duplicate aliases and names occupied by
+terminal or Python commands use the full registry name, such as `/cmd.review`.
+A qualified missing name, an
+ambiguous alias, or a disabled user invocation produces an error before a model
+call. Unknown `$variables`, escaped mentions, and Markdown code are kept as
+literal text.
+
+Several mentions supply their instructions and source directories to one
+cancellable task, with the complete original request preserved. Repeated aliases
+for the same skill are included once. Arguments are literal: there is no shell
+parsing or `$ARGUMENTS` substitution. Skill selection does not execute scripts or
+change execution permissions. Session restoration reloads current skills from disk.
+
+For automatic selection, the agent initially sees only names, descriptions, and
+source directories. It chooses relevant skills for the current task and reads
+their full instructions through `self.skills.read_text_skill(name)`. Reading does
+not activate the skill or add its whole body to the persistent context. This
+generated read follows the session's execution policy; Plan mode still disables
+generated execution.
+
+SKILL.md may set `argument-hint`, `user-invocable: false` (hide and reject explicit
+invocations), or `disable-model-invocation: true` (allow only explicit use).
+`policy.allow_implicit_invocation: false` in `agents/openai.yaml` also disables
+automatic selection. If either automatic-use setting disables it, explicit use
+is required. Malformed boolean settings reject discovery or preserve the previous
+skill on a failed reload.
+
+`available_commands_update` includes the command's standard `input.hint` and
+`_meta.aster.kind: "skill"` for text-skill commands. Their optional
+`_meta.aster.aliases` array supplies valid alternate command names without
+duplicating the menu entry. Python commands can also
+provide a `_meta.aster.completions` array for first-argument completion. Clients
+that ignore this metadata can still send commands and mentions as text.
+Text-skill requests preserve file and image attachments in the task context;
+Python slash commands retain their existing text-only dispatch behavior.
+
 The current adapter accepts text, resource links, embedded text resources, and
 PNG/JPEG/GIF/WebP images. Images are forwarded to the selected model without
 requiring `media_inputs` configuration; image-only prompts are supported. Provider
 rejections are returned with their error message.
 
-Stdio, HTTP, and SSE MCP servers forwarded by an ACP client are supported.
+## MCP configuration and recovery
+
+New and restored sessions read these sources, in increasing priority:
+
+1. User `.mcp.json` in `ASTER_USER_DIR`, or `$XDG_CONFIG_HOME/aster/`, or
+   `~/.config/aster/` when neither variable is set.
+2. `.mcp.json` directly inside the session workspace, after workspace trust.
+3. The ACP client's `mcpServers` supplied with `session/new` or `session/load`.
+
+A higher-priority server replaces the complete lower-priority entry with the
+same name. Headers, environment variables and endpoints are never combined
+across sources. An invalid higher-priority entry fails visibly instead of
+falling back to a different server. Within an ACP client list, the first entry
+with a name wins and duplicates produce a warning. Duplicate JSON server keys
+are rejected for that name. Server names contain 1–256 printable characters,
+without surrounding whitespace. Malformed files and individual server failures
+do not prevent a session from opening.
+
+For example, point the stdio entry at your own MCP program and supply explicit
+headers for a remote HTTP service:
+
+```json
+{
+  "mcpServers": {
+    "local": {
+      "command": "uv",
+      "args": ["run", "python", "tools/mcp_server.py"],
+      "env": {"SERVICE_MODE": "development"}
+    },
+    "remote": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp",
+      "headers": {"Authorization": "Bearer <your-token>"}
+    },
+    "optional": {"disabled": true}
+  }
+}
+```
+
+`type` (or `transport`) accepts `stdio`, `http`/`streamable-http`, or `sse`.
+Without it, a `url` selects HTTP; otherwise the entry is stdio. Stdio programs
+always run in the session workspace, including those configured in the user
+file. Arguments, environment values and headers stay literal: `${VAR}` is not
+expanded. User configuration can hold explicit credentials outside the project;
+stdio wrappers can obtain their own credentials. OAuth requires separate setup
+and verification and is not started automatically on an HTTP 401.
+
+The regular terminal trust screen covers `.mcp.json`. Other ACP clients can
+trust a workspace with `aster trust` run in that folder. Until then, project MCP
+configuration is skipped with a warning; user and client configuration remain
+available. This gate does not change ordinary file-reading permissions.
+
+In the terminal, `/mcp` shows source, transport, state, tool count and a safe
+failure reason. `ready` means discovery or the last call succeeded, not that a
+permanent connection is open. Discovery and each tool call own and close their
+transport independently. Servers are discovered concurrently, with a 30-second
+bound per server. Failed calls update status; a later successful call restores
+`ready`.
+
+Use `/mcp reconnect NAME` after correcting a configuration or restoring a
+service. It rereads configuration for that name and discovers the tools again.
+Removing the entry or setting `disabled: true` withdraws its old registration;
+failed discovery also leaves the previous tools withdrawn. A read-only status
+refresh does not reread files or launch a server. Reconnection requires an idle
+session, including background jobs. Closing a session cancels and waits for
+in-flight discovery and calls before releasing its tools.
+
+Clients may use the optional extension advertised by `initialize` as
+`_meta.aster.mcp: true`:
+
+| Request | Parameters | Result |
+| --- | --- | --- |
+| `_aster/session/mcp/status` | `sessionId` | Current in-memory state; no network or configuration reads |
+| `_aster/session/mcp/reconnect` | `sessionId`, `name` | Recheck one server and return updated state |
+
+Both return `{servers: [{name, source, transport, state, toolCount, error}],
+warnings: [...]}`. States include `connecting`, `ready`, `failed`, `disabled`
+and `closed`. They omit command arguments, environment values, headers and URLs.
+HTTP failures expose status codes and fixed explanations, not response bodies.
+Clients must resend their own MCP definitions on session load. Live MCP tools,
+clients, credentials and callbacks are excluded from agent snapshots and rebuilt
+from current configuration, so they do not prevent ordinary agent state from
+being saved and restored.
+
 ACP-transport MCP proxies and additional workspace directories are not advertised
-yet. An unavailable, duplicate, or unsupported MCP server is skipped with a session
-warning so it cannot prevent a new or restored Aster session from opening.
+yet. Unsupported client servers are skipped with a warning.

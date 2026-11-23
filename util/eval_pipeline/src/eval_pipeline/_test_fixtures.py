@@ -21,6 +21,40 @@ class DummyAgent:
         return "neutral"
 
 
+class UsageTraceAgent:
+    """Emit deterministic usage spans for subprocess serialization regressions."""
+
+    def __init__(self, llm=None):
+        pass
+
+    async def classify(self, text: str) -> str:
+        import json
+
+        from opentelemetry import trace
+
+        tracer = trace.get_tracer("test-usage-agent")
+        with tracer.start_as_current_span(
+            "generation",
+            attributes={
+                "openinference.span.kind": "AGENT",
+                "generation.id": "usage-fixture",
+                "agent.name": "UsageTraceAgent",
+                "agent.method": "classify",
+            },
+        ):
+            for counts in json.loads(text):
+                with tracer.start_as_current_span(
+                    "acompletion",
+                    attributes={
+                        "openinference.span.kind": "LLM",
+                        "llm.model_name": "offline-scripted",
+                    },
+                ) as span:
+                    for name, value in (counts or {}).items():
+                        span.set_attribute(f"llm.token_count.{name}", value)
+        return "positive"
+
+
 class SlowAgent:
     """Agent that sleeps longer than the timeout — for testing span flush on timeout.
 

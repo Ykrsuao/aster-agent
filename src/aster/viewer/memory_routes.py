@@ -277,11 +277,11 @@ def explain(db: str, q: str, k: int = 10, dim: int = 256, owner: str | None = No
         raise HTTPException(status_code=422, detail="dim must be >= 1")
     owner = _validate_owner(owner)
     store = _get_store(db)
-    engine = RetrievalEngine(store, get_embedder(EmbeddingConfig(dim=dim)), RetrievalConfig())
     try:
+        engine = RetrievalEngine(store, get_embedder(EmbeddingConfig(dim=dim)), RetrievalConfig())
         return engine.explain(q, k=k, owner=owner)
     except ValueError as e:
         raise HTTPException(
             status_code=422,
-            detail=f"explain failed — embedding dim mismatch with the store? ({e})",
+            detail=f"explain failed — embedding identity or dimension mismatch ({e})",
         ) from e

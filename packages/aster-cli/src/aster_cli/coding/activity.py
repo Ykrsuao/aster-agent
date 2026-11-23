@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator
 from difflib import unified_diff
 from functools import wraps
 from pathlib import Path
-from typing import Annotated, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 from uuid import uuid4
 
 from pydantic import Field
@@ -24,6 +24,10 @@ from aster.skill import Skill
 from aster.tools._bash_session import BashSession
 from aster.tools._results import StreamDone, StreamEvent
 from aster.tools.shell_tools import FileWrite, Match, ShellResult, ShellTools
+from aster_cli.coding.recovery import finish_action, record_action
+
+if TYPE_CHECKING:
+    from aster_cli.sessions.actions import SessionActions
 
 logger = logging.getLogger(__name__)
 
@@ -213,10 +217,12 @@ class ActivityShellTools(Skill):
         self,
         shell: ShellTools,
         event_manager: EventManager,
+        journal: SessionActions | None = None,
     ):
         super().__init__()
         self._shell = shell
         self._event_manager = event_manager
+        self._journal = journal
 
     def __repr__(self) -> str:
         return f"ActivityShellTools(cwd={self.cwd!s})"
@@ -269,7 +275,24 @@ class ActivityShellTools(Skill):
             float | None, spec(description="Max seconds; None uses the shell's default_timeout")
         ] = None,
     ) -> ShellResult:
-        command_id = str(uuid4())
+        action_id = (
+            self._journal.begin("shell.run", "Host shell command", str(self.cwd))
+            if self._journal is not None
+            else None
+        )
+        try:
+            result = await self._run(
+                command, stdin=stdin, timeout=timeout, command_id=action_id or str(uuid4())
+            )
+        except BaseException as error:
+            finish_action(self._journal, action_id, error)
+            raise
+        finish_action(self._journal, action_id, requires_review=result.timed_out)
+        return result
+
+    async def _run(
+        self, command: str, *, stdin: str | None, timeout: float | None, command_id: str
+    ) -> ShellResult:
         bounded_command = pformat(command, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
         command_truncated = len(command) > _MAX_EVENT_TEXT_CHARS
         bounded_stdin: str | None = None
@@ -336,7 +359,12 @@ class ActivityShellTools(Skill):
             float | None, spec(description="Max seconds; None uses the shell's default_timeout")
         ] = None,
     ) -> AsyncIterator[StreamEvent | StreamDone]:
-        command_id = str(uuid4())
+        action_id = (
+            self._journal.begin("shell.run_stream", "Host shell command", str(self.cwd))
+            if self._journal is not None
+            else None
+        )
+        command_id = action_id or str(uuid4())
         bounded_command = pformat(command, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
         command_truncated = len(command) > _MAX_EVENT_TEXT_CHARS
         self._emit(
@@ -360,6 +388,8 @@ class ActivityShellTools(Skill):
         try:
             async for item in stream:
                 if isinstance(item, StreamDone):
+                    finished = True
+                    finish_action(self._journal, action_id, requires_review=item.timed_out)
                     output_truncated = stdout_buffer.was_truncated or stderr_buffer.was_truncated
                     if stdout_buffer.chars_written or stderr_buffer.chars_written:
                         self._emit(
@@ -378,13 +408,13 @@ class ActivityShellTools(Skill):
                             output_truncated=output_truncated,
                         )
                     )
-                    finished = True
                 else:
                     buffer = stdout_buffer if item.kind == "stdout" else stderr_buffer
                     buffer.write(item.text)
                 yield item
         except BaseException as error:
             if not finished:
+                finish_action(self._journal, action_id, error)
                 output_truncated = stdout_buffer.was_truncated or stderr_buffer.was_truncated
                 if stdout_buffer.chars_written or stderr_buffer.chars_written:
                     self._emit(
@@ -451,7 +481,7 @@ class ActivityShellTools(Skill):
             start_line = None
             end_line = None
             try:
-                with resolved.open("r") as stream:
+                with resolved.open("r", encoding="utf-8") as stream:
                     content = stream.read(_MAX_EVENT_TEXT_CHARS + 1)
                 if len(content) <= _MAX_EVENT_TEXT_CHARS:
                     offset = content.index(old_text)
@@ -462,7 +492,8 @@ class ActivityShellTools(Skill):
 
         bounded_old = pformat(old_text, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
         old_truncated = len(old_text) > _MAX_EVENT_TEXT_CHARS
-        result = await self._shell.replace(target, old_or_new, new)
+        with record_action(self._journal, "shell.replace", str(resolved), str(self.cwd)):
+            result = await self._shell.replace(target, old_or_new, new)
         # replace() may re-terminate the region, so report what it wrote rather
         # than what it was handed.
         written_text = result.new_text
@@ -501,14 +532,15 @@ class ActivityShellTools(Skill):
         old_content_complete = not existed
         if existed:
             try:
-                with resolved.open("r") as stream:
+                with resolved.open("r", encoding="utf-8") as stream:
                     old_diff_text = stream.read(_MAX_DIFF_INPUT_CHARS + 1)
                 old_content_complete = len(old_diff_text) <= _MAX_EVENT_TEXT_CHARS
             except (OSError, UnicodeError):
                 # Observation must not make an otherwise valid overwrite fail.
                 old_content_complete = False
 
-        result = await self._shell.write_file(path, content)
+        with record_action(self._journal, "shell.write_file", str(resolved), str(self.cwd)):
+            result = await self._shell.write_file(path, content)
         bounded_old = (
             pformat(
                 old_diff_text,

@@ -208,6 +208,33 @@ class TestComputeWeightedScore:
 
 
 class TestBuildScoringContext:
+    @pytest.mark.parametrize(
+        "usages, expected",
+        [
+            ([{"prompt": 8, "completion": 2, "total": 10}, None], (None, None, None)),
+            ([{"prompt": 0, "completion": 0, "total": 0}], (0, 0, 0)),
+            ([{"prompt": 8}, {"prompt": 2, "completion": 0}], (10, None, None)),
+        ],
+    )
+    def test_token_totals_require_every_turn_to_report_each_dimension(self, usages, expected):
+        from aster.trace_explorer.explorer import LLMTurn
+
+        trace = _make_trace("")
+        trace.sessions[0].turns.extend(
+            LLMTurn(session_id="test", messages=[], response="", model="fake", token_counts=usage)
+            for usage in usages
+        )
+        result = ExecutionResult(
+            task_id="tokens",
+            input=((), {}),
+            expected=None,
+            actual=None,
+            trace_file=None,
+            latency_ms=0,
+        )
+        ctx = build_scoring_context(result, trace=trace)
+        assert (ctx.input_tokens, ctx.output_tokens, ctx.total_tokens) == expected
+
     def test_from_execution_result(self, tmp_path):
         trace_file = tmp_path / "trace.jsonl"
         trace_file.write_text("")  # Empty trace

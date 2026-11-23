@@ -46,8 +46,8 @@ def client():
 def memory_db(tmp_path):
     """A real memory sqlite with 4 memories, accesses, an edge and maintenance log."""
     path = tmp_path / "memory.sqlite"
-    store = MemoryStore(path)
     embedder = HashingEmbedder(dim=256)
+    store = MemoryStore(path, embedding_identity=embedder.identity, embedding_dim=embedder.dim)
     now = time.time()
 
     info = Memory(
@@ -316,6 +316,25 @@ def test_explain_dim_mismatch_is_422(client, memory_db):
     )
     assert resp.status_code == 422
     assert "dim" in resp.json()["detail"]
+
+
+def test_explain_same_dim_with_different_identity_is_422(client, tmp_path):
+    path = tmp_path / "other-model.sqlite"
+    embedder = HashingEmbedder(dim=256)
+    store = MemoryStore(path, embedding_identity="test:other-model-v1", embedding_dim=embedder.dim)
+    try:
+        memory = Memory(content="A vector from a different model.")
+        store.add(memory, embedder.embed(memory.embedding_text()))
+    finally:
+        store.close()
+
+    resp = client.get(
+        "/api/memory/explain",
+        params={"db": str(path), "q": "different model", "dim": embedder.dim},
+    )
+    assert resp.status_code == 422
+    assert "identity" in resp.json()["detail"]
+    assert "rebuild_embeddings" in resp.json()["detail"]
 
 
 def test_explain_owner_filter_and_wildcard_validation(client, memory_db):

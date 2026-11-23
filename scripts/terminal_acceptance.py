@@ -8,16 +8,109 @@ import argparse
 import asyncio
 import hashlib
 import json
+import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests/fixtures/terminal_acceptance/tasks.json"
+SAMPLING_FIELDS = frozenset(
+    {
+        "temperature",
+        "top_p",
+        "seed",
+        "max_tokens",
+        "max_completion_tokens",
+        "frequency_penalty",
+        "presence_penalty",
+        "reasoning_effort",
+    }
+)
+
+
+def _endpoint_origin(value: str | None) -> str | None:
+    if value is None:
+        return None
+    parts = urlsplit(value)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError("model endpoint must have an HTTP(S) origin")
+    host = parts.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{parts.scheme}://{host}" + (f":{parts.port}" if parts.port is not None else "")
+
+
+def fingerprint_model(identity: Mapping) -> str:
+    """Hash only the documented non-secret model identity, rejecting arbitrary config."""
+    if not isinstance(identity, Mapping) or set(identity) != {
+        "client_type",
+        "model",
+        "endpoint_origin",
+        "sampling",
+        "reasoning_level",
+    }:
+        raise ValueError("unexpected model identity fields")
+    for name, pattern in (
+        ("client_type", r"[A-Za-z_][A-Za-z0-9_.]{0,255}"),
+        ("model", r"[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,255}"),
+        ("reasoning_level", r"[A-Za-z0-9][A-Za-z0-9_.\-]{0,63}"),
+    ):
+        value = identity[name]
+        if name == "reasoning_level" and value is None:
+            continue
+        if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
+            raise ValueError(f"invalid model identity {name}")
+    origin = identity["endpoint_origin"]
+    if origin is not None and (not isinstance(origin, str) or _endpoint_origin(origin) != origin):
+        raise ValueError("endpoint_origin must exclude credentials, path, query and fragment")
+    sampling = identity["sampling"]
+    if not isinstance(sampling, dict) or sampling.keys() - SAMPLING_FIELDS:
+        raise ValueError("unexpected model sampling fields")
+    for name, value in sampling.items():
+        if name == "reasoning_effort":
+            valid = isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.\-]{1,64}", value)
+        elif name in {"seed", "max_tokens", "max_completion_tokens"}:
+            valid = type(value) is int and (name == "seed" or value > 0)
+        else:
+            valid = type(value) in (int, float) and math.isfinite(value)
+        if not valid:
+            raise ValueError(f"invalid model sampling {name}")
+    encoded = json.dumps(
+        dict(identity), sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def model_identity(llm, *, overrides: Mapping | None = None) -> dict:
+    """Capture the resolved client, never its mutable alias or credential-bearing config."""
+    overrides = dict(overrides or {})
+    config = llm._prepare_call_config(overrides)
+    extra = config.get("extra_body") or {}
+    sampling = {}
+    for name in SAMPLING_FIELDS:
+        top, nested = config.get(name), extra.get(name)
+        if top is not None and nested is not None and top != nested:
+            raise ValueError("ambiguous sampling configuration")
+        value = top if top is not None else nested
+        if value is not None:
+            sampling[name] = value
+    identity = {
+        "client_type": f"{type(llm).__module__}.{type(llm).__qualname__}",
+        "model": config.get("model", llm.model),
+        "endpoint_origin": _endpoint_origin(config.get("base_url") or config.get("api_base")),
+        "sampling": sampling,
+        "reasoning_level": overrides.get("reasoning_level", llm.reasoning_level),
+    }
+    fingerprint_model(identity)
+    return identity
 
 
 def load_tasks(path: Path = FIXTURES) -> tuple[list[dict], str]:
@@ -157,13 +250,46 @@ def self_check(tasks: list[dict]) -> None:
     )
 
 
-def usage_totals(usages: list[dict | None]) -> dict:
-    result = {"completed_calls": len(usages)}
-    for name in ("input_tokens", "output_tokens"):
-        known = [usage[name] for usage in usages if usage and usage.get(f"{name}_reported")]
-        result[name] = sum(known) if len(known) == len(usages) and usages else None
-    known_costs = [usage["cost_usd"] for usage in usages if usage and usage.get("cost_known")]
-    result["cost_usd"] = sum(known_costs) if len(known_costs) == len(usages) and usages else None
+def usage_totals(usages: list[dict | None], *, attempted_calls: int | None = None) -> dict:
+    attempted = len(usages) if attempted_calls is None else attempted_calls
+    if type(attempted) is not int or attempted < len(usages):
+        raise ValueError("attempted calls cannot be fewer than completed responses")
+    all_responded = bool(usages) and attempted == len(usages)
+    result = {"completed_calls": len(usages), "attempted_calls": attempted}
+    for name in ("input_tokens", "output_tokens", "total_tokens"):
+        known = []
+        for usage in usages:
+            if not usage:
+                continue
+            if name == "total_tokens":
+                # Cache/read/write and reasoning counts are subsets, never additional tokens.
+                values = [usage.get(key) for key in ("input_tokens", "output_tokens")]
+                reported = all(
+                    usage.get(f"{key}_reported") is True
+                    for key in ("input_tokens", "output_tokens")
+                )
+                valid = reported and all(type(value) is int and value >= 0 for value in values)
+                value = sum(values) if valid else None
+            else:
+                value = usage.get(name)
+                valid = usage.get(f"{name}_reported") is True and type(value) is int and value >= 0
+            if valid:
+                known.append(value)
+        complete = all_responded and len(known) == len(usages)
+        result[f"known_{name}"] = sum(known)
+        result[f"{name}_complete"] = complete
+        result[name] = sum(known) if complete else None
+    known_costs = [
+        usage["cost_usd"]
+        for usage in usages
+        if usage
+        and usage.get("cost_known") is True
+        and type(usage.get("cost_usd")) in (int, float)
+        and math.isfinite(usage["cost_usd"])
+        and usage["cost_usd"] >= 0
+    ]
+    result["cost_complete"] = all_responded and len(known_costs) == len(usages)
+    result["cost_usd"] = sum(known_costs) if result["cost_complete"] else None
     result["known_cost_subtotal_usd"] = sum(known_costs) if known_costs else None
     result["usage_scope"] = "all responses through the shared client, including delegated calls"
     return result
@@ -178,11 +304,11 @@ def write_json(path: Path, data: dict) -> None:
 async def worker(payload: dict) -> None:
     from aster_cli.coding.agent import CodingAgent
 
-    from aster.interactive import SummarizationConfig
+    from aster.interactive import Done, SummarizationConfig
     from aster.llm_config import llm_config_chain
     from aster.secrets import load_secrets_into_env
     from aster.tracing import enable_tracing
-    from aster.unifiedllm import RetryConfig, get_llm_client
+    from aster.unifiedllm import FakeLLMClient, RetryConfig, get_llm_client
     from aster.unifiedllm.registry import load_model_entries
 
     class CallBudgetExceeded(BaseException):
@@ -195,11 +321,21 @@ async def worker(payload: dict) -> None:
     error = None
     agent = None
     llm = None
+    identity = None
+    fingerprint = None
+    measurement_kind = None
 
     def save():
         write_json(
             meter,
-            {"status": status, "error": error, "attempted_calls": calls, **usage_totals(usages)},
+            {
+                "status": status,
+                "error": error,
+                "model_identity": identity,
+                "model_fingerprint": fingerprint,
+                "measurement_kind": measurement_kind,
+                **usage_totals(usages, attempted_calls=calls),
+            },
         )
 
     save()
@@ -213,13 +349,21 @@ async def worker(payload: dict) -> None:
             max_tokens=payload["max_output_tokens"],
             retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
         )
+        identity = model_identity(llm)
+        fingerprint = fingerprint_model(identity)
+        measurement_kind = "offline-scripted" if isinstance(llm, FakeLLMClient) else "live-model"
         original_acall = llm.acall
         original_call = llm.call
 
-        def admit():
-            nonlocal calls
+        def admit(request):
+            nonlocal calls, identity, fingerprint
             if calls >= payload["max_calls"]:
                 raise CallBudgetExceeded()
+            actual_identity = model_identity(llm, overrides=request)
+            if calls and actual_identity != identity:
+                raise ValueError("model settings changed within a measured task")
+            identity = actual_identity
+            fingerprint = fingerprint_model(identity)
             calls += 1
             save()
 
@@ -230,11 +374,11 @@ async def worker(payload: dict) -> None:
             return response
 
         async def acall(*args, **kwargs):
-            admit()
+            admit(kwargs)
             return record(await original_acall(*args, **kwargs))
 
         def call(*args, **kwargs):
-            admit()
+            admit(kwargs)
             return record(original_call(*args, **kwargs))
 
         llm.acall = acall
@@ -255,7 +399,11 @@ async def worker(payload: dict) -> None:
         status = "running"
         save()
         result = await agent.handle({"user_messages": [payload["prompt"]]})
-        status = "completed" if type(result).__name__ == "Done" else "needs_input"
+        status = (
+            "completed"
+            if isinstance(result, Done) and getattr(result, "complete_task", True)
+            else "needs_input"
+        )
     except CallBudgetExceeded:
         status = "call_limit"
     except BaseException as exc:
@@ -269,10 +417,21 @@ async def worker(payload: dict) -> None:
             await llm.aclose()
 
 
-def candidate() -> dict:
+def candidate(*, artifact_dir: Path | None = None) -> dict:
     def git(*args):
         result = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, check=True)
         return result.stdout
+
+    excluded = []
+    if artifact_dir is not None:
+        try:
+            relative = artifact_dir.resolve().relative_to(ROOT.resolve())
+        except ValueError:
+            pass
+        else:
+            if relative == Path("."):
+                raise ValueError("artifact directory cannot be the source root")
+            excluded = [f":(top,literal,exclude){relative.as_posix()}"]
 
     untracked = {}
     for raw in git(
@@ -285,6 +444,8 @@ def candidate() -> dict:
         "packages",
         "scripts",
         "util",
+        "experiments",
+        *excluded,
     ).split(b"\0"):
         if not raw:
             continue
@@ -294,21 +455,37 @@ def candidate() -> dict:
             untracked[name] = hashlib.sha256(path.read_bytes()).hexdigest()
     return {
         "commit": git("rev-parse", "HEAD").decode().strip(),
-        "dirty": bool(git("status", "--porcelain")),
-        "diff_sha256": hashlib.sha256(git("diff", "HEAD", "--binary")).hexdigest(),
+        "dirty": bool(git("status", "--porcelain", "--", ".", *excluded)),
+        "diff_sha256": hashlib.sha256(
+            git("diff", "HEAD", "--binary", "--", ".", *excluded)
+        ).hexdigest(),
         "untracked_source_sha256": untracked,
     }
 
 
 def run_suite(args, tasks: list[dict], fixture_hash: str) -> int:
+    if not tasks:
+        raise ValueError("a report requires at least one task")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
+
+    def source_number(name):
+        value = os.environ.get(name, "")
+        return int(value) if value.isascii() and value.isdigit() and int(value) > 0 else None
+
     report = {
         "schema_version": 1,
         "fixture_sha256": fixture_hash,
         "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        "candidate": candidate(),
+        "candidate": candidate(artifact_dir=getattr(args, "artifact_dir", output)),
         "model_alias": args.model,
+        "model_identity": None,
+        "model_fingerprint": None,
+        "measurement_kind": None,
+        "repeat_id": getattr(args, "repeat_id", 1),
+        "report_complete": False,
+        "source_run_id": source_number("GITHUB_RUN_ID"),
+        "source_run_attempt": source_number("GITHUB_RUN_ATTEMPT"),
         "limits": {
             "timeout_seconds": args.timeout,
             "max_calls": args.max_calls,
@@ -316,11 +493,14 @@ def run_suite(args, tasks: list[dict], fixture_hash: str) -> int:
             "endpoint_retries": 0,
         },
         "scope": "native CodingAgent on small coding fixtures; not terminal UI, sandbox containment or real-repository acceptance",
+        "elapsed_scope": "agent worker wall time, excluding independent verification",
         "tasks": [],
     }
+    write_json(output / "report.json", report)
     env = os.environ.copy()
     env["ASTER_MODEL_METADATA_REFRESH"] = "False"
     env["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+    frozen_ids = {task["id"] for task in load_tasks()[0]}
     for task in tasks:
         task_dir = output / task["id"]
         workspace = task_dir / "workspace"
@@ -346,33 +526,53 @@ def run_suite(args, tasks: list[dict], fixture_hash: str) -> int:
             env=env,
         )
         elapsed = time.monotonic() - start
-        metering = (
-            json.loads(meter.read_text(encoding="utf-8")) if meter.exists() else usage_totals([])
-        )
+        metering = {
+            **usage_totals([]),
+            **(
+                json.loads(meter.read_text(encoding="utf-8"))
+                if meter.exists()
+                else usage_totals([])
+            ),
+        }
+        if report["model_identity"] is None and metering.get("model_identity") is not None:
+            for name in ("model_identity", "model_fingerprint", "measurement_kind"):
+                report[name] = metering.get(name)
         verification_passed, verification_reason = verify(task, workspace)
         passed, reason = verification_passed, verification_reason
         status = "timeout" if timed_out else metering.get("status", "worker_error")
-        if status != "completed" or code != 0:
+        agent_completed = status == "completed" and code == 0
+        if not agent_completed:
             passed = False
             reason = status if code == 0 or timed_out else "worker_exit"
         result = {
+            **metering,
             "id": task["id"],
             "category": task["category"],
             "passed": passed,
             "reason": reason,
+            "status": status,
+            "agent_completed": agent_completed,
             "verification_passed": verification_passed,
             "verification_reason": verification_reason,
             "elapsed_seconds": round(elapsed, 3),
             "manual_interventions": 0,
+            "recovery_scope": "not_exercised",
             "workspace": str(workspace),
-            **metering,
         }
         # A request killed or failed before its response may still have incurred cost.
         if timed_out or metering.get("attempted_calls", 0) != metering.get("completed_calls", 0):
-            result.update(cost_usd=None, input_tokens=None, output_tokens=None)
+            result.update(cost_usd=None, cost_complete=False)
+            for name in ("input_tokens", "output_tokens", "total_tokens"):
+                result[name] = None
+                result[f"{name}_complete"] = False
         report["tasks"].append(result)
         report["passed"] = sum(item["passed"] for item in report["tasks"])
         report["total"] = len(tasks)
+        report["report_complete"] = (
+            len(report["tasks"]) == len(frozen_ids)
+            and {item["id"] for item in report["tasks"]} == frozen_ids
+            and candidate(artifact_dir=getattr(args, "artifact_dir", output)) == report["candidate"]
+        )
         write_json(output / "report.json", report)
         lines = [
             "# Terminal coding acceptance",
@@ -399,6 +599,227 @@ def run_suite(args, tasks: list[dict], fixture_hash: str) -> int:
     return 0 if report["passed"] == len(tasks) else 1
 
 
+def aggregate_reports(
+    reports: Sequence[Mapping], *, expected_task_ids: Sequence[str], expected_repeats: int
+) -> dict:
+    """Summarize only complete, comparable repeats; unknown usage remains a lower bound."""
+    task_ids = set(expected_task_ids)
+    if not task_ids or len(task_ids) != len(expected_task_ids):
+        raise ValueError("expected task ids must be nonempty and unique")
+    if (
+        type(expected_repeats) is not int
+        or expected_repeats < 1
+        or len(reports) != expected_repeats
+    ):
+        raise ValueError("missing or extra repeat reports")
+    if any(not isinstance(report, Mapping) for report in reports):
+        raise ValueError("reports must be JSON objects")
+    reference = reports[0]
+    comparable = (
+        "candidate",
+        "fixture_sha256",
+        "runner_sha256",
+        "model_identity",
+        "model_fingerprint",
+        "measurement_kind",
+        "limits",
+    )
+    if any(reference.get(name) is None for name in comparable):
+        raise ValueError("missing comparison metadata")
+    if reference["measurement_kind"] not in ("live-model", "offline-scripted"):
+        raise ValueError("unknown measurement kind")
+    if fingerprint_model(reference["model_identity"]) != reference["model_fingerprint"]:
+        raise ValueError("model fingerprint does not match resolved identity")
+    if (
+        reference["model_identity"]["client_type"] == "aster.unifiedllm.fake.FakeLLMClient"
+        and reference["measurement_kind"] != "offline-scripted"
+    ):
+        raise ValueError("scripted clients are not live model evidence")
+    source = reference["candidate"]
+    if (
+        not isinstance(source, Mapping)
+        or not isinstance(source.get("commit"), str)
+        or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", source["commit"]) is None
+        or type(source.get("dirty")) is not bool
+    ):
+        raise ValueError("candidate requires a full commit id and explicit dirty state")
+    for digest in (
+        reference["fixture_sha256"],
+        reference["runner_sha256"],
+        source.get("diff_sha256"),
+    ):
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ValueError("missing or invalid source digest")
+    limits = reference["limits"]
+    if not isinstance(limits, Mapping) or set(limits) != {
+        "timeout_seconds",
+        "max_calls",
+        "max_output_tokens",
+        "endpoint_retries",
+    }:
+        raise ValueError("missing evaluation limits")
+    if any(
+        type(limits[name]) is not int or limits[name] <= 0
+        for name in ("max_calls", "max_output_tokens")
+    ) or (
+        type(limits["timeout_seconds"]) not in (int, float)
+        or not math.isfinite(limits["timeout_seconds"])
+        or limits["timeout_seconds"] <= 0
+        or type(limits["endpoint_retries"]) is not int
+        or limits["endpoint_retries"] != 0
+    ):
+        raise ValueError("invalid evaluation limits")
+    repeats = set()
+    rows = []
+    for report in reports:
+        if report.get("schema_version") != 1 or report.get("report_complete") is not True:
+            raise ValueError("incomplete or unsupported report")
+        if any(report.get(name) != reference[name] for name in comparable):
+            raise ValueError(
+                "cannot combine different candidates, models, fixtures, runners or limits"
+            )
+        repeat = report.get("repeat_id")
+        if type(repeat) is not int or repeat < 1 or repeat in repeats:
+            raise ValueError("invalid or duplicate repeat id")
+        repeats.add(repeat)
+        tasks = report.get("tasks")
+        if (
+            not isinstance(tasks, list)
+            or len(tasks) != len(task_ids)
+            or any(not isinstance(task, Mapping) for task in tasks)
+            or {task.get("id") for task in tasks} != task_ids
+        ):
+            raise ValueError("missing, duplicate or unexpected task")
+        for task in tasks:
+            if any(
+                task.get(name) != reference[name]
+                for name in (
+                    "model_identity",
+                    "model_fingerprint",
+                    "measurement_kind",
+                )
+            ):
+                raise ValueError("task model differs from report identity")
+            if task.get("status") not in {
+                "completed",
+                "call_limit",
+                "needs_input",
+                "worker_error",
+                "timeout",
+            }:
+                raise ValueError("task has not reached a final status")
+            if any(
+                type(task.get(name)) is not bool
+                for name in (
+                    "agent_completed",
+                    "verification_passed",
+                    "passed",
+                )
+            ) or task["passed"] != (task["agent_completed"] and task["verification_passed"]):
+                raise ValueError("task outcome must distinguish completion and verification")
+            if task["agent_completed"] and task["status"] != "completed":
+                raise ValueError("agent completion contradicts final status")
+            attempted, completed = task.get("attempted_calls"), task.get("completed_calls")
+            if (
+                type(attempted) is not int
+                or type(completed) is not int
+                or not 0 <= completed <= attempted
+            ):
+                raise ValueError("missing or invalid call counts")
+            elapsed = task.get("elapsed_seconds")
+            if type(elapsed) not in (int, float) or not math.isfinite(elapsed) or elapsed < 0:
+                raise ValueError("missing or invalid elapsed time")
+            interventions = task.get("manual_interventions")
+            if (
+                type(interventions) is not int
+                or interventions < 0
+                or not task.get("recovery_scope")
+            ):
+                raise ValueError("missing intervention or recovery evidence")
+            rows.append(task)
+    if repeats != set(range(1, expected_repeats + 1)):
+        raise ValueError("missing expected repeat id")
+    summary = {
+        "schema_version": 1,
+        **{name: reference[name] for name in comparable},
+        "report_complete": True,
+        "expected_repeats": expected_repeats,
+        "repeat_ids": sorted(repeats),
+        "task_count": len(task_ids),
+        "observations": len(rows),
+        "agent_completed": sum(row["agent_completed"] for row in rows),
+        "verification_passed": sum(row["verification_passed"] for row in rows),
+        "passed": sum(row["passed"] for row in rows),
+        "elapsed_seconds": sum(row["elapsed_seconds"] for row in rows),
+        "manual_interventions": sum(row["manual_interventions"] for row in rows),
+        "attempted_calls": sum(row["attempted_calls"] for row in rows),
+        "completed_calls": sum(row["completed_calls"] for row in rows),
+        "recovery_scopes": sorted({row["recovery_scope"] for row in rows}),
+        "scope": "observed fixed-fixture outcomes; offline scripts do not measure live model reliability",
+    }
+    for name in ("agent_completed", "verification_passed", "passed"):
+        summary[f"{name}_rate"] = summary[name] / len(rows)
+    for name in ("input_tokens", "output_tokens", "total_tokens", "cost_usd"):
+        subtotal = "known_cost_subtotal_usd" if name == "cost_usd" else f"known_{name}"
+        complete = "cost_complete" if name == "cost_usd" else f"{name}_complete"
+        values = [row.get(subtotal) for row in rows]
+        known = [value for value in values if value is not None]
+        if any(
+            type(value) not in ((int, float) if name == "cost_usd" else (int,))
+            or not math.isfinite(value)
+            or value < 0
+            for value in known
+        ):
+            raise ValueError("invalid usage subtotal")
+        is_complete = len(known) == len(rows) and all(row.get(complete) is True for row in rows)
+        for row in rows:
+            if row.get(complete) is True and (
+                row.get(subtotal) is None
+                or row.get(name) != row[subtotal]
+                or row.get("attempted_calls") != row.get("completed_calls")
+            ):
+                raise ValueError("complete usage contradicts call or subtotal evidence")
+        summary[subtotal] = sum(known) if known else None
+        summary[complete] = is_complete
+        summary[name] = sum(known) if is_complete else None
+    summary["tasks"] = [
+        {
+            "id": task_id,
+            "observations": expected_repeats,
+            **{
+                name: sum(row[name] for row in rows if row["id"] == task_id)
+                for name in (
+                    "agent_completed",
+                    "verification_passed",
+                    "passed",
+                )
+            },
+        }
+        for task_id in expected_task_ids
+    ]
+    return summary
+
+
+def run_repeats(args, tasks: list[dict], fixture_hash: str) -> int:
+    if args.repeats == 1:
+        return run_suite(args, tasks, fixture_hash)
+    output = args.output.resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    reports = []
+    for repeat in range(1, args.repeats + 1):
+        repeat_args = argparse.Namespace(**vars(args))
+        repeat_args.output = output / f"repeat-{repeat}"
+        repeat_args.repeat_id = repeat
+        repeat_args.artifact_dir = output
+        run_suite(repeat_args, tasks, fixture_hash)
+        reports.append(json.loads((repeat_args.output / "report.json").read_text(encoding="utf-8")))
+    aggregate = aggregate_reports(
+        reports, expected_task_ids=[task["id"] for task in tasks], expected_repeats=args.repeats
+    )
+    write_json(output / "aggregate.json", aggregate)
+    return 0 if aggregate["passed"] == aggregate["observations"] else 1
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list", action="store_true")
@@ -411,6 +832,11 @@ def main(argv=None) -> int:
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--max-calls", type=int, default=8)
     parser.add_argument("--max-output-tokens", type=int, default=4096)
+    parser.add_argument("--repeat-id", type=int, default=1)
+    parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument(
+        "--aggregate", nargs="+", type=Path, help="summarize existing reports without model calls"
+    )
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.worker:
@@ -429,13 +855,32 @@ def main(argv=None) -> int:
     if args.self_check:
         self_check(tasks)
         return 0
+    if args.repeats < 1 or args.repeat_id < 1 or (args.repeats > 1 and args.repeat_id != 1):
+        parser.error("repeats and repeat-id must be positive; multiple repeats start at 1")
+    if args.repeats > 1 and args.task:
+        parser.error("repeated evidence requires the complete frozen task suite")
+    if args.aggregate:
+        if args.output is None:
+            parser.error("aggregation requires a new --output directory")
+        reports = [json.loads(path.read_text(encoding="utf-8")) for path in args.aggregate]
+        aggregate = aggregate_reports(
+            reports, expected_task_ids=[task["id"] for task in tasks], expected_repeats=args.repeats
+        )
+        args.output.mkdir(parents=True, exist_ok=False)
+        write_json(args.output / "aggregate.json", aggregate)
+        return 0
     if not args.model or not args.output:
         parser.error("live runs require --model and --output")
+    if (
+        not math.isfinite(args.timeout)
+        or args.timeout <= 0
+        or args.max_calls <= 0
+        or args.max_output_tokens <= 0
+    ):
+        parser.error("all limits must be finite and positive")
     if os.name != "nt":
         parser.error("live acceptance currently requires native Windows process-tree containment")
-    if args.timeout <= 0 or args.max_calls <= 0 or args.max_output_tokens <= 0:
-        parser.error("all limits must be positive")
-    return run_suite(args, tasks, fixture_hash)
+    return run_repeats(args, tasks, fixture_hash)
 
 
 if __name__ == "__main__":

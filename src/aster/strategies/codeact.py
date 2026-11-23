@@ -23,6 +23,7 @@ import json
 import logging
 import types
 import typing
+import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -36,8 +37,10 @@ from typing import (
 )
 from uuid import uuid4
 
-from pydantic import BaseModel, create_model
+from pydantic import BaseModel, ConfigDict, PydanticUserError, create_model
 from pydantic import ValidationError as PydanticValidationError
+from pydantic.warnings import ArbitraryTypeWarning
+from pydantic_core import SchemaError
 
 from aster.agentdoc._structured import format_type as _format_type
 from aster.context_blocks import DynamicContext, EventBase, ResultStatus, ToolCallEvent, ToolResult
@@ -71,6 +74,7 @@ from aster.strategy_validation import (
     run_postconditions,
     run_preconditions,
 )
+from aster.task_budget import TaskBudgetError
 from aster.unifiedllm import (
     AdmissionError,
     AdmissionQueueFullError,
@@ -111,7 +115,7 @@ def _raise_if_admission_queue_full(error: Exception | None) -> None:
     """Propagate policy rejections, including authenticated sandbox originals."""
     if isinstance(error, SandboxExecutionError):
         error = error.original_error
-    if isinstance(error, AdmissionQueueFullError):
+    if isinstance(error, (AdmissionQueueFullError, TaskBudgetError)):
         raise error
 
 
@@ -381,7 +385,7 @@ class CodeActSession:
         except Exception as exc:
             if state.exception is None:  # Don't overwrite caller-set value
                 state.exception = type(exc).__name__
-            if isinstance(exc, AdmissionQueueFullError):
+            if isinstance(exc, (AdmissionQueueFullError, TaskBudgetError)):
                 state.is_final = True
             raise
         finally:
@@ -981,7 +985,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         try:
             with _init_hm.timer("time_prefill"):
                 await self._run_prefill(runtime, call, builtins, session)
-        except (ReasoningReplayError, AdmissionQueueFullError):
+        except (ReasoningReplayError, AdmissionQueueFullError, TaskBudgetError):
             raise
         except Exception as e:
             logger.warning(f"[CODEACT] Prefill error (continuing): {e}")
@@ -1030,7 +1034,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         tool_choice=tool_choice,
                         **self._build_sampling_kwargs(),
                     )
-                except (ReasoningReplayError, AdmissionError):
+                except (ReasoningReplayError, AdmissionError, TaskBudgetError):
                     # Admission is an application policy decision, not a provider
                     # failure that an immediate strategy retry can repair.
                     turn_state.is_final = True
@@ -2129,32 +2133,75 @@ Standard Python builtins and agent instance (`self`) are available."""
                     return_type,
                     method_name,
                 )
-                if success:
-                    # Add execution output event
+            except Exception as e:
+                logger.debug(f"[CODEACT] Auto-completion validation error: {e}, continuing loop")
+                success = False
+
+            if success:
+                # Keep postcondition infrastructure failures outside the type-validation
+                # fallback. Only an InvariantError is feedback the model can correct.
+                try:
+                    run_postconditions(runtime.agent, validated, call, self.config.postconditions)
+                except InvariantError as error:
+                    hm.validation_error(type(error).__name__, str(error)[:500])
+                    session.record_error()
+                    error_msg = format_validation_error(
+                        error, return_type, validated, runtime.truncation_config
+                    )
+                    runtime.event_manager.update(
+                        tool_call_event_id,
+                        result=ToolResult(
+                            tool_call_id=tool_call.id,
+                            content=_EXECUTE_PYTHON_RECEIPT,
+                            result_status=ResultStatus.ERROR,
+                        ),
+                    )
                     runtime.event_manager.add(
                         PythonOutput(
                             tool_call_id=tool_call.id,
                             execution_count=execution_count,
                             stdout=result.stdout,
-                            stderr=result.stderr,
-                            value=result.returned_value,
+                            stderr=(
+                                f"{result.stderr}\nreturn validation error: {error_msg}"
+                                if result.stderr
+                                else f"return validation error: {error_msg}"
+                            ),
+                            value=None,
                             explicit_return=result.explicit_return,
-                            execution_status=ResultStatus.COMPLETE,
+                            execution_status=ResultStatus.ERROR,
                             images=result.images,
                         )
                     )
-                    get_harness_metrics().explicit_return_completed()
-                    # Record a trace-only completion marker. Both CodeAct variants
-                    # omit this marker from provider replay: it was not an LLM call.
-                    self._emit_synthetic_inline_return(runtime, validated)
-                    logger.info("[CODEACT] Auto-completed task from explicit return statement")
-                    return ("TASK_COMPLETE", validated)
-                # Validation failed - continue with normal flow
-                logger.debug(
-                    "[CODEACT] Auto-completion validation failed (type mismatch), continuing loop"
+                    if session.is_exhausted():
+                        raise GenerationError(
+                            f"return validation failed after {session.max_retries} attempts.\n"
+                            f"Last error:\n{error_msg}"
+                        ) from error
+                    return None
+
+                # Add execution output event
+                runtime.event_manager.add(
+                    PythonOutput(
+                        tool_call_id=tool_call.id,
+                        execution_count=execution_count,
+                        stdout=result.stdout,
+                        stderr=result.stderr,
+                        value=result.returned_value,
+                        explicit_return=result.explicit_return,
+                        execution_status=ResultStatus.COMPLETE,
+                        images=result.images,
+                    )
                 )
-            except Exception as e:
-                logger.debug(f"[CODEACT] Auto-completion validation error: {e}, continuing loop")
+                get_harness_metrics().explicit_return_completed()
+                # Record a trace-only completion marker. Both CodeAct variants
+                # omit this marker from provider replay: it was not an LLM call.
+                self._emit_synthetic_inline_return(runtime, validated)
+                logger.info("[CODEACT] Auto-completed task from explicit return statement")
+                return ("TASK_COMPLETE", validated)
+            # Validation failed - continue with normal flow
+            logger.debug(
+                "[CODEACT] Auto-completion validation failed (type mismatch), continuing loop"
+            )
 
         # Note: Bare expressions (IPython-style) are shown as "Out[n]:" but do NOT auto-complete.
         # Only explicit `return x` statements can auto-complete the task.
@@ -2296,8 +2343,8 @@ Standard Python builtins and agent instance (`self`) are available."""
             # Normalize args to always have "result" key
             # ── Return result normalization ──────────────────────────
             # Intercept point: normalizes return_result args before
-            # Pydantic validation. Handles args wrapping, GPT-4o
-            # double-quote fix, variable ref resolution, JSON parsing.
+            # Pydantic validation. Handles args wrapping, variable reference
+            # resolution, JSON parsing, and constructor-call coercion.
             # Consider making extensible in the future.
 
             # Be flexible: accept both return_result(result=...) and return_result(field1=..., field2=...)
@@ -2310,21 +2357,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # Already has "result" key, use as-is
                 normalized_args = args
 
-            # Fix GPT-4o-mini double-quoting bug: LLM sometimes wraps string in extra quotes
-            # with escaped newlines. Detect and unwrap: "\"code\\n\"" -> "code\n"
-            # Safe because legitimate code never starts/ends with " AND contains \\n
-            if "result" in normalized_args and isinstance(normalized_args["result"], str):
-                result_val = normalized_args["result"]
-                if result_val.startswith('"') and result_val.endswith('"') and "\\n" in result_val:
-                    # Unwrap the extra quotes and decode escaped characters
-                    get_harness_metrics().gpt4o_double_quote_fix(result_val)
-                    normalized_args["result"] = result_val[1:-1].encode().decode("unicode_escape")
-
-            # Create wrapper model: class ReturnResultModel(BaseModel): result: T
-            # For non-Pydantic types (e.g. pd.DataFrame), falls back to Any in the model
-            ReturnResultModel, is_pydantic_validated = self._create_return_model(
-                return_type, method_name
-            )
+            ReturnResultModel = self._create_return_model(return_type, method_name)
 
             # Handle case where LLM passes a string instead of actual object.
             # Don't transform if the expected return type IS str — the string should stay as-is.
@@ -2363,19 +2396,6 @@ Standard Python builtins and agent instance (`self`) are available."""
             validated_model = ReturnResultModel(**normalized_args)
             validated = getattr(validated_model, "result")  # noqa: B009
 
-            # For non-Pydantic types, Pydantic accepted Any — do isinstance check.
-            # Unwrap Annotated[T, ...] first; isinstance() can't take Annotated as 2nd arg.
-            if not is_pydantic_validated and validated is not None:
-                base_type, _ = self._extract_annotated_description(return_type)
-                if not isinstance(validated, base_type):
-                    type_name = getattr(base_type, "__name__", str(base_type))
-                    raise TypeError(
-                        f"Expected an instance of {type_name}, "
-                        f"but got {type(validated).__name__}.\n"
-                        f"Hint: Use {self._python_tool_name()}() to construct the {type_name} object, "
-                        f"then call return_result(variable) from within the code."
-                    )
-
             # Method-local postconditions: deterministic invariants declared on
             # the strategy config that Pydantic return-type validation can't
             # express (e.g. live agent state). An ``InvariantError`` is caught by
@@ -2387,6 +2407,9 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         except (
             PydanticValidationError,
+            PydanticUserError,
+            SchemaError,
+            ArbitraryTypeWarning,
             InvariantError,
             ValueError,
             TypeError,
@@ -2400,6 +2423,13 @@ Standard Python builtins and agent instance (`self`) are available."""
             error_msg = format_validation_error(
                 e, return_type, actual_value, runtime.truncation_config
             )
+            if isinstance(e, PydanticValidationError) and any(
+                error["type"] == "is_instance_of" for error in e.errors()
+            ):
+                error_msg += (
+                    f"\nHint: Use {self._python_tool_name()}() to construct the required Python "
+                    "objects, then call return_result(variable) from within the code."
+                )
             logger.debug(f"[CODEACT] return_result validation failed: {e}")
 
             if session.is_exhausted():
@@ -2788,11 +2818,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     return (True, None)
                 return (False, None)
 
-            # Create wrapper model: class ReturnResultModel(BaseModel): result: T
-            # For non-Pydantic types, falls back to Any in the model
-            ReturnResultModel, is_pydantic_validated = self._create_return_model(
-                return_type, method_name
-            )
+            ReturnResultModel = self._create_return_model(return_type, method_name)
 
             # Handle case where value is a JSON string
             # BUT: Don't parse if the expected return type IS str - the string should stay as-is
@@ -2803,16 +2829,17 @@ Standard Python builtins and agent instance (`self`) are available."""
             validated_model = ReturnResultModel(result=value)
             validated = getattr(validated_model, "result")  # noqa: B009
 
-            # For non-Pydantic types, do isinstance check instead.
-            # Unwrap Annotated[T, ...] first; isinstance() can't take Annotated as 2nd arg.
-            if not is_pydantic_validated and validated is not None:
-                base_type, _ = self._extract_annotated_description(return_type)
-                if not isinstance(validated, base_type):
-                    return (False, None)
-
             return (True, validated)
 
-        except (PydanticValidationError, ValueError, TypeError, json.JSONDecodeError):
+        except (
+            PydanticValidationError,
+            PydanticUserError,
+            SchemaError,
+            ArbitraryTypeWarning,
+            ValueError,
+            TypeError,
+            json.JSONDecodeError,
+        ):
             return (False, None)
 
     def _build_execute_python_tool(self) -> Tool:
@@ -2871,27 +2898,15 @@ Standard Python builtins and agent instance (`self`) are available."""
         except Exception:  # noqa: BLE001 — feasibility probe; any failure → fall back to Any
             return False
 
-    def _create_return_model(self, return_type: Any, method_name: str) -> tuple[Any, bool]:
-        """Create a Pydantic model for return_result validation.
-
-        Returns:
-            Tuple of (model_class, is_pydantic_validated).
-            If the return type is Pydantic-compatible, returns the proper model and True.
-            If not, returns a model with Any and False (caller should do isinstance check).
-        """
-        if self._is_pydantic_compatible(return_type):
-            model = create_model(
+    def _create_return_model(self, return_type: Any, method_name: str) -> type[BaseModel]:
+        """Validate the real return type independently of the tool's JSON schema."""
+        # Pydantic otherwise widens unsupported annotations such as Never to Any.
+        with warnings.catch_warnings(action="error", category=ArbitraryTypeWarning):
+            return create_model(
                 f"{method_name.title().replace('_', '')}ReturnResult",
+                __config__=ConfigDict(arbitrary_types_allowed=True),
                 result=(return_type, ...),
             )
-            return model, True
-        else:
-            # Fall back to Any — accept any value, let caller do isinstance check
-            model = create_model(
-                f"{method_name.title().replace('_', '')}ReturnResult",
-                result=(Any, ...),
-            )
-            return model, False
 
     def _extract_annotated_description(self, type_hint: Any) -> tuple[Any, str | None]:
         """Extract the base type and first string metadata from Annotated.

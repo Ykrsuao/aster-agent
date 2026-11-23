@@ -25,6 +25,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from .usage import TokenUsageSummary
+
 # Supported schema versions
 SUPPORTED_VERSIONS = {"1"}
 
@@ -153,9 +155,10 @@ class EvalTestResult(BaseModel):
     trace_file: str | None = None  # Path to trace .jsonl
 
     # Token usage
-    input_tokens: int | None = None  # Number of input (prompt) tokens
-    output_tokens: int | None = None  # Number of output (completion) tokens
-    total_tokens: int | None = None  # Total tokens used
+    input_tokens: int | None = Field(default=None, strict=True, ge=0)
+    output_tokens: int | None = Field(default=None, strict=True, ge=0)
+    total_tokens: int | None = Field(default=None, strict=True, ge=0)
+    token_usage: TokenUsageSummary | None = None
 
     # Errors
     error: str | None = None  # Error message if failed
@@ -195,9 +198,10 @@ class EvalCompletionLine(BaseModel):
     duration_seconds: float | None = None
 
     # Token usage totals (summed across all results)
-    total_input_tokens: int | None = None
-    total_output_tokens: int | None = None
-    total_tokens: int | None = None
+    total_input_tokens: int | None = Field(default=None, strict=True, ge=0)
+    total_output_tokens: int | None = Field(default=None, strict=True, ge=0)
+    total_tokens: int | None = Field(default=None, strict=True, ge=0)
+    token_usage: TokenUsageSummary | None = None
 
     model_config = {"populate_by_name": True}
 

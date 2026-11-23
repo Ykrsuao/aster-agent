@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 
 import pytest
 
@@ -16,7 +17,7 @@ class FakeEventManager:
     def __init__(self):
         self.events: list = []
 
-    def add(self, event):
+    def add(self, event, *, record=True):
         self.events.append(event)
 
 
@@ -141,7 +142,7 @@ async def test_run_job_with_spawn():
 
 @pytest.mark.asyncio
 async def test_monitor_streams_stdout_lines():
-    gen = monitor('echo "hello" && echo "world"')
+    gen = monitor('echo "hello"; echo "world"')
     lines = []
     async for line in gen:
         lines.append(line)
@@ -154,16 +155,17 @@ async def test_monitor_with_spawn_and_buffer():
     qm = QueueManager(event_manager=em)
     ch = qm.queue("ci")
 
-    h = qm.spawn(
-        monitor('for i in 1 2 3; do echo "step $i"; done'),
-        channel="ci",
-        buffer=10,
+    command = (
+        'foreach ($i in 1..3) { Write-Output "step $i" }'
+        if sys.platform == "win32"
+        else 'for i in 1 2 3; do echo "step $i"; done'
     )
+    h = qm.spawn(monitor(command), channel="ci", buffer=10)
 
     lines = []
     for _ in range(3):
         lines.append(await asyncio.wait_for(ch.get(), timeout=2.0))
-    await asyncio.sleep(0.1)
+    await asyncio.wait_for(h._task, timeout=3.0)
 
     assert lines == ["step 1", "step 2", "step 3"]
     assert h.state == "done"
@@ -176,11 +178,12 @@ async def test_monitor_cancel_kills_subprocess():
     qm = QueueManager()
     ch = qm.queue("long")
 
-    h = qm.spawn(
-        monitor("while true; do echo tick; sleep 0.01; done"),
-        channel="long",
-        buffer=5,
+    command = (
+        "while ($true) { Write-Output tick; Start-Sleep -Milliseconds 10 }"
+        if sys.platform == "win32"
+        else "while true; do echo tick; sleep 0.01; done"
     )
+    h = qm.spawn(monitor(command), channel="long", buffer=5)
     await asyncio.wait_for(ch.get(), timeout=1.0)
     await h.cancel()
     assert h.state == "cancelled"

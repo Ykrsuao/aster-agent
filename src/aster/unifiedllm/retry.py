@@ -14,6 +14,7 @@ import time
 from collections.abc import Callable
 from typing import Any, TypeVar
 
+from aster.task_budget import TaskBudgetError
 from aster.unifiedllm.admission import AdmissionError
 from aster.unifiedllm.errors import EmptyContentError
 from aster.unifiedllm.retry_config import RetryConfig
@@ -150,7 +151,7 @@ def _is_retryable_error(error: Exception, config: RetryConfig) -> tuple[bool, bo
     # immediately rejoin the same queue, a call-cap rejection cannot succeed,
     # and a controller outage should not be mistaken for a provider outage.
     # A higher-level workflow may still retry later if appropriate.
-    if isinstance(error, AdmissionError):
+    if isinstance(error, (AdmissionError, TaskBudgetError)):
         return False, False
 
     # Check for empty content error (if enabled)

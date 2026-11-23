@@ -56,9 +56,16 @@ impl Entry {
             } else {
                 format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
             };
-            let kind = if attachment.is_image() { "Image" } else { "File" };
+            let kind = if attachment.is_image() {
+                "Image"
+            } else {
+                "File"
+            };
             let format = if attachment.is_image() {
-                attachment.mime_type().trim_start_matches("image/").to_uppercase()
+                attachment
+                    .mime_type()
+                    .trim_start_matches("image/")
+                    .to_uppercase()
             } else {
                 attachment.mime_type().into()
             };
@@ -87,10 +94,45 @@ pub struct Session {
     pub updated: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Command {
     pub name: String,
     pub description: String,
+    pub argument_hint: String,
+    pub completions: Vec<String>,
+    pub is_skill: bool,
+    pub aliases: Vec<String>,
+}
+
+impl Command {
+    fn label(&self, name: &str) -> String {
+        if self.argument_hint.is_empty() {
+            name.into()
+        } else {
+            format!("{name} {}", self.argument_hint)
+        }
+    }
+
+    fn matches_name(&self, name: &str) -> bool {
+        self.name == name
+            || (self.is_skill && {
+                let query = name.to_lowercase();
+                self.name.to_lowercase() == query
+                    || self
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.to_lowercase() == query)
+            })
+    }
+
+    fn completion_name(&self, query: &str) -> Option<&str> {
+        let mut names =
+            std::iter::once(self.name.as_str()).chain(self.aliases.iter().map(String::as_str));
+        names
+            .clone()
+            .find(|name| name.to_lowercase() == query)
+            .or_else(|| names.find(|name| name.to_lowercase().starts_with(query)))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,6 +166,16 @@ pub struct SkillsBrowser {
     pub truncated: bool,
 }
 
+#[derive(Default)]
+pub struct McpBrowser {
+    pub supported: bool,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub servers: Vec<Value>,
+    pub warnings: Vec<String>,
+    pub generation: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Overlay {
     Commands,
@@ -136,6 +188,7 @@ pub enum Overlay {
     Hud,
     HudInfo,
     Skills,
+    Mcp,
     Context,
     Queue,
     Search,
@@ -247,6 +300,13 @@ pub struct Choice {
     pub value: String,
 }
 
+pub(crate) struct DraftCompletion {
+    pub row: usize,
+    pub start: usize,
+    pub end: usize,
+    pub choices: Vec<Choice>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ApprovalOption {
     pub id: String,
@@ -333,6 +393,7 @@ pub struct State {
     pub sessions: Vec<Session>,
     pub saved_drafts: Vec<crate::drafts::LoadedDraft>,
     pub commands: Vec<Command>,
+    pub commands_received: bool,
     pub editor: TextArea<'static>,
     pub(crate) composer: crate::composer::ComposerState,
     pub(crate) reading_selection: crate::text_selection::SelectionState,
@@ -365,6 +426,7 @@ pub struct State {
     pub runtime: Value,
     pub model_selection: ModelSelection,
     pub skills: SkillsBrowser,
+    pub mcp: McpBrowser,
     /// Effort changes stay local to the model picker until Enter confirms them.
     pub model_effort_drafts: HashMap<String, Option<String>>,
     pub mode: String,
@@ -435,6 +497,7 @@ impl State {
             sessions: Vec::new(),
             saved_drafts: Vec::new(),
             commands: default_commands(),
+            commands_received: false,
             editor: TextArea::default(),
             composer: crate::composer::ComposerState::default(),
             reading_selection: crate::text_selection::SelectionState::default(),
@@ -464,6 +527,7 @@ impl State {
             runtime: Value::Null,
             model_selection: ModelSelection::default(),
             skills: SkillsBrowser::default(),
+            mcp: McpBrowser::default(),
             model_effort_drafts: HashMap::new(),
             mode: "code".into(),
             approval_policy: "backend".into(),
@@ -548,6 +612,7 @@ impl State {
                     | Overlay::Permissions
                     | Overlay::Sandbox
                     | Overlay::Tasks
+                    | Overlay::Mcp
                     | Overlay::Hud
             )
         ) || (self.overlay == Some(Overlay::Skills) && self.skills.detail.is_none())
@@ -572,6 +637,8 @@ impl State {
         self.skills.generation = self.skills.generation.wrapping_add(1);
         self.skills.detail = None;
         self.skills.loading = false;
+        self.mcp.generation = self.mcp.generation.wrapping_add(1);
+        self.mcp.loading = false;
         self.focus_runtime_choice();
     }
 
@@ -714,25 +781,190 @@ impl State {
             && !self.session_tree.has_search_results(&self.query)
     }
 
-    /// Command suggestions belong to the draft, independently of modal pickers.
-    pub fn slash_choices(&self) -> Vec<Choice> {
-        if self.overlay.is_some() || self.slash_dismissed || self.editor.lines().len() != 1 {
-            return Vec::new();
-        }
-        let text = &self.editor.lines()[0];
-        if !text.starts_with('/') || text.chars().any(char::is_whitespace) {
-            return Vec::new();
-        }
-        let query = text.to_lowercase();
+    pub fn is_skill_command(&self, name: &str) -> bool {
         self.commands
             .iter()
-            .filter(|command| command.name.to_lowercase().starts_with(&query))
-            .map(|command| Choice {
-                label: command.name.clone(),
-                detail: command.description.clone(),
-                value: command.name.clone(),
+            .find(|command| command.matches_name(name))
+            .is_some_and(|command| command.is_skill)
+    }
+
+    pub fn is_known_command(&self, name: &str) -> bool {
+        matches!(name, "/" | "/quit")
+            || self
+                .commands
+                .iter()
+                .any(|command| command.matches_name(name))
+    }
+
+    pub fn slash_choice_fills_draft(&self, choice: &Choice) -> bool {
+        choice.value.starts_with('$')
+            || choice.value.chars().any(char::is_whitespace)
+            || self.commands.iter().any(|command| {
+                command.matches_name(&choice.value)
+                    && (command.is_skill || !command.argument_hint.is_empty())
             })
-            .collect()
+    }
+
+    pub fn slash_choice_is_exact(&self, choice: &Choice) -> bool {
+        let command = self.editor.lines()[0]
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        command == "/" || choice.value.eq_ignore_ascii_case(command)
+    }
+
+    /// Slash commands and inline skill mentions share the composer menu.
+    pub fn slash_choices(&self) -> Vec<Choice> {
+        self.draft_completion()
+            .map_or_else(Vec::new, |completion| completion.choices)
+    }
+
+    pub(crate) fn draft_completion(&self) -> Option<DraftCompletion> {
+        if self.overlay.is_some()
+            || self.slash_dismissed
+            || self
+                .editor
+                .selection_range()
+                .is_some_and(|(start, end)| start != end)
+        {
+            return None;
+        }
+        let tui_textarea::DataCursor(row, column) = self.editor.cursor();
+        let line = self.editor.lines().get(row)?;
+        let characters: Vec<_> = line.chars().collect();
+
+        let mut start = column;
+        while start > 0 && skill_name_character(characters[start - 1]) {
+            start -= 1;
+        }
+        if start > 0 && characters[start - 1] == '$' {
+            let marker = start - 1;
+            if marker > 0
+                && (skill_name_character(characters[marker - 1])
+                    || matches!(characters[marker - 1], '/' | '\\' | '$' | '='))
+            {
+                return None;
+            }
+            if skill_reference_in_code(self.editor.lines(), row, marker) {
+                return None;
+            }
+            let mut end = column;
+            while end < characters.len() && skill_name_character(characters[end]) {
+                end += 1;
+            }
+            if characters
+                .get(end)
+                .is_some_and(|value| matches!(value, '/' | '\\'))
+            {
+                return None;
+            }
+            let token = format!("/{}", characters[start..end].iter().collect::<String>());
+            if !self
+                .commands
+                .iter()
+                .any(|command| command.is_skill && command.matches_name(&token))
+            {
+                while end > column && characters[end - 1] == '.' {
+                    end -= 1;
+                }
+            }
+            let query = format!(
+                "/{}",
+                characters[start..column]
+                    .iter()
+                    .collect::<String>()
+                    .to_lowercase()
+            );
+            let choices = self
+                .commands
+                .iter()
+                .filter(|command| command.is_skill)
+                .filter_map(|command| {
+                    let name = command.completion_name(&query)?.strip_prefix('/')?;
+                    Some(Choice {
+                        label: format!("${name}"),
+                        detail: command.description.clone(),
+                        value: format!("${name}"),
+                    })
+                })
+                .collect();
+            return Some(DraftCompletion {
+                row,
+                start: marker,
+                end,
+                choices,
+            });
+        }
+
+        if row != 0 {
+            return None;
+        }
+        let start = characters.iter().position(|value| !value.is_whitespace())?;
+        if characters[start] != '/' || column <= start {
+            return None;
+        }
+        let end = characters[start..]
+            .iter()
+            .position(|value| value.is_whitespace())
+            .map_or(characters.len(), |length| start + length);
+        if column > end {
+            // Typed commands can still advertise first-argument completions.
+            if self.editor.lines().len() != 1 || column != characters.len() {
+                return None;
+            }
+            let (name, argument) = line.trim_start().split_once(char::is_whitespace)?;
+            if argument.chars().any(char::is_whitespace) {
+                return None;
+            }
+            let command = self
+                .commands
+                .iter()
+                .find(|command| command.name.eq_ignore_ascii_case(name))?;
+            let query = argument.to_lowercase();
+            return Some(DraftCompletion {
+                row,
+                start,
+                end: column,
+                choices: command
+                    .completions
+                    .iter()
+                    .filter(|value| value.to_lowercase().starts_with(&query))
+                    .map(|value| Choice {
+                        label: format!("{} {value}", command.name),
+                        detail: "Insert argument; finish your message before sending".into(),
+                        value: format!("{} {value}", command.name),
+                    })
+                    .collect(),
+            });
+        }
+        let token = characters[start..end].iter().collect::<String>();
+        // The session response can precede its command catalog.
+        if !self.commands_received && token != "/" && !self.is_known_command(&token) {
+            return None;
+        }
+        let query = characters[start..column]
+            .iter()
+            .collect::<String>()
+            .to_lowercase();
+        let mut choices: Vec<_> = self
+            .commands
+            .iter()
+            .filter_map(|command| {
+                let name = command.completion_name(&query)?;
+                Some(Choice {
+                    label: command.label(name),
+                    detail: command.description.clone(),
+                    value: name.into(),
+                })
+            })
+            .collect();
+        choices.sort_by_key(|choice| choice.value.to_lowercase() != query);
+        Some(DraftCompletion {
+            row,
+            start,
+            end,
+            choices,
+        })
     }
 
     pub fn choices(&self) -> Vec<Choice> {
@@ -792,19 +1024,57 @@ impl State {
         }
         let query = self.query.to_lowercase();
         let choices: Vec<Choice> = match self.overlay {
-            Some(Overlay::Skills) if !self.skills.loading && self.skills.error.is_none()
-                && self.skills.detail.is_none() => self.skills.items.iter().filter_map(|skill| {
-                let name = skill["name"].as_str()?;
-                let active = skill["active"] == true;
-                let status = if active { "Active" } else if skill["loaded"] == true {
-                    "Available"
-                } else { "Not loaded" };
-                Some(Choice {
-                    label: format!("{} {}", if active { "✓" } else { "·" }, clean(name)),
-                    detail: format!("{status} · {}", clean(skill["description"].as_str().unwrap_or(""))),
-                    value: name.into(),
+            Some(Overlay::Mcp) if !self.mcp.loading && self.mcp.error.is_none() => self
+                .mcp
+                .servers
+                .iter()
+                .filter_map(|server| {
+                    let name = server["name"].as_str()?;
+                    Some(Choice {
+                        label: format!(
+                            "{} · {}",
+                            clean(name),
+                            clean(server["state"].as_str().unwrap_or("unknown"))
+                        ),
+                        detail: format!(
+                            "{} · {} · {} tools loaded",
+                            clean(server["source"].as_str().unwrap_or("unknown source")),
+                            clean(server["transport"].as_str().unwrap_or("unknown transport")),
+                            server["toolCount"].as_u64().unwrap_or(0)
+                        ),
+                        value: name.into(),
+                    })
                 })
-            }).collect(),
+                .collect(),
+            Some(Overlay::Skills)
+                if !self.skills.loading
+                    && self.skills.error.is_none()
+                    && self.skills.detail.is_none() =>
+            {
+                self.skills
+                    .items
+                    .iter()
+                    .filter_map(|skill| {
+                        let name = skill["name"].as_str()?;
+                        let active = skill["active"] == true;
+                        let status = if active {
+                            "Active"
+                        } else if skill["loaded"] == true {
+                            "Available"
+                        } else {
+                            "Not loaded"
+                        };
+                        Some(Choice {
+                            label: format!("{} {}", if active { "✓" } else { "·" }, clean(name)),
+                            detail: format!(
+                                "{status} · {}",
+                                clean(skill["description"].as_str().unwrap_or(""))
+                            ),
+                            value: name.into(),
+                        })
+                    })
+                    .collect()
+            }
             Some(Overlay::Hud) => self.hud.choices(),
             Some(Overlay::Rollback) => {
                 let mut scopes = vec![Choice {
@@ -895,7 +1165,7 @@ impl State {
                 },
                 Choice {
                     label: "Plan".into(),
-                    detail: "Plan from supplied context without running tools".into(),
+                    detail: "Inspect workspace files and plan without changing files".into(),
                     value: "plan".into(),
                 },
             ],
@@ -993,7 +1263,7 @@ impl State {
                 .commands
                 .iter()
                 .map(|c| Choice {
-                    label: c.name.clone(),
+                    label: c.label(&c.name),
                     detail: c.description.clone(),
                     value: c.name.clone(),
                 })
@@ -1180,6 +1450,108 @@ fn reasoning_choices(metadata: &Value) -> Vec<Choice> {
     choices
 }
 
+fn skill_name_character(character: char) -> bool {
+    character.is_alphanumeric() || matches!(character, '_' | '.' | ':' | '-' | '[' | ']')
+}
+
+fn markdown_container_content(mut line: &str) -> (&str, usize) {
+    let mut quotes = 0;
+    loop {
+        line = line.trim_start();
+        if let Some(content) = line.strip_prefix('>') {
+            quotes += 1;
+            line = content;
+            continue;
+        }
+        if let Some(content) = ["- ", "* ", "+ ", "-\t", "*\t", "+\t"]
+            .iter()
+            .find_map(|prefix| line.strip_prefix(prefix))
+        {
+            line = content;
+            continue;
+        }
+        let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 0
+            && [". ", ") ", ".\t", ")\t"]
+                .iter()
+                .any(|suffix| line[digits..].starts_with(suffix))
+        {
+            line = &line[digits + 2..];
+            continue;
+        }
+        return (line, quotes);
+    }
+}
+
+fn skill_reference_in_code(lines: &[String], row: usize, column: usize) -> bool {
+    if lines[row].starts_with("    ") || lines[row].trim_start_matches(' ').starts_with('\t') {
+        return true;
+    }
+    let mut fence: Option<(char, usize, usize)> = None;
+    let mut inline_ticks = 0;
+    for (index, line) in lines.iter().enumerate().take(row + 1) {
+        let (trimmed, quotes) = if let Some((_, _, quotes)) = fence {
+            // Only the opening container can prefix a closing fence.
+            let mut content = Some(line.as_str());
+            for _ in 0..quotes {
+                content = content.and_then(|value| value.trim_start().strip_prefix('>'));
+            }
+            (content.unwrap_or("").trim_start(), quotes)
+        } else {
+            markdown_container_content(line)
+        };
+        let marker = trimmed.chars().next().unwrap_or(' ');
+        let length = trimmed.chars().take_while(|value| *value == marker).count();
+        if matches!(marker, '`' | '~') && length >= 3 {
+            if let Some((open, minimum, _)) = fence {
+                if marker == open && length >= minimum && trimmed[length..].trim().is_empty() {
+                    fence = None;
+                }
+            } else if inline_ticks == 0 {
+                fence = Some((marker, length, quotes));
+            }
+            if index == row {
+                return true;
+            }
+            continue;
+        }
+        if fence.is_some() {
+            if index == row {
+                return true;
+            }
+            continue;
+        }
+        let characters: Vec<_> = line.chars().collect();
+        let limit = if index == row {
+            column
+        } else {
+            characters.len()
+        };
+        let mut cursor = 0;
+        while cursor < limit {
+            if characters[cursor] == '\\' && inline_ticks == 0 {
+                cursor += 2;
+                continue;
+            }
+            if characters[cursor] != '`' {
+                cursor += 1;
+                continue;
+            }
+            let run = characters[cursor..limit]
+                .iter()
+                .take_while(|value| **value == '`')
+                .count();
+            if inline_ticks == 0 {
+                inline_ticks = run;
+            } else if inline_ticks == run {
+                inline_ticks = 0;
+            }
+            cursor += run;
+        }
+    }
+    fence.is_some() || inline_ticks != 0
+}
+
 pub fn default_commands() -> Vec<Command> {
     [
         ("/new", "Save and start a new conversation"),
@@ -1219,7 +1591,7 @@ pub fn default_commands() -> Vec<Command> {
             "Choose reasoning effort; default restores model defaults",
         ),
         ("/mode", "Choose Code or Plan mode"),
-        ("/plan", "Enter planning mode with execution disabled"),
+        ("/plan", "Plan with read-only workspace inspection"),
         ("/code", "Return to Code mode"),
         ("/permissions", "Choose Auto, Manual, Accept edits or Plan"),
         (
@@ -1227,7 +1599,14 @@ pub fn default_commands() -> Vec<Command> {
             "Choose Python sandbox; on or off changes this session",
         ),
         ("/tasks", "Inspect plan steps and background jobs (Alt+T)"),
-        ("/skills", "Browse available skills, active status and documentation"),
+        (
+            "/skills",
+            "Browse available skills, active status and documentation",
+        ),
+        (
+            "/mcp",
+            "Inspect MCP servers; reconnect <name> retries discovery",
+        ),
         ("/stop", "Stop a selected background job by its task ID"),
         (
             "/search",
@@ -1251,6 +1630,7 @@ pub fn default_commands() -> Vec<Command> {
     .map(|(name, description)| Command {
         name: name.into(),
         description: description.into(),
+        ..Command::default()
     })
     .collect()
 }

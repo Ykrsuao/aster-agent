@@ -5,7 +5,7 @@
 ### Root-level tests
 Broad framework tests: metaclass behavior, event system, sandbox, error formatting, actor, decorator/strategy wiring, method definition, media handling, storage compatibility, skill registry, visibility, and module imports.
 
-`test_native_windows.py` covers host imports and CLI startup without a platform override, scripted agent execution, file-backed storage locking, and native PowerShell behavior. PowerShell-specific tests run only on Windows. The `windows-core-smoke` job in `.github/workflows/ci.yml` installs built wheels into a clean environment and runs `scripts/windows_smoke.py` plus targeted regressions. The separate `.github/workflows/wsl.yml` workflow provides additional Linux coverage inside WSL 2.
+`test_native_windows.py` covers host imports and CLI startup without a platform override, scripted agent execution, file-backed storage locking, and native PowerShell behavior. PowerShell-specific tests run only on Windows. The `windows-core-smoke` job in `.github/workflows/ci.yml` installs built wheels into a clean environment and runs `scripts/windows_smoke.py` plus targeted regressions. The separate `.github/workflows/wsl.yml` workflow provides additional Linux host coverage inside WSL 2: focused regressions in quick mode and the full non-integration, non-stress, non-sandbox suite in full mode. Real microVM containment is verified by the `Linux sandbox` job in `.github/workflows/ci.yml`, which installs the sandbox runtime and checks virtualization before running sandbox tests.
 
 ### `agentdoc/` - Agent documentation and visibility
 `doc(self)` rendering, visibility rules, referenced types, annotated parameters and fields, truncating `pformat`/`pprint`, metadata, protocols, and fixture modules under `agentdoc/fixtures/`.

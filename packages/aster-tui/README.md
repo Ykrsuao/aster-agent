@@ -194,6 +194,40 @@ execute skill code, or make a model call. Unloaded plugins may have only their
 registered metadata available, which is shown explicitly instead of loading
 them to obtain documentation. Display limits are marked when data is truncated.
 
+Invoke a loaded `SKILL.md` skill with `/name [task]`, or mention `$name` in
+normal task text:
+
+```text
+/aster-agent-authoring Add an agent that classifies support requests.
+Use $aster-agent-authoring to add an agent that classifies support requests.
+```
+
+Type `/` to choose a command, or `$` followed by part of a skill name to choose a
+skill in your message. For skill suggestions, Tab or Enter completes the selected
+token without sending; finish your task and press Enter to send. Completion
+preserves the surrounding text, line breaks, and attachments. `/skills` opens the
+read-only browser.
+The picker uses a valid frontmatter `name`; if it is invalid, it tries the
+directory ID. An unusable or conflicting choice falls back to a qualified
+registry name such as `cmd.aster-agent-authoring`. Each skill appears once in
+the menu. Safe directory IDs and qualified names advertised by the backend also
+work as aliases: type an alias directly, or part of it to complete that alias.
+
+The skill catalog initially exposes names, descriptions, and source directories.
+Explicit invocation loads the selected instructions into the current task. The
+agent can also select a relevant skill from your task and read its instructions
+when needed; supporting files are read as needed. See the
+[ACP skill policy](../aster-acp/README.md#sessions-and-skills) for settings that
+control explicit and automatic invocation.
+
+Invoking a skill preserves the literal task text and attachments in the current
+conversation. Unknown mentions such as `$PATH`, escaped mentions, and mentions
+inside code remain literal. Quoted paths, line
+breaks, and placeholders such as `$ARGUMENTS` are not expanded by the host.
+Reading and selecting a skill does not run its scripts; work the agent carries
+out uses the session's normal execution permissions. Esc cancels the turn as
+usual. Reopening a saved session discovers skills again from their current files.
+
 The `reasoning` row shows the current runtime reasoning level, falling back to
 the level reported by the backend. With no reported level it shows `model default`;
 the provider's exact default effort remains unknown. `/hud show reasoning` enables
@@ -263,6 +297,30 @@ explicitly free calls remain zero. Old missing prices are not silently backfille
 The standard ACP cost field remains a complete session total; the HUD's known
 USD subtotal travels separately in Aster metadata so other clients do not mistake
 partial accounting for a complete total.
+
+## MCP servers
+
+Use `/mcp` to inspect configured MCP servers. The list shows each server's
+configuration source, transport, readiness, tool count and failure reason.
+Type to filter, use Up/Down to select, and Enter to inspect details. Ctrl+R
+refreshes the displayed state without launching a server. Ctrl+K retries the
+selected server; `/mcp reconnect NAME` retries a server directly after you fix
+its configuration or restore the service. Reconnection requires an idle session.
+
+The backend reads user `.mcp.json`, workspace `.mcp.json`, and client-supplied
+definitions, with client > workspace > user priority. Same-name entries are
+replaced as a whole. The panel's empty state shows the applicable file locations.
+Workspace definitions require the existing workspace trust approval. Stdio
+programs run in that workspace; HTTP and SSE accept explicit headers. See the
+[configuration examples and rules](../aster-acp/README.md#mcp-configuration-and-recovery).
+
+`ready` means tools were discovered or the last call succeeded. Connections are
+opened and closed for each discovery or call. Failures are visible without
+blocking the conversation, and status omits credentials and response bodies.
+Deleting a server or setting `disabled: true` takes effect when you reconnect
+that name or reopen the session. Status refresh alone does not apply edits.
+New and restored sessions read the current configuration; closing a session
+cancels in-flight MCP work and cleans up its transports.
 
 ## Context and cost
 
@@ -479,7 +537,7 @@ Commands: `/new`, `/sessions`, `/resume ID`, `/drafts`, `/tree`, `/rewind`, `/se
 `/steer TEXT`, `/attach [PATH]`, `/attachments`, `/retry`, `/reconnect`, `/model [ALIAS]`,
 `/effort [LEVEL|auto|status]`, `/reasoning [LEVEL|default]`, `/mode [code|plan]`,
 `/permissions [auto|manual|accept_edits|plan]`, `/sandbox [on|off]`, `/tasks`, `/stop JOB-ID`, `/tools`,
-`/changes`, `/undo`, `/status`, `/context [all]`, `/skills`, `/hud`, `/logs`, `/help`, `/cancel`, `/exit` and commands
+`/changes`, `/undo`, `/status`, `/context [all]`, `/skills`, `/mcp [reconnect NAME]`, `/hud`, `/logs`, `/help`, `/cancel`, `/exit` and commands
 advertised by the agent.
 The interface follows the layout observed in Grok Build 1.0.77: a grayscale
 canvas, full-width conversation, compact bordered composer and session title on
@@ -680,7 +738,7 @@ does not infer them from a model name.
 | Auto | Permit generated code and file changes, including deletion, without asking. |
 | Manual | Ask before executing generated code or making changes. |
 | Accept edits | Automatically allow supported file reads and edits; ask before commands and other code. |
-| Plan | Plan from supplied context with generated code and tool execution disabled. |
+| Plan | Read, list and search workspace files for planning; generated code and changes are disabled. |
 
 Use `/permissions auto`, `/permissions manual`, `/permissions accept_edits`, or
 `/permissions plan` to select a mode directly. Choosing Auto, Manual, or Accept edits
@@ -713,12 +771,31 @@ Ordinary conversation can return a written answer without executing code or
 requesting approval. A greeting combined with a coding task still follows the
 normal tool and approval flow. Native Windows shell commands use PowerShell.
 
-Plan mode disables all generated Python and tool execution. It can reason from
-conversation context and supplied file/image snapshots, and cannot inspect new
-workspace files through tools. Native and sandbox execution keep their existing
-backend behavior; choosing Plan does not create a separate read-only filesystem.
+Plan mode can inspect new workspace files through bounded host read, directory-list
+and literal-text-search operations. It continues to reject generated Python, shell
+commands, external tools and file changes. The model submits one literal
+`await self.files.read(...)`, `await self.files.list(...)`, or
+`await self.files.search(...)` request per cell; the host handles the request without
+evaluating Python or consulting mutable REPL bindings.
+
+Inspection stays inside the current workspace on Linux and Windows. Symbolic links,
+junctions, multiply linked files and special files are refused. Reads require UTF-8
+text of at most 2 MiB, and return at most 500 lines and 64K characters. Searches use
+literal, case-sensitive text and report truncated or skipped results; they inspect
+at most 2000 entries and 16 MiB per request, skipping common build/dependency
+directories. Narrow the directory or filename glob when a search is incomplete.
+
+This policy applies to model requests. User-entered slash commands retain their
+own host permissions. Native and sandbox backends retain their existing behavior;
+Plan does not turn the Python interpreter or the whole session into an OS sandbox.
 
 ## Reviewing and undoing file changes
+
+Configured [task verification checks](../aster-cli/README.md#interactive-coding-sessions)
+retain unverified edits and partial check results across turns and normal session
+reopens. Changed files or check settings invalidate old evidence. An unrelated
+answer can leave the coding task pending without running checks; its pending
+status is included in the reply. Checks remain opt-in through `coding.required_checks`.
 
 Open Git Changes with Ctrl+G, select a file, then press Ctrl+U. Choose all of its
 unstaged hunks or one hunk, inspect the proposed patch, and select Apply. The

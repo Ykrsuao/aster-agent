@@ -108,9 +108,10 @@ model and one run per condition, not a measured long-term reliability rate.
 
 For the next terminal candidate, complete the native Windows user journey from
 installation through editing, verification, interruption, recovery and upgrade.
-Linux remains supported and must still pass its existing checks. This checklist
-is a manual acceptance procedure; it is not an automated CI or publication gate.
-Passing the focused regressions below does not complete the acceptance process.
+Linux remains supported and must still pass its existing checks. The candidate
+gate below requires installation, upgrade, restored-task continuation and frozen
+task evidence. The other user-journey checks in this checklist remain manual;
+passing the focused regressions below does not complete those checks.
 
 After the development environment is installed, get focused feedback with:
 
@@ -155,11 +156,97 @@ Record the following evidence against one candidate commit and its artifacts:
   agree with observed behavior. Keep dated historical results separate from the
   candidate's results; leave anything not exercised explicitly pending.
 
-The optional `make_release.py` checks described below remain useful release
-evidence. `publish.yml` currently does not invoke them or enforce this checklist;
-review the recorded candidate evidence before publishing. In-process cancellation
-is cooperative and cannot promise to interrupt arbitrary blocking Python code.
+The optional `make_release.py` checks described below remain separate evidence.
+The publication workflow does not invoke that script. In-process cancellation is
+cooperative and cannot promise to interrupt arbitrary blocking Python code.
 Any claim about sandbox containment needs the separate real-microVM checks.
+
+## Candidate evidence required for publication
+
+Publication consumes the exact accepted wheel, source-distribution and Windows
+bundle bytes; it does not rebuild from a tag. `scripts/check_release_evidence.py`
+checks their hashes, five-package versions, clean source SHA, installed native
+executable, restored conversation and subsequent turn before making files
+available to the existing publishing jobs. A same-version reinstall is useful
+ordinary CI evidence but cannot satisfy the upgrade requirement.
+
+**Current prerequisite gap:** this repository does not yet contain the trusted
+real-model producer `.github/workflows/terminal-acceptance.yml`. Strict candidate
+acceptance therefore fails closed until that separately reviewed workflow and a
+previously distributed complete Windows bundle exist. A manually uploaded JSON,
+an offline scripted run, a historical dirty build or `passed: true` cannot fill
+the gap. These changes do not establish a distribution channel or claim that a
+real-version upgrade or real-model candidate has been accepted.
+
+Ordinary push and pull-request CI still runs without release inputs. Once the
+prerequisites are available, a maintainer can use the following sequence:
+
+1. Freeze the final `vX.Y.Z` tag on the chosen clean commit already reachable from
+   the repository's default branch. Run the candidate workflow on that tag so
+   wheels and the native bundle carry the final version before acceptance. Tag
+   creation does not trigger publication.
+2. Obtain a `terminal-task-acceptance` artifact from a successful manual run of
+   the trusted task workflow on that exact SHA. Its `Terminal task acceptance`
+   job must have succeeded. Select the non-secret resolved model configuration
+   fingerprint before requesting candidate acceptance.
+3. Manually dispatch `ci.yml` on the final tag with `release_candidate=true`,
+   `release_tag`, `upgrade_from_tag`, `task_report_artifact_id` and
+   `model_fingerprint`. `upgrade_from_tag` must identify an older, published
+   final release in this repository with its complete Windows ZIP and GitHub
+   asset digest. Missing history blocks this explicit candidate request, not
+   normal CI. The job installs the old bundle outside the checkout, saves a
+   task and draft, installs the candidate over it, reopens without rerunning the
+   old edit, then completes a new scripted turn and checks preserved bytes.
+4. After all required Linux, Windows, Python, Rust, build and security checks
+   succeed, CI seals one artifact containing the tested distributions and
+   evidence. Its name includes tag, full SHA and run attempt. The job summary
+   prints `Candidate artifact: ID`; retain that exact artifact ID. Candidate
+   artifacts are retained for 90 days, and required upstream task artifacts
+   must also remain available through publication.
+5. Rehearse via the existing `publish.yml` manual dispatch, supplying
+   `release_tag` and `candidate_artifact_id`. It still targets TestPyPI only.
+   For production, put the single unmodified `Candidate artifact: ID` line in
+   the GitHub release notes and publish that release using the existing
+   environment approval and Trusted Publishing setup. The production upload
+   remains reachable only through `release: published`.
+
+For each source artifact, the checker queries the GitHub API for repository and
+head-repository identity, workflow ID and path, full SHA, successful dispatch
+run, current attempt, required successful jobs and artifact digest. It downloads
+only through that API, verifies the downloaded archive and its file inventory,
+and resolves the final tag again before materializing upload files. Fork runs,
+other workflows, skipped jobs, expired artifacts and stale attempts are rejected.
+The publisher executes the current default-branch controller; source hashes for
+the task runner and fixtures are read at the frozen candidate SHA.
+
+The task producer contract extends `terminal_acceptance.py`'s version-1 report:
+
+- `report.json` retains the clean `candidate.commit`, `fixture_sha256`,
+  `runner_sha256`, all ten unique task IDs, exact `limits`, and per-task outcomes.
+  The current policy fixes 180 seconds, eight calls, 4,096 output tokens per call
+  and zero endpoint retries. Changing that policy requires a reviewed source
+  change before the run; twelve-call historical evidence is not interchangeable.
+- `measurement_kind` must be `live-model`, `report_complete` must be true and
+  `repeat_id` must be a positive integer. Every task must have `agent_completed`,
+  `verification_passed` and `passed` true, with `status: completed`.
+- The top-level and every task's `model_identity` and SHA256 `model_fingerprint`
+  must agree with the actual resolved worker configuration and the requested
+  fingerprint. The canonical fingerprint encoding matches
+  `terminal_acceptance.fingerprint_model`: sorted JSON keys, compact separators,
+  ASCII escaping and no NaN values. The producer must enforce its non-secret
+  identity whitelist; an alias alone is insufficient.
+- Integer `source_run_id` and `source_run_attempt` must match the API-authenticated
+  source. The checker verifies runner and fixture hashes against that candidate's
+  source files, not against a report's own claims.
+
+This gate accepts one explicitly identified complete task run. It does not
+aggregate repeats or turn one successful run into a reliability claim. Keep
+earlier failures and use the separate evaluation reports for comparisons.
+
+The checker performs no model requests, builds, uploads or release creation.
+Offline regression tests simulate GitHub responses and exercise rejected
+provenance, tampered files, incomplete tasks and insufficient upgrade evidence.
+Passing those tests validates the gate, not a distributable candidate.
 
 ## Configure a release channel
 
@@ -185,7 +272,8 @@ reconciliation before retrying.
 
 ## Publish and rehearse
 
-`.github/workflows/publish.yml` builds all five packages. Manual workflow runs
+`.github/workflows/publish.yml` verifies and downloads the accepted candidate.
+Manual workflow runs
 target TestPyPI; a published GitHub release targets PyPI. Configure Trusted
 Publishing for your actual repository and `publish.yml`, with a distinct
 `testpypi-<package>` or `pypi-<package>` environment for each distribution. Configure

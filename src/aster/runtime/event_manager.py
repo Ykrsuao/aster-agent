@@ -28,6 +28,7 @@ from aster.events import (
 )
 from aster.runtime.context_vars import _current_event_format_var, _get_agent_call_stack
 from aster.runtime.event_backend import EventBackend, InMemoryBackend
+from aster.task_budget import TaskBudgetError
 
 if TYPE_CHECKING:
     from aster.runtime.event_query import EventQuery
@@ -347,19 +348,24 @@ class EventManager:
         Snapshots handler lists before iterating so that handlers can safely
         subscribe or unsubscribe during emission without affecting the
         current cycle.  Exceptions in individual handlers are logged and
-        swallowed so one misbehaving handler cannot silence the rest.
+        swallowed so one misbehaving handler cannot silence the rest. Task
+        budget control results propagate to the host to stop further work.
         """
         event_type = event.event_type
 
         for handler in list(self._handlers[event_type]):
             try:
                 handler(event)
+            except TaskBudgetError:
+                raise
             except Exception:
                 logger.warning("Event handler %r raised", handler, exc_info=True)
 
         for handler in list(self._handlers["*"]):
             try:
                 handler(event)
+            except TaskBudgetError:
+                raise
             except Exception:
                 logger.warning("Wildcard handler %r raised", handler, exc_info=True)
 
@@ -678,6 +684,16 @@ class EventManager:
 
         if not tags_to_collapse:
             raise ValueError(f"No active events in range '{start_tag}'..'{end_tag}'")
+
+        if len(tags_to_collapse) == 1:
+            tag = tags_to_collapse[0]
+            existing = self._backend.get(tag)
+            if isinstance(existing, Summary):
+                # Reusing its tag must preserve the archive tree and active position.
+                self._backend.update(tag, summary_text=summary_text)
+                existing.summary_text = summary_text
+                self._emit(existing)
+                return tag
 
         # Archive the events and remove from active list
         for tag in tags_to_collapse:

@@ -8,10 +8,13 @@ import logging
 import os
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aster import workspace_trust
 from aster.layered_config import load_layered_yaml
+
+if TYPE_CHECKING:
+    from aster.task_budget import TaskBudgetLimits
 
 _SETTINGS_FILENAME = "settings.yaml"
 _SETTINGS_ENV_VAR = "ASTER_SETTINGS"
@@ -118,6 +121,87 @@ def load_required_checks(workspace: str | Path) -> dict[str, Any]:
     return result
 
 
+def load_task_budget(workspace: str | Path) -> TaskBudgetLimits | None:
+    """Read limits for a new task; existing tasks retain their saved declaration."""
+    from aster.task_budget import TaskBudgetLimits
+
+    root = Path(workspace).expanduser().resolve()
+    settings = load_layered_yaml(_SETTINGS_FILENAME, _SETTINGS_ENV_VAR, project_dir=root / ".aster")
+    coding = settings.get("coding")
+    if coding is None:
+        return None
+    if not isinstance(coding, Mapping):
+        raise ValueError("coding settings must be a mapping")
+    value = coding.get("task_budget")
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError("coding.task_budget must be a mapping")
+    return TaskBudgetLimits.model_validate(dict(value))
+
+
+def _project_memory_document(workspace: str | Path) -> tuple[Path, dict[str, Any]]:
+    """Read only the explicit settings belonging to this trusted workspace."""
+    import yaml
+
+    root = Path(workspace).expanduser().resolve()
+    if not workspace_trust.is_trusted(root):
+        raise ValueError("Project memory requires a trusted workspace.")
+    path = root / ".aster" / _SETTINGS_FILENAME
+    if not path.resolve().is_relative_to(root):
+        raise ValueError("Project memory settings must stay inside the workspace.")
+    try:
+        value = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except FileNotFoundError:
+        value = {}
+    except (OSError, UnicodeError, yaml.YAMLError):
+        raise ValueError("Project memory settings could not be read.") from None
+    if not isinstance(value, dict):
+        raise ValueError("Project settings must be a mapping.")
+    coding = value.get("coding", {})
+    if not isinstance(coding, dict):
+        raise ValueError("coding settings must be a mapping.")
+    memory = coding.get("project_memory", {})
+    if not isinstance(memory, dict):
+        raise ValueError("coding.project_memory must be a mapping.")
+    return path, value
+
+
+def load_project_memory_settings(workspace: str | Path) -> dict[str, Any]:
+    """Memory is opt-in per trusted project; user/global settings cannot enable it."""
+    if not workspace_trust.is_trusted(Path(workspace).expanduser().resolve()):
+        return {}
+    _, document = _project_memory_document(workspace)
+    result = document.get("coding", {}).get("project_memory", {})
+    if type(result.get("enabled", False)) is not bool:
+        raise ValueError("coding.project_memory.enabled must be true or false.")
+    return dict(result)
+
+
+def disable_project_memory(workspace: str | Path) -> None:
+    """Persist the explicit host /memory off command without changing other settings."""
+    import tempfile
+
+    import yaml
+
+    path, document = _project_memory_document(workspace)
+    document.setdefault("coding", {}).setdefault("project_memory", {})["enabled"] = False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staged: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=".settings-", delete=False
+        ) as stream:
+            staged = Path(stream.name)
+            yaml.safe_dump(document, stream, allow_unicode=True, sort_keys=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        staged.replace(path)
+    finally:
+        if staged is not None:
+            staged.unlink(missing_ok=True)
+
+
 def _setting_paths(settings: Mapping[str, Any], section: str) -> list[str | Path]:
     value = settings.get(section)
     if not isinstance(value, Mapping):
@@ -170,4 +254,4 @@ def _legacy_project_paths(path: Path) -> list[str | Path]:
     return [item for item in value if isinstance(item, str)]
 
 
-__all__ = ["load_coding_skills_dirs", "load_required_checks"]
+__all__ = ["load_coding_skills_dirs", "load_required_checks", "load_task_budget"]

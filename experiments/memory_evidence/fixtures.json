@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "source": "Synthetic facts authored for this repository; no user, provider, or historical benchmark data.",
+  "cases": [
+    {
+      "id": "orchid-release",
+      "subject": "orchid",
+      "question": "Prepare Orchid's release dispatch with its target and rollback checkpoint, citing the stored facts.",
+      "primary_key": "deploy_target",
+      "current": {"deploy_target": "cedar-17", "rollback_checkpoint": "cobalt-42"},
+      "obsolete": {"deploy_target": "birch-08", "rollback_checkpoint": "amber-11"}
+    },
+    {
+      "id": "kestrel-backup",
+      "subject": "kestrel",
+      "question": "Prepare Kestrel's backup dispatch with its vault and retention policy, citing the stored facts.",
+      "primary_key": "backup_vault",
+      "current": {"backup_vault": "harbor-63", "retention_policy": "larch-29"},
+      "obsolete": {"backup_vault": "inlet-06", "retention_policy": "alder-14"}
+    },
+    {
+      "id": "lotus-build",
+      "subject": "lotus",
+      "question": "Prepare Lotus's build dispatch with its queue and signing profile, citing the stored facts.",
+      "primary_key": "build_queue",
+      "current": {"build_queue": "swift-31", "signing_profile": "jade-84"},
+      "obsolete": {"build_queue": "heron-19", "signing_profile": "ochre-22"}
+    },
+    {
+      "id": "meridian-support",
+      "subject": "meridian",
+      "question": "Prepare Meridian's support dispatch with its escalation route and handoff label, citing the stored facts.",
+      "primary_key": "escalation_route",
+      "current": {"escalation_route": "summit-57", "handoff_label": "violet-76"},
+      "obsolete": {"escalation_route": "ridge-12", "handoff_label": "indigo-05"}
+    },
+    {
+      "id": "tamarind-index",
+      "subject": "tamarind",
+      "question": "Prepare Tamarind's index dispatch with its shard group and recovery slot, citing the stored facts.",
+      "primary_key": "shard_group",
+      "current": {"shard_group": "delta-93", "recovery_slot": "willow-48"},
+      "obsolete": {"shard_group": "gamma-26", "recovery_slot": "hazel-07"}
+    },
+    {
+      "id": "zephyr-cache",
+      "subject": "zephyr",
+      "question": "Prepare Zephyr's cache dispatch with its pool and purge route, citing the stored facts.",
+      "primary_key": "cache_pool",
+      "current": {"cache_pool": "meadow-68", "purge_route": "quartz-35"},
+      "obsolete": {"cache_pool": "prairie-16", "purge_route": "mica-09"}
+    }
+  ]
+}

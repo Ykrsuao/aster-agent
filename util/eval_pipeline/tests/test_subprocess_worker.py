@@ -59,6 +59,61 @@ class TestSubprocessWorker:
     """Test the subprocess_worker.py script via Popen."""
 
     @pytest.mark.parametrize("memory_limit_mb", [None, 4096])
+    @pytest.mark.parametrize(
+        "usages, known, total, complete",
+        [
+            ([{"prompt": 0, "completion": 0, "total": 0}], 0, 0, True),
+            ([{"prompt": 8, "completion": 2, "total": 10}, None], 8, None, False),
+            ([{"prompt": 0}], 0, 0, True),
+        ],
+    )
+    def test_usage_survives_raw_spans_worker_json_and_experiment_file(
+        self, tmp_path, usages, known, total, complete, memory_limit_mb
+    ):
+        from eval_pipeline.eval_parser import EvalFileParser
+        from eval_pipeline.eval_types import EvalTestResult
+        from eval_pipeline.experiment_writer import ExperimentWriter
+
+        task_input = _build_task_input(
+            trace_dir=str(tmp_path / "traces"),
+            memory_limit_mb=memory_limit_mb,
+            agent_spec={
+                "agent_module": "eval_pipeline._test_fixtures",
+                "agent_class": "UsageTraceAgent",
+                "method": "classify",
+                "client_config": {},
+            },
+            task={
+                "id": "usage",
+                "input": [[], {"text": json.dumps(usages)}],
+                "expected": "positive",
+            },
+        )
+        proc = subprocess.run(
+            [sys.executable, "-m", "eval_pipeline.subprocess_worker"],
+            input=json.dumps(task_input).encode(),
+            capture_output=True,
+            timeout=30,
+        )
+        assert proc.returncode == 0, proc.stderr.decode()
+        result = EvalTestResult.model_validate_json(proc.stdout)
+        assert result.passed, result.error
+        assert result.token_usage.records == len(usages)
+        assert result.token_usage.known_input_tokens == known
+        assert result.token_usage.input_tokens_complete is complete
+        assert result.input_tokens == total
+        if any(usage is None or "completion" not in usage for usage in usages):
+            assert result.output_tokens is None
+            assert result.token_usage.output_tokens_complete is False
+        writer = ExperimentWriter(tmp_path / "results", "usage")
+        writer.start()
+        writer.append_result(result)
+        writer.finalize()
+        _, results, completion, _ = EvalFileParser().parse_file(writer.file_path)
+        assert results[0].token_usage == result.token_usage == completion.token_usage
+        assert completion.total_input_tokens == total
+
+    @pytest.mark.parametrize("memory_limit_mb", [None, 4096])
     def test_basic_execution(self, tmp_path, memory_limit_mb):
         """Worker executes a task and returns valid EvalTestResult JSON."""
         task_input = _build_task_input(trace_dir=str(tmp_path), memory_limit_mb=memory_limit_mb)
@@ -74,6 +129,37 @@ class TestSubprocessWorker:
         assert result["passed"] is True
         assert result["output"] == "positive"
         assert "exact_match" in result["scores"]
+        assert result["token_usage"]["records"] == 0
+        assert result["token_usage"]["input_tokens_complete"] is False
+        assert result["input_tokens"] is None
+
+    def test_disabled_trace_files_do_not_write_usage_or_eval_spans(self, tmp_path):
+        task_input = _build_task_input(
+            trace_dir=str(tmp_path),
+            write_trace_file=False,
+            agent_spec={
+                "agent_module": "eval_pipeline._test_fixtures",
+                "agent_class": "UsageTraceAgent",
+                "method": "classify",
+                "client_config": {},
+            },
+            task={
+                "id": "usage",
+                "input": [[], {"text": '[{"prompt": 8}]'}],
+                "expected": "positive",
+            },
+        )
+        proc = subprocess.run(
+            [sys.executable, "-m", "eval_pipeline.subprocess_worker"],
+            input=json.dumps(task_input).encode(),
+            capture_output=True,
+            timeout=30,
+        )
+        assert proc.returncode == 0, proc.stderr.decode()
+        result = json.loads(proc.stdout)
+        assert result["passed"] is True and result["input_tokens"] is None
+        assert result["token_usage"]["input_tokens_complete"] is False
+        assert list(tmp_path.glob("*.jsonl")) == []
 
     def test_wrong_answer(self, tmp_path):
         """Worker correctly reports failure when output doesn't match expected."""
@@ -110,10 +196,12 @@ class TestSubprocessWorker:
         assert "error" in result
         assert result["error_type"] == "WorkerError"
 
-    def test_missing_agent_module(self, tmp_path):
+    @pytest.mark.parametrize("memory_limit_mb", [None, 4096])
+    def test_missing_agent_module(self, tmp_path, memory_limit_mb):
         """Worker returns error result when agent module doesn't exist."""
         task_input = _build_task_input(
             trace_dir=str(tmp_path),
+            memory_limit_mb=memory_limit_mb,
             agent_spec={
                 "agent_module": "nonexistent.module",
                 "agent_class": "FakeAgent",

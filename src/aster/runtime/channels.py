@@ -1098,17 +1098,22 @@ class QueueManager:
 
         async def _run() -> None:
             handle = _handles_by_task[asyncio.current_task()]  # type: ignore[arg-type]
+            started = False
             try:
-                if is_agen:
-                    async for value in job:  # type: ignore[union-attr]
+                from aster.task_budget import task_budget_activity
+
+                async with task_budget_activity():
+                    started = True
+                    if is_agen:
+                        async for value in job:  # type: ignore[union-attr]
+                            if handle._values is not None:
+                                handle._values.append(value)
+                            data_ch.put(value)
+                    else:
+                        result = await job  # type: ignore[misc]
                         if handle._values is not None:
-                            handle._values.append(value)
-                        data_ch.put(value)
-                else:
-                    result = await job  # type: ignore[misc]
-                    if handle._values is not None:
-                        handle._values.append(result)
-                    data_ch.put(result)
+                            handle._values.append(result)
+                        data_ch.put(result)
                 handle.state = "done"
             except asyncio.CancelledError:
                 handle.state = "cancelled"
@@ -1128,6 +1133,8 @@ class QueueManager:
             finally:
                 if is_agen:
                     await job.aclose()  # type: ignore[union-attr]
+                elif not started and inspect.iscoroutine(job):
+                    job.close()
                 if self._event_manager is not None:
                     self._event_manager.add(StreamEnd(channel_name=channel))
 

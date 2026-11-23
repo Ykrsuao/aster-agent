@@ -108,6 +108,9 @@ def get_slash_commands(skill) -> list[tuple[SlashCommandMeta, Any]]:
 class _SkillProperties(BaseModel):
     name: str
     description: str
+    argument_hint: str = "[task]"
+    user_invocable: bool = True
+    allow_implicit_invocation: bool = True
 
 
 def _find_skill_md(skill_dir: Path) -> Path | None:
@@ -174,6 +177,13 @@ def _parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     return meta, body
 
 
+def _boolean_property(meta: dict[str, Any], key: str, default: bool) -> bool:
+    value = meta.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"Skill property {key!r} must be a boolean")
+    return value
+
+
 def _read_skill_properties(skill_dir: Path) -> _SkillProperties:
     skill_md = _find_skill_md(skill_dir)
     if skill_md is None:
@@ -183,18 +193,35 @@ def _read_skill_properties(skill_dir: Path) -> _SkillProperties:
         raise ValueError("Missing required frontmatter field: name")
     if "description" not in meta:
         raise ValueError("Missing required frontmatter field: description")
+    user_invocable = _boolean_property(meta, "user-invocable", True)
+    disable_model_invocation = _boolean_property(meta, "disable-model-invocation", False)
+    allow_implicit_invocation = True
+    policy_file = skill_dir / "agents" / "openai.yaml"
+    if policy_file.is_file():
+        config = yaml.safe_load(policy_file.read_text(encoding="utf-8"))
+        if config is None:
+            config = {}
+        if not isinstance(config, dict):
+            raise ValueError("agents/openai.yaml must be a YAML mapping")
+        policy = config.get("policy", {})
+        if not isinstance(policy, dict):
+            raise ValueError("agents/openai.yaml policy must be a YAML mapping")
+        allow_implicit_invocation = _boolean_property(policy, "allow_implicit_invocation", True)
     return _SkillProperties(
-        name=str(meta["name"]).strip(),
+        name=str(meta["name"] or "").strip(),
         description=str(meta["description"]).strip(),
+        argument_hint=str(meta.get("argument-hint") or "[task]"),
+        user_invocable=user_invocable,
+        allow_implicit_invocation=allow_implicit_invocation and not disable_model_invocation,
     )
 
 
-def _parse_skill_md(path: Path) -> tuple[str, str, str]:
-    """Parse a skill directory into (skill_id, description, body).
+def _parse_skill_md(path: Path) -> tuple[str, _SkillProperties, str]:
+    """Parse a skill directory into (skill_id, properties, body).
 
     Returns:
         skill_id:    Normalized directory name (lowercase, hyphens)
-        description: From frontmatter ``description:`` field
+        properties:  Frontmatter metadata and optional invocation policy
         body:        Skill content after the frontmatter block
 
     Raises:
@@ -207,9 +234,8 @@ def _parse_skill_md(path: Path) -> tuple[str, str, str]:
         raise ValueError(f"SKILL.md not found in {path}")
 
     props = _read_skill_properties(path)
-    description = props.description or path.name
     _, body = _parse_frontmatter(skill_md.read_text(encoding="utf-8"))
-    return skill_id, description, body.strip()
+    return skill_id, props, body.strip()
 
 
 def _resolve_skill_path(skill_root: Path, relative: str) -> Path:
@@ -353,10 +379,12 @@ class TextSkill(Skill):
     """Skill loaded from a SKILL.md directory. Has id, description, run_script, read_file."""
 
     def __init__(self, *, path: Path | str, id: str | None = None):
-        skill_id, description, body = _parse_skill_md(Path(path))
+        skill_id, properties, body = _parse_skill_md(Path(path))
+        description = properties.description or Path(path).name
         docstring = f"{description}\n---\n{body}"
         class_name = "".join(word.capitalize() for word in skill_id.split("-"))
         self._skill_path = Path(path)
+        self._properties = properties
         self.__class__ = type(  # pyright: ignore[reportAttributeAccessIssue]
             class_name, (TextSkill,), {"__doc__": docstring, "_id": id or skill_id}
         )
@@ -366,13 +394,28 @@ class TextSkill(Skill):
         return str(type(self)._id)  # pyright: ignore[reportAttributeAccessIssue]  # _id set dynamically in __init__
 
     @property
+    def name(self) -> str:
+        return self._properties.name or self.id
+
+    @property
+    def argument_hint(self) -> str:
+        return self._properties.argument_hint
+
+    @property
+    def user_invocable(self) -> bool:
+        return self._properties.user_invocable
+
+    @property
+    def allow_implicit_invocation(self) -> bool:
+        return self._properties.allow_implicit_invocation
+
+    @property
     def source_dir(self) -> Path | None:
         return self._skill_path.resolve()
 
     @property
     def description(self) -> str:
-        doc = type(self).__doc__ or ""
-        return doc.split("\n---\n")[0].split("\n")[0]
+        return self._properties.description or self._skill_path.name
 
     async def run_script(
         self,

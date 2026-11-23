@@ -97,6 +97,51 @@ def test_collapse_returns_summary_tag():
     assert agent.events.get(last) is not None
 
 
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_repeated_collapse_preserves_nested_originals(backend, tmp_path):
+    from aster.storage.sqlite import SQLiteStorageManager
+
+    agent = _TestAgent()
+    path = tmp_path / "events.db"
+    storage = SQLiteStorageManager(path) if backend == "sqlite" else None
+    if storage is not None:
+        agent.event_manager.set_backend(storage.event_backend)
+    try:
+        tags = [agent.event_manager.add(Task(prompt=f"original {i}")) for i in range(3)]
+        inner = agent.events.collapse(tags[0], tags[1], summary_text="inner")
+        summary = agent.events.collapse(inner, tags[2], summary_text="first")
+        emitted = []
+        agent.event_manager.on("Summary", emitted.append)
+
+        repeated = agent.events.collapse(summary, summary, summary_text="updated")
+
+        assert len(emitted) == 1
+        assert emitted[0].summary_text == "updated"
+        assert emitted[0].children_tags == [inner, tags[2]]
+        assert repeated == summary
+        assert agent.events.keys() == [summary]
+        assert agent.events[summary].children_tags == [inner, tags[2]]
+        if storage is not None:
+            storage.close()
+            storage = SQLiteStorageManager(path)
+            agent.event_manager.set_backend(storage.event_backend)
+        assert agent.events[summary].summary_text == "updated"
+        children = agent.events[agent.events[summary].children_tags]
+        originals = agent.events[children[0].children_tags] + children[1:]
+        assert [event.prompt for event in originals] == ["original 0", "original 1", "original 2"]
+
+        last = agent.event_manager.add(Task(prompt="later"))
+        combined = agent.events.collapse(summary, last, summary_text="combined")
+        assert agent.events[combined].children_tags == [summary, last]
+        assert [event.tag for event in agent.event_manager._all_originals(combined)] == [
+            *tags,
+            last,
+        ]
+    finally:
+        if storage is not None:
+            storage.close()
+
+
 @pytest.mark.parametrize(
     "start,end,previous",
     [

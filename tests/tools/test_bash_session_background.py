@@ -82,6 +82,61 @@ async def test_timeout_spares_earlier_background_jobs(tmp_path, reap):
         await session.close()
 
 
+@pytest.mark.parametrize("streaming", [False, True], ids=["run", "run_stream"])
+async def test_external_cancellation_cleans_command_and_preserves_earlier_job(
+    tmp_path, reap, streaming
+):
+    session = BashSession(cwd=tmp_path)
+    pid_file = tmp_path / "command.pid"
+    finished = tmp_path / "finished"
+    code = "\n".join(
+        [
+            "from pathlib import Path",
+            "import os, sys, time",
+            "with open('launches', 'a') as output: output.write('run\\n')",
+            "print('old stdout', flush=True)",
+            "print('old stderr', file=sys.stderr, flush=True)",
+            "Path('command.pid').write_text(str(os.getpid()))",
+            "time.sleep(2)",
+            "Path('finished').write_text('late')",
+        ]
+    )
+    command = shlex.join([sys.executable, "-c", code])
+
+    async def consume():
+        if streaming:
+            return [item async for item in session.run_stream(command, timeout=30)]
+        return await session.run(command, timeout=30)
+
+    running = None
+    try:
+        earlier = await _start_job(session, "sleep 60")
+        reap.append(earlier)
+        running = asyncio.create_task(consume())
+        async with asyncio.timeout(5):
+            while not (pid_file.exists() and pid_file.read_text().strip()):
+                await asyncio.sleep(0.01)
+        child = int(pid_file.read_text())
+        reap.append(child)
+        running.cancel("caller stopped the command")
+        with pytest.raises(asyncio.CancelledError, match="caller stopped the command"):
+            await running
+
+        assert not _alive(child)
+        assert _alive(earlier), "jobs from completed commands must survive cancellation"
+        # Both streams must belong solely to this new command immediately after cleanup.
+        stdout, stderr, code = await session.run("printf recovered; printf error >&2", timeout=5)
+        assert (stdout, stderr, code) == ("recovered", "error", 0)
+        await asyncio.sleep(2.1)
+        assert not finished.exists(), "the cancelled command must not perform a late write"
+        assert (tmp_path / "launches").read_text() == "run\n"
+    finally:
+        if running is not None:
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+        await session.close()
+
+
 @pytest.mark.parametrize("pipeline", [False, True])
 async def test_timeout_kills_nested_command_but_spares_earlier_job(
     tmp_path, reap, pipeline, monkeypatch

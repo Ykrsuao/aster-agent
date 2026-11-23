@@ -179,9 +179,9 @@ async def test_large_diff_bounded_or_omitted(
     shell, tmp_path, monkeypatch, expected, current, detail
 ):
     path = tmp_path / "file.txt"
-    path.write_text(expected)
+    path.write_text(expected, encoding="utf-8")
     anchor = await shell.read("file.txt")
-    path.write_text(current)
+    path.write_text(current, encoding="utf-8")
     before = path.read_bytes()
     if "exceed" in detail:
 

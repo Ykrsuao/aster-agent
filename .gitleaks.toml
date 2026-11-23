@@ -9,3 +9,14 @@ description = "Intentionally fake secrets used to test the secret-scrubber featu
 paths = [
   '''tests/tracing/test_secret_scrubber\.py''',
 ]
+
+# This source-file SHA256 in retained evidence is public integrity metadata.
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Public test_token_usage.py source SHA256 in offline evidence"
+condition = "AND"
+paths = ['''^experiments/memory_evidence/results/offline-windows-20261123\.json$''']
+regexTarget = "line"
+regexes = ['''^\s*"util/eval_pipeline/tests/test_token_usage\.py":\s*"[a-f0-9]{64}",?\s*$''']

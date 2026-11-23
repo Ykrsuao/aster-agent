@@ -4,23 +4,34 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
 import sqlite3
 import time
 import uuid
+from contextlib import closing
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING, Literal
 
+from aster.errors.storage import DeserializationError, SerializationError, SnapshotNotFoundError
+from aster.events import EventBase
 from aster.paths import get_project_dir
 from aster.runtime.event_manager import EventManager
 from aster.storage.sqlite import SQLiteStorageManager, delete_sqlite_database
+from aster_cli.sessions.actions import SessionActions, inherit_actions
 from aster_cli.sessions.events import (
     SESSION_EVENT_TYPES,
+    SessionActionIntent,
+    SessionActionOutcome,
+    SessionActionReviewed,
+    SessionActionsInherited,
+    SessionActionsSaved,
+    SessionSnapshotInvalidated,
     SessionStarted,
     SessionSteering,
     SessionTitleUpdated,
@@ -119,6 +130,7 @@ class SessionHandle:
         self._info = info
         self._metadata_lock = RLock()
         self._closed = False
+        self._actions: SessionActions | None = None
 
     @property
     def id(self) -> str:
@@ -138,6 +150,17 @@ class SessionHandle:
     def events(self) -> EventManager:
         """Event manager for runtime-owned session metadata."""
         return self._events
+
+    @property
+    def actions(self) -> SessionActions:
+        """Host-only journal for side effects whose progress can need review."""
+        with self._metadata_lock:
+            self._ensure_open()
+            if self._actions is None:
+                self._actions = SessionActions(
+                    self._events, self.path, self._metadata_lock, self._ensure_open
+                )
+            return self._actions
 
     @property
     def path(self) -> Path:
@@ -181,13 +204,157 @@ class SessionHandle:
     def turns(self) -> list[SessionTurn]:
         return self._store.load_turns(self.id)
 
-    def checkpoint(self, agent: Agent) -> None:
+    def checkpoint(self, agent: Agent) -> str:
         """Capture state immediately before recording the next user message."""
         with self._metadata_lock:
             self._ensure_open()
             key = f"user:{self._info.turn_count}"
             self._storage.discard_checkpoint(key)
             self._storage.save_checkpoint(key, agent)
+            return key
+
+    def _checkpoint_digest(self, key: str) -> str:
+        with closing(sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+            row = conn.execute(
+                "SELECT snapshot, event_refs, active_tags FROM checkpoints WHERE checkpoint_id = ?",
+                (key,),
+            ).fetchone()
+        if row is None:
+            raise SnapshotNotFoundError(f"Checkpoint {key!r} was not found")
+        return hashlib.sha256(json.dumps(row, ensure_ascii=False).encode()).hexdigest()
+
+    def invalidate_current_snapshot(self, *, checkpoint_id: str | None) -> None:
+        """Persist the exact pre-turn restore point before removing current state."""
+        with self._metadata_lock:
+            self._ensure_open()
+            if checkpoint_id is not None and checkpoint_id != f"user:{self._info.turn_count}":
+                raise ValueError("The restore checkpoint must precede the next user message.")
+            digest = self._checkpoint_digest(checkpoint_id) if checkpoint_id is not None else None
+            self._events.add(
+                SessionSnapshotInvalidated(
+                    session_id=self.id, checkpoint_id=checkpoint_id, checkpoint_digest=digest
+                )
+            )
+            self._storage.invalidate_current_snapshot()
+
+    def restore_current_snapshot(self, agent: Agent) -> bool:
+        """Restore current state, or its validated pre-turn state after interruption.
+
+        Keep the current event history and journal: actions after the restored
+        boundary still need review, even if their execution result was recorded.
+        """
+        with self._metadata_lock:
+            self._ensure_open()
+            try:
+                if self._storage.restore_current_snapshot(agent):
+                    return True
+                # Read the binding strictly; event iteration skips damaged rows.
+                with closing(
+                    sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)
+                ) as conn:
+                    row = conn.execute(
+                        "SELECT event_id, data FROM events WHERE event_type = ? "
+                        "ORDER BY insertion_order DESC LIMIT 1",
+                        ("SessionSnapshotInvalidated",),
+                    ).fetchone()
+                if row is None:
+                    if self.actions._has_records():
+                        raise ValueError("Host actions have no bound task snapshot.")
+                    return False  # Legacy conversation history, with no host action journal.
+                point = SessionSnapshotInvalidated.model_validate_json(row[1])
+                if point.id != row[0] or point.session_id != self.id or point.checkpoint_id is None:
+                    raise ValueError("The interrupted turn has no restore point in this branch.")
+                if point.checkpoint_digest != self._checkpoint_digest(point.checkpoint_id):
+                    raise ValueError("The interrupted turn's restore point has changed.")
+                pending = {item["action_id"] for item in self.actions.pending()}
+                current = list(self._events.all_events())
+                restored = SQLiteStorageManager(":memory:")
+                try:
+                    self._storage.fork_checkpoint(point.checkpoint_id, restored, retain=[])
+                    saved = list(restored.event_backend.all_events())
+                    late_reviews = self._validate_restore_point(point, current, saved)
+                    restored.restore_current_snapshot(agent)
+                finally:
+                    restored.close()
+                if late_reviews - pending:
+                    self._events.add(SessionActionsInherited(action_ids=sorted(late_reviews)))
+                    self._actions = None
+                return True
+            except (
+                OSError,
+                sqlite3.Error,
+                ValueError,
+                DeserializationError,
+                SerializationError,
+                SnapshotNotFoundError,
+            ) as error:
+                raise SessionCheckpointUnavailableError(
+                    "Saved task state could not be restored safely. The conversation and action "
+                    "journal were preserved; choose a valid saved point before continuing."
+                ) from error
+
+    @staticmethod
+    def _validate_restore_point(
+        point: SessionSnapshotInvalidated, current: list[EventBase], saved: list[EventBase]
+    ) -> set[str]:
+        if point.checkpoint_id is None:
+            raise ValueError("The interrupted turn has no restore checkpoint.")
+        saved_by_id = {event.id: event for event in saved}
+        current_by_id = {event.id: event for event in current}
+        before = current[: next(i for i, event in enumerate(current) if event.id == point.id)]
+        identity_types = _START_EVENT_TYPES | _USER_EVENT_TYPES
+        if [event.id for event in saved if event.event_type in identity_types] != [
+            event.id for event in before if event.event_type in identity_types
+        ]:
+            raise ValueError("The restore point belongs to different conversation history.")
+        if sum(event.event_type in _USER_EVENT_TYPES for event in saved) != int(
+            point.checkpoint_id.removeprefix("user:")
+        ):
+            raise ValueError("The restore point does not precede its declared turn.")
+        # A later saved proof must never justify state from an earlier checkpoint.
+        proofs = [event for event in current if isinstance(event, SessionActionsSaved)]
+        acknowledged = {action_id for proof in proofs for action_id in proof.action_ids}
+        evidence = [
+            *proofs,
+            *(
+                event
+                for event in current
+                if (isinstance(event, SessionActionIntent) and event.id in acknowledged)
+                or (isinstance(event, SessionActionOutcome) and event.action_id in acknowledged)
+            ),
+        ]
+        excluded = {"tag", "status", "metadata"}
+        if any(
+            event.id not in saved_by_id
+            or saved_by_id[event.id].model_dump(exclude=excluded)
+            != event.model_dump(exclude=excluded)
+            for event in evidence
+        ):
+            raise ValueError("Saved host actions are missing from the restore point.")
+        if any(
+            event.id not in current_by_id
+            for event in saved
+            if isinstance(event, SessionActionsSaved)
+        ):
+            raise ValueError("The restore point refers to missing host action proofs.")
+        return {
+            event.action_id
+            for event in current
+            if isinstance(event, SessionActionReviewed) and event.id not in saved_by_id
+        }
+
+    def save_current_snapshot(self, agent: Agent) -> None:
+        """Save progress before acknowledging this handle's completed actions."""
+        with self._metadata_lock:
+            self._ensure_open()
+            actions = self.actions
+            candidates = actions._save_candidates()
+            try:
+                self._storage.save_current_snapshot(agent)
+                actions._saved(candidates)
+            except BaseException:
+                actions._mark_pending()
+                raise
 
     def checkpoint_completed(
         self, agent: Agent, *, completed_message_id: str | None, turn_id: str | None = None
@@ -290,6 +457,7 @@ class SessionHandle:
                     ]
                     + [f"user:{user_message_index}"],
                 )
+                inherit_actions(self.path, restored=storage)
                 # A fork before the first message is still a real conversation,
                 # even when its source began as a hidden prepared session.
                 for event in storage.event_backend.all_events():
@@ -312,9 +480,15 @@ class SessionHandle:
         with self._metadata_lock:
             if self._closed:
                 return
-            self._storage.close()
-            self._closed = True
-            unused_preparation = self._info.provisional and self._info.turn_count == 0
+            try:
+                unused_preparation = (
+                    self._info.provisional
+                    and self._info.turn_count == 0
+                    and not self.actions._has_records()
+                )
+            finally:
+                self._storage.close()
+                self._closed = True
         if unused_preparation:
             # Use the existing ownership lock and exact SQLite sidecar cleanup;
             # only this handle's unused background session is eligible.
@@ -502,6 +676,15 @@ class SessionStore:
                 ).fetchone()
                 if start_row is None:
                     return None
+                start = self._decode_data(start_row[1], path)
+                if start is None:
+                    return None
+                has_actions = start.get("provisional") is True and bool(
+                    connection.execute(
+                        "SELECT EXISTS(SELECT 1 FROM events WHERE event_type = ?)",
+                        ("SessionActionIntent",),
+                    ).fetchone()[0]
+                )
 
                 title_rows = connection.execute(
                     "SELECT data FROM events WHERE event_type IN (?, ?) ORDER BY insertion_order",
@@ -522,9 +705,6 @@ class SessionStore:
             logger.debug("Could not summarize session database %s", path, exc_info=True)
             return None
 
-        start = self._decode_data(start_row[1], path)
-        if start is None:
-            return None
         start_event_type = str(start_row[0])
         started_at = self._timestamp(start, fallback=fallback)
         last_active = fallback
@@ -551,7 +731,7 @@ class SessionStore:
             started_at=started_at,
             last_active=last_active,
             turn_count=turn_count,
-            provisional=start.get("provisional") is True,
+            provisional=start.get("provisional") is True and not has_actions,
             working_directory=str(start.get("working_directory", start.get("working_dir", ""))),
             title=title,
             title_is_user_set=title_is_user_set,

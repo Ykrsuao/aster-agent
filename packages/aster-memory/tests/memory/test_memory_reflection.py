@@ -21,8 +21,8 @@ def emb():
 
 
 @pytest.fixture
-def store():
-    s = MemoryStore(":memory:")
+def store(emb):
+    s = MemoryStore(":memory:", embedding_identity=emb.identity, embedding_dim=emb.dim)
     yield s
     s.close()
 
@@ -195,9 +195,26 @@ def test_abstraction_with_reasoner_creates_skill_linked_to_episodes(store, emb):
     assert {e1.id, e2.id} <= targets
 
 
-def test_reconsolidate_archives_stale_and_keeps_current(store, emb):
-    older = _add(store, emb, "my 5k personal best is 27:00", type=MemoryType.INFO)
-    _add(store, emb, "my 5k personal best is now 25:50", type=MemoryType.INFO)
+@pytest.mark.parametrize("older_id,newer_id", [("a", "z"), ("z", "a")])
+def test_reconsolidate_archives_stale_and_keeps_current(store, emb, older_id, newer_id):
+    # Give the facts explicit chronology even when the host clock has coarse ticks.
+    now = time.time()
+    older = _add(
+        store,
+        emb,
+        "my 5k personal best is 27:00",
+        id=older_id,
+        type=MemoryType.INFO,
+        created_at=now - 1,
+    )
+    _add(
+        store,
+        emb,
+        "my 5k personal best is now 25:50",
+        id=newer_id,
+        type=MemoryType.INFO,
+        created_at=now,
+    )
 
     def reconciler(cluster):
         # cluster is oldest -> newest; supersede everything but the latest
@@ -255,7 +272,9 @@ def test_reconsolidation_can_reuse_an_original_id(store, emb):
 def test_reconsolidation_discards_result_after_source_changes(
     tmp_path, emb, monkeypatch, phase, change
 ):
-    store = MemoryStore(tmp_path / "shared.sqlite")
+    store = MemoryStore(
+        tmp_path / "shared.sqlite", embedding_identity=emb.identity, embedding_dim=emb.dim
+    )
     other = MemoryStore(tmp_path / "shared.sqlite")
     try:
         originals = [_add(store, emb, f"deployment host {name}") for name in ("alpha", "beta")]
@@ -302,8 +321,14 @@ def test_reconsolidation_discards_result_after_source_changes(
         store.close()
 
 
-def test_reconsolidation_allows_reconciler_to_mutate_input_copy(store, emb):
-    originals = [_add(store, emb, f"deployment host {name}") for name in ("alpha", "beta")]
+@pytest.mark.parametrize("older_id,newer_id", [("a", "z"), ("z", "a")])
+def test_reconsolidation_allows_reconciler_to_mutate_input_copy(store, emb, older_id, newer_id):
+    # Make the mutated input independent of ID order and the host clock's resolution.
+    now = time.time()
+    originals = [
+        _add(store, emb, "deployment host alpha", id=older_id, created_at=now - 1),
+        _add(store, emb, "deployment host beta", id=newer_id, created_at=now),
+    ]
 
     def reconcile(cluster):
         cluster[0].content = "deployment host gamma"

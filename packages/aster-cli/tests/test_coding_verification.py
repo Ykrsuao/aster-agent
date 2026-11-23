@@ -13,10 +13,13 @@ from types import SimpleNamespace
 import pytest
 import yaml
 from aster_cli.coding.agent import CodingAgent
+from aster_cli.coding.recovery import require_recovery
 from aster_cli.coding.reply_strategy import CodingReplyStrategy
 from aster_cli.coding.verification import (
+    CodingDone,
     RequiredCheck,
     Verification,
+    VerificationState,
     begin_verification,
     require_verification,
 )
@@ -25,6 +28,7 @@ from aster.config import CodeActConfig
 from aster.interactive import Done, NeedInput, SummarizationConfig, Waiting
 from aster.runtime.event_manager import EventManager
 from aster.skill import Skill
+from aster.storage.sqlite import SQLiteStorageManager
 from aster.strategy_validation import InvariantError
 from aster.tools import ShellTools
 from aster.tools.shell_tools import ShellResult
@@ -55,7 +59,7 @@ def response(name, args):
     )
 
 
-def configured_agent(root, responses, checks=True):
+def configured_agent(root, responses, checks=True, **options):
     settings = root / ".aster/settings.yaml"
     settings.parent.mkdir(exist_ok=True)
     settings.write_text(
@@ -84,6 +88,7 @@ def configured_agent(root, responses, checks=True):
         libs_dir=root / ".aster/libs",
         skills_dirs=[],
         summarization=SummarizationConfig(policy="none"),
+        **options,
     ), llm
 
 
@@ -317,6 +322,9 @@ async def test_ordinary_answers_do_not_execute_checks(tmp_path, checks, monkeypa
 
 def test_input_and_background_results_do_not_require_completion_checks():
     class Pending:
+        def observe(self):
+            pass
+
         def require_passes(self):
             raise AssertionError("Not a completed task")
 
@@ -337,6 +345,312 @@ async def test_new_turn_does_not_reuse_previous_pass(tmp_path):
         checks.require_passes()
 
 
+def test_unverified_changes_remain_pending_in_the_next_turn(tmp_path):
+    (tmp_path / "code.txt").write_text("original")
+    checks = verification(tmp_path)
+    (tmp_path / "code.txt").write_text("unfinished change")
+    checks.begin("next-turn")
+    with pytest.raises(InvariantError, match="tests"):
+        checks.require_passes()
+
+
+@pytest.fixture
+def passing_check(monkeypatch):
+    async def run(*args, **kwargs):
+        return ShellResult("passed", returncode=0)
+
+    monkeypatch.setattr("aster_cli.coding.verification.ActivityShellTools.run", run)
+
+
+async def test_partial_check_evidence_survives_turns_and_serialization(tmp_path, passing_check):
+    check = RequiredCheck(command="trusted-check", files=("code.txt",))
+    checks = Verification(tmp_path, {"lint": check, "tests": check})
+    checks.begin("edit")
+    (tmp_path / "code.txt").write_text("changed")
+    await checks.run("lint", EventManager())
+    task_id = checks.status()["task_id"]
+    checks.begin("continue")
+    assert checks.status()["task_id"] == task_id
+    with pytest.raises(InvariantError, match="tests"):
+        checks.require_passes()
+
+    saved = VerificationState.model_validate_json(checks.state.model_dump_json())
+    restored = Verification(tmp_path, checks.checks)
+    restored.configure(checks.checks, state=saved)
+    restored.begin("restored")
+    assert restored.status()["task_id"] == task_id
+    assert restored.status()["checks"] == {"lint": "passed", "tests": "not_run"}
+    await restored.run("tests", EventManager())
+    restored.require_passes()
+    assert restored.status()["state"] == "verified"
+
+
+@pytest.mark.parametrize("change", ["edit", "delete", "create", "command", "timeout", "files"])
+async def test_restored_evidence_is_invalidated_by_files_or_check_contract(
+    tmp_path, passing_check, change
+):
+    (tmp_path / "code.txt").write_text("original")
+    checks = verification(tmp_path)
+    await checks.run("tests", EventManager())
+    checks.require_passes()
+    saved = VerificationState.model_validate_json(checks.state.model_dump_json())
+    declarations = dict(checks.checks)
+    if change == "edit":
+        (tmp_path / "code.txt").write_text("changed")
+    elif change == "delete":
+        (tmp_path / "code.txt").unlink()
+    elif change == "create":
+        (tmp_path / "new.txt").write_text("created")
+    else:
+        update = {
+            "command": {"command": "different-check"},
+            "timeout": {"timeout": 12},
+            "files": {"files": ("code.txt", "new.txt", "extra.txt")},
+        }[change]
+        declarations["tests"] = declarations["tests"].model_copy(update=update)
+    restored = Verification(tmp_path, declarations)
+    restored.configure(declarations, state=saved)
+    restored.begin("reopen")
+    assert restored.status()["state"] == "pending"
+    with pytest.raises(InvariantError, match="tests"):
+        restored.require_passes()
+
+
+async def test_workspace_relocation_invalidates_old_evidence(tmp_path, passing_check):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    checks = verification(first)
+    await checks.run("tests", EventManager())
+    checks.require_passes()
+    saved = VerificationState.model_validate_json(checks.state.model_dump_json())
+    moved = Verification(second, checks.checks)
+    moved.configure(checks.checks, state=saved)
+    moved.begin("moved")
+    with pytest.raises(InvariantError, match="tests"):
+        moved.require_passes()
+    assert checks.status()["state"] == "verified"
+
+
+async def test_changed_contract_discards_in_flight_success(tmp_path, controlled_check_runs):
+    checks = verification(tmp_path)
+    task, result = await controlled_check_runs(checks)
+    replacement = checks.checks["tests"].model_copy(update={"command": "different-check"})
+    checks.configure({"tests": replacement})
+    result.set_result(ShellResult("", returncode=0))
+    await task
+    with pytest.raises(InvariantError, match="tests"):
+        checks.require_passes()
+
+
+async def test_removed_checks_are_disabled_without_reusing_old_passes(tmp_path, passing_check):
+    checks = verification(tmp_path)
+    await checks.run("tests", EventManager())
+    checks.require_passes()
+    original = dict(checks.checks)
+    checks.configure({})
+    checks.begin("disabled")
+    checks.require_passes()
+    assert checks.status()["state"] == "disabled"
+    assert not checks.state.passed
+    checks.configure(original)
+    checks.begin("reenabled")
+    with pytest.raises(InvariantError, match="tests"):
+        checks.require_passes()
+
+
+async def test_interrupted_task_cannot_complete_in_a_later_turn_without_checks(tmp_path):
+    agent, llm = configured_agent(
+        tmp_path,
+        [
+            response(
+                "execute_python", {"code": "await self.shell.write_file('code.txt', 'fixed')"}
+            ),
+            response("return_result", {"result": {"question": "Choose the next step"}}),
+            response("return_result", {"result": {"message": "premature", "explanation": "done"}}),
+            response("execute_python", {"code": "await self.verify('tests')"}),
+            response("return_result", {"result": {"message": "verified", "explanation": "done"}}),
+        ],
+    )
+    try:
+        assert isinstance(await agent.handle({"user_messages": ["Edit the file"]}), NeedInput)
+        assert agent.verification_status()["state"] == "pending"
+        result = await agent.handle({"user_messages": ["Finish the previous task"]})
+        assert result.message == "verified"
+        assert len(llm.calls) == 5
+        assert agent.verification_status()["state"] == "verified"
+    finally:
+        await agent.close()
+
+
+async def test_unrelated_reply_preserves_pending_task_without_running_commands(
+    tmp_path, monkeypatch
+):
+    agent, llm = configured_agent(
+        tmp_path,
+        [
+            response(
+                "execute_python", {"code": "await self.shell.write_file('code.txt', 'fixed')"}
+            ),
+            response("return_result", {"result": {"question": "Choose the next step"}}),
+            response(
+                "return_result",
+                {"result": {"message": "Paris", "explanation": "Answered", "complete_task": False}},
+            ),
+        ],
+    )
+    try:
+        await agent.handle({"user_messages": ["Edit the file"]})
+        task_id = agent.verification_status()["task_id"]
+
+        async def forbidden(*args, **kwargs):
+            raise AssertionError("The unrelated answer must not execute checks")
+
+        monkeypatch.setattr("aster_cli.coding.verification.ActivityShellTools.run", forbidden)
+        result = await agent.handle({"user_messages": ["What is the capital of France?"]})
+        assert result.message.startswith("Paris")
+        assert "still needs verification: tests" in result.message
+        assert len(llm.calls) == 3
+        assert agent.verification_status()["state"] == "pending"
+        assert agent.verification_status()["task_id"] == task_id
+        with pytest.raises(InvariantError, match="tests"):
+            agent._verification.require_passes()
+    finally:
+        await agent.close()
+
+
+async def test_reply_flag_cannot_bypass_new_edits(tmp_path):
+    agent, llm = configured_agent(
+        tmp_path,
+        [
+            response(
+                "execute_python", {"code": "await self.shell.write_file('code.txt', 'fixed')"}
+            ),
+            response(
+                "return_result",
+                {"result": {"message": "skip", "explanation": "done", "complete_task": False}},
+            ),
+            response("execute_python", {"code": "await self.verify('tests')"}),
+            response("return_result", {"result": {"message": "verified", "explanation": "done"}}),
+        ],
+    )
+    try:
+        result = await agent.handle({"user_messages": ["Edit and verify"]})
+        assert result.message == "verified"
+        assert len(llm.calls) == 4
+    finally:
+        await agent.close()
+
+
+@pytest.mark.parametrize("complete_task", [True, False])
+async def test_explicit_python_return_cannot_bypass_verification(tmp_path, complete_task):
+    agent, llm = configured_agent(
+        tmp_path,
+        [
+            response(
+                "execute_python",
+                {
+                    "code": "await self.shell.write_file('code.txt', 'fixed')\n"
+                    f"return Done(message=str(42), explanation='done', complete_task={complete_task})"
+                },
+            ),
+            response("execute_python", {"code": "await self.verify('tests')"}),
+            response("return_result", {"result": {"message": "verified", "explanation": "done"}}),
+        ],
+    )
+    try:
+        result = await agent.handle({"user_messages": ["Edit and verify the file"]})
+        assert result.message == "verified"
+        assert len(llm.calls) == 3
+        assert agent.verification_status()["state"] == "verified"
+    finally:
+        await agent.close()
+
+
+async def test_session_snapshot_preserves_pending_task_and_rebinds_host_verification(tmp_path):
+    database = tmp_path / "conversation.db"
+    storage = SQLiteStorageManager(database)
+    agent, _ = configured_agent(
+        tmp_path,
+        [
+            response(
+                "execute_python", {"code": "await self.shell.write_file('code.txt', 'fixed')"}
+            ),
+            response("return_result", {"result": {"question": "Choose the next step"}}),
+        ],
+        storage=storage,
+    )
+    try:
+        await agent.handle({"user_messages": ["Edit the file"]})
+        task_id = agent.verification_status()["task_id"]
+        storage.save_current_snapshot(agent)
+    finally:
+        await agent.close()
+        storage.close()
+
+    restored_storage = SQLiteStorageManager(database)
+    restored, llm = configured_agent(
+        tmp_path,
+        [
+            response("return_result", {"result": {"message": "premature", "explanation": "done"}}),
+            response("execute_python", {"code": "await self.verify('tests')"}),
+            response("return_result", {"result": {"message": "verified", "explanation": "done"}}),
+        ],
+        storage=restored_storage,
+    )
+    try:
+        assert restored_storage.restore_current_snapshot(restored)
+        restored.refresh_host_context()
+        assert restored.verification_status()["state"] == "pending"
+        assert restored.verification_status()["task_id"] == task_id
+        result = await restored.handle({"user_messages": ["Finish the saved task"]})
+        assert result.message == "verified"
+        assert len(llm.calls) == 3
+        assert restored.verification_status()["state"] == "verified"
+    finally:
+        await restored.close()
+        restored_storage.close()
+
+
+def test_coding_result_accepts_existing_done_values():
+    result = CodingDone.model_validate(Done(message="answer", explanation="done"))
+    assert result.complete_task is True
+
+
+async def test_host_detects_config_changes_after_a_check_before_accepting_done(
+    tmp_path, monkeypatch
+):
+    agent, llm = configured_agent(
+        tmp_path,
+        [
+            response("execute_python", {"code": "await self.verify('tests')"}),
+            response("return_result", {"result": {"message": "stale", "explanation": "done"}}),
+            response("execute_python", {"code": "await self.verify('tests')"}),
+            response("return_result", {"result": {"message": "fresh", "explanation": "done"}}),
+        ],
+    )
+    calls = []
+
+    async def update_configuration(command, **kwargs):
+        calls.append(command)
+        settings = tmp_path / ".aster/settings.yaml"
+        config = yaml.safe_load(settings.read_text())
+        config["coding"]["required_checks"]["tests"]["timeout"] = 120
+        settings.write_text(yaml.safe_dump(config))
+        return ShellResult("passed", returncode=0)
+
+    monkeypatch.setattr(
+        "aster_cli.coding.verification.ActivityShellTools.run",
+        lambda self, command, **kwargs: update_configuration(command, **kwargs),
+    )
+    try:
+        result = await agent.handle({"user_messages": ["Run the configured check"]})
+        assert result.message == "fresh"
+        assert len(calls) == 2 and len(llm.calls) == 4
+    finally:
+        await agent.close()
+
+
 def test_check_file_cannot_be_a_directory(tmp_path):
     (tmp_path / "code.txt").mkdir()
     with pytest.raises(ValueError):
@@ -354,8 +668,14 @@ def test_strategy_rebuild_preserves_unhashable_conditions_without_duplicate_gate
     first, second = Condition("first"), Condition("second")
     config = CodeActConfig(
         preconditions=[first, begin_verification, second],
-        postconditions=[first, require_verification, second],
+        postconditions=[
+            first,
+            require_verification,
+            second,
+            require_recovery,
+            require_verification,
+        ],
     )
     rebuilt = CodingReplyStrategy(config=CodingReplyStrategy(config=config).config).config
     assert list(rebuilt.preconditions) == [first, begin_verification, second]
-    assert list(rebuilt.postconditions) == [first, require_verification, second]
+    assert list(rebuilt.postconditions) == [first, second, require_recovery, require_verification]

@@ -425,6 +425,9 @@ class ShellTools(Skill):
     Timeouts return a result, not an exception. Printed timeout results include
     ``timed_out=True`` and the effective ``timeout_seconds``.
 
+    Text file operations use UTF-8, with universal-newline reads and native
+    platform newline conversion on writes.
+
     File reads are bounded. A ranged read consumes only that range, however
     large the file is. Reading or replacing a whole file is capped by
     ``max_file_bytes`` (8 MiB by default, raise it per instance:
@@ -1089,7 +1092,9 @@ class ShellTools(Skill):
             ):
                 new_text += "\n"
             new_content = "".join(before) + new_text + "".join(after)
-            resolved.write_text(new_content)
+            # Validate before write_text() truncates the original file.
+            new_content.encode("utf-8")
+            resolved.write_text(new_content, encoding="utf-8")
 
             diff = f"--- a/{target.path}\n+++ b/{target.path}\n"
             diff += f"@@ -{target.start},{target.end - target.start + 1} @@\n"
@@ -1123,7 +1128,9 @@ class ShellTools(Skill):
                 )
 
             new_content = content.replace(old_text, new, 1)
-            resolved.write_text(new_content)
+            # Validate before write_text() truncates the original file.
+            new_content.encode("utf-8")
+            resolved.write_text(new_content, encoding="utf-8")
 
             return FileWrite(
                 path=target,
@@ -1146,9 +1153,11 @@ class ShellTools(Skill):
             path: File path (relative to cwd or absolute).
             content: Full file content.
         """
+        # Validate before creating directories or truncating the target.
+        content.encode("utf-8")
         resolved = self._resolve_path(path)
         resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_text(content)
+        resolved.write_text(content, encoding="utf-8")
         line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
         return FileWrite(
             path=path,

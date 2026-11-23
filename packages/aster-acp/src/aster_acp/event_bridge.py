@@ -30,6 +30,7 @@ from aster_cli.coding.activity import (
     TerminalCommandStarted,
 )
 from aster_cli.coding.agent import CodingAgent
+from aster_cli.coding.verification import CodingDone
 
 from aster.agentdoc import pformat
 from aster.agents.summarization import summary_fork_active
@@ -228,6 +229,13 @@ class ACPEventBridge:
         elif isinstance(result, NeedInput):
             self.set_wait_reason(result.reason or result.question)
         elif isinstance(result, Done):
+            if (
+                isinstance(result, CodingDone)
+                and result._original_message is not None
+                and result.message is not None
+                and self._reply_stream is not None
+            ):
+                self._reply_stream.amend(result._original_message, result.message)
             self.set_wait_reason("")
         else:
             self.refresh_tasks()

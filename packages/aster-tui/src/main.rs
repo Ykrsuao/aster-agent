@@ -518,22 +518,24 @@ fn handle_mouse(
                         | Overlay::Permissions
                         | Overlay::Sandbox
                         | Overlay::Hud
-                ) || (overlay == Overlay::Skills && controller.state.skills.detail.is_none())
-                || (matches!(
-                    overlay,
-                    Overlay::Context
-                        | Overlay::Tools
-                        | Overlay::Changes
-                        | Overlay::Attachments
-                        | Overlay::Tasks
-                        | Overlay::Approval
-                        | Overlay::Rollback
-                        | Overlay::RollbackConfirm
-                        | Overlay::UndoConfirm
-                ) && hits
-                    .choice_rows
-                    .iter()
-                    .any(|(rect, _)| rect.contains(position)));
+                ) || (overlay == Overlay::Skills
+                    && controller.state.skills.detail.is_none())
+                    || (matches!(
+                        overlay,
+                        Overlay::Context
+                            | Overlay::Tools
+                            | Overlay::Mcp
+                            | Overlay::Changes
+                            | Overlay::Attachments
+                            | Overlay::Tasks
+                            | Overlay::Approval
+                            | Overlay::Rollback
+                            | Overlay::RollbackConfirm
+                            | Overlay::UndoConfirm
+                    ) && hits
+                        .choice_rows
+                        .iter()
+                        .any(|(rect, _)| rect.contains(position)));
                 if list {
                     let max = controller.state.choices().len().saturating_sub(1);
                     controller.state.selected = if up {

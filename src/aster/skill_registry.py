@@ -395,7 +395,7 @@ class SkillRegistry(Skill):
         skill_roots = [Path(path) for path in dirs if Path(path).is_dir()]
         for skills_dir in skill_roots:
             self.discover_libs(skills_dir)
-            for entry in skills_dir.iterdir():
+            for entry in sorted(skills_dir.iterdir(), key=lambda path: path.name):
                 if entry.is_dir():
                     skill_md = entry / "SKILL.md"
                     if not skill_md.exists():
@@ -412,9 +412,18 @@ class SkillRegistry(Skill):
         try:
             skill = TextSkill(path=entry)
             reg_name = f"cmd.{skill.id}"
-            if reg_name not in self._loaded:
-                self.register(reg_name, skill)
-                self._sources[reg_name] = _SkillSource("text", entry.resolve())
+            if reg_name in self._loaded:
+                source = self._sources.get(reg_name)
+                if source is None or source.path != entry.resolve():
+                    logger.warning(
+                        "Ignoring duplicate text skill %s from %s; keeping %s",
+                        reg_name,
+                        entry,
+                        source.path if source else "the existing registration",
+                    )
+                return
+            self.register(reg_name, skill)
+            self._sources[reg_name] = _SkillSource("text", entry.resolve())
         except Exception:
             logger.warning("TextSkill %s skipped", entry, exc_info=True)
 
@@ -516,6 +525,64 @@ class SkillRegistry(Skill):
         if changed:
             self._refresh_host_commands()
 
+    def text_skills(self) -> dict[str, TextSkill]:
+        """Return loaded text skills by their fully-qualified registry names."""
+        result: dict[str, TextSkill] = {}
+        for name in sorted(self._loaded):
+            attr = self._attr_map.get(name)
+            skill = getattr(self._agent, attr, None) if attr else None
+            if isinstance(skill, TextSkill):
+                result[name] = skill
+        return result
+
+    def resolve_text_skill(
+        self, selector: str, *, user_invoked: bool = False
+    ) -> tuple[str, TextSkill]:
+        """Resolve one exact registry name or unique name/id alias without activating it."""
+        text_skills = self.text_skills()
+        key = selector.casefold()
+        names = [name for name in text_skills if name.casefold() == key]
+        if not names:
+            names = [
+                name
+                for name, skill in text_skills.items()
+                if key in {skill.name.casefold(), skill.id.casefold()}
+            ]
+        if not names:
+            raise ValueError(f"Text skill {selector!r} not found")
+        if len(names) != 1:
+            raise ValueError(
+                f"Text skill {selector!r} is ambiguous. Use a full name: {', '.join(names)}"
+            )
+        name = names[0]
+        conflicts = sorted(
+            candidate
+            for candidate in set(self._discovered) | self._loaded
+            if candidate != name and candidate.casefold() == name.casefold()
+        )
+        if conflicts:
+            raise ValueError(
+                f"Text skill {name!r} conflicts with other registered names: {', '.join(conflicts)}"
+            )
+        attr = self._attr_map[name]
+        owners = sorted(owner for owner in self._loaded if self._attr_map.get(owner) == attr)
+        if len(owners) != 1:
+            raise ValueError(
+                f"Text skill {name!r} has a conflicting shared binding: {', '.join(owners)}. "
+                "Give these skills distinct names and reload them."
+            )
+        skill = text_skills[name]
+        if user_invoked and not skill.user_invocable:
+            raise ValueError(f"Text skill {name!r} does not allow user invocation")
+        if not user_invoked and not skill.allow_implicit_invocation:
+            raise ValueError(f"Text skill {name!r} does not allow implicit invocation")
+        return name, skill
+
+    def read_text_skill(self, selector: str) -> str:
+        """Read a relevant text skill's instructions for this turn, without activating it."""
+        name, skill = self.resolve_text_skill(selector)
+        return f"Text skill: {name}\nsource_dir: {skill.source_dir}\n\n{type(skill).__doc__ or ''}"
+
     def _protected_conflict(self, name: str, attr: str, skill: Any = None) -> str | None:
         """Describe why *name* may not take over *attr*, or None if it may.
 
@@ -608,6 +675,41 @@ class SkillRegistry(Skill):
             category = name.split(".")[0] if "." in name else ""
             self._discovered[name] = _SkillEntry(name=name, entry_point=None, category=category)
         self._refresh_host_commands()
+
+    def unregister(self, name: str, *, instance: Any) -> bool:
+        """Remove an exact registration only while it still holds *instance*.
+
+        Interactive hosts use this to withdraw tools whose configuration was
+        removed or disabled. The caller owns resource cleanup; this method
+        removes the binding, visibility and command entries without invoking
+        lifecycle hooks. A discovered entry point remains available to load
+        again. Another registration sharing the attribute is left intact.
+        """
+        attr = self._attr_map.get(name)
+        if attr is None or name not in self._loaded:
+            return False
+        if getattr(self._agent, attr, None) is not instance:
+            return False
+
+        aliases = {
+            other for other, binding in self._attr_map.items() if other != name and binding == attr
+        }
+        if not aliases.intersection(self._activated):
+            self._hide_skill(name)
+            if name in self._activated:
+                self._unregister_context_block(name)
+        if not aliases:
+            delattr(self._agent, attr)
+        self._activated.discard(name)
+        self._loaded.remove(name)
+        self._attr_map.pop(name)
+        self._load_order = [loaded for loaded in self._load_order if loaded != name]
+        self._sources.pop(name, None)
+        entry = self._discovered.get(name)
+        if entry is not None and entry.entry_point is None:
+            self._discovered.pop(name)
+        self._refresh_host_commands()
+        return True
 
     def _refresh_host_commands(self) -> None:
         """Notify an attached interactive host that loaded commands changed."""
@@ -1285,8 +1387,7 @@ class SkillRegistry(Skill):
     def status(self) -> str:
         """Render the skills context block for the LLM.
 
-        Shows active tools and available-but-inactive skills with one-liners.
-        Excludes cmd.* (slash commands) since the agent cannot invoke them.
+        Show tool summaries and an eligible text-skill catalog, never text-skill bodies.
         """
         lines: list[str] = []
 
@@ -1297,7 +1398,7 @@ class SkillRegistry(Skill):
                 continue
             attr = self._attr_map.get(name, "")
             skill = getattr(self._agent, attr, None) if attr else None
-            if skill is None:
+            if skill is None or isinstance(skill, TextSkill):
                 continue
             doc_str = type(skill).__doc__ or ""
             one_liner = doc_str.strip().split("\n")[0][:65]
@@ -1319,6 +1420,8 @@ class SkillRegistry(Skill):
             # Try to get one-liner from loaded skill or entry point
             attr = self._attr_map.get(name, "")
             skill = getattr(self._agent, attr, None) if attr else None
+            if isinstance(skill, TextSkill):
+                continue
             if skill:
                 doc_str = type(skill).__doc__ or ""
                 one_liner = doc_str.strip().split("\n")[0][:65]
@@ -1341,6 +1444,29 @@ class SkillRegistry(Skill):
             lines.append("Available Skills (activate with self.skills.activate(['name'])):")
             for name, desc in available:
                 lines.append(f"  {name:28s} {desc}")
+
+        text_skills = []
+        for name, skill in self.text_skills().items():
+            try:
+                self.resolve_text_skill(name)
+            except ValueError:
+                continue
+            text_skills.append((name, skill))
+        if text_skills:
+            if lines:
+                lines.append("")
+            lines.extend(
+                [
+                    "Text Skills (select those relevant to the current task):",
+                    "  First read the full instructions with "
+                    "self.skills.read_text_skill('full.registry.name'), then follow them.",
+                    "  Resolve relative reference files from source_dir. "
+                    "Skill instructions apply to the current turn only.",
+                ]
+            )
+            for name, skill in text_skills:
+                lines.append(f"  {name} ({skill.name}): {skill.description}")
+                lines.append(f"    source_dir: {skill.source_dir}")
 
         return "\n".join(lines)
 

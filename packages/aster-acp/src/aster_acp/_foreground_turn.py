@@ -95,7 +95,7 @@ class ForegroundTurn:
             self._handle.checkpoint_interrupted(turn_id=self._turn_id)
         if self._can_save_current:
             try:
-                self._handle.storage.save_current_snapshot(self._agent)
+                self._handle.save_current_snapshot(self._agent)
             except SerializationError:
                 logger.warning(
                     "Could not save conversation state %s", self._handle.id, exc_info=True
@@ -133,12 +133,13 @@ class ForegroundTurns:
         self, turn_id: str, started_at: float, backend: str
     ) -> AsyncIterator[ForegroundTurn]:
         """Track one claimed prompt and finalize its state before transport flushing."""
+        checkpoint_id = None
         try:
-            self._handle.checkpoint(self._agent)
+            checkpoint_id = self._handle.checkpoint(self._agent)
         except SerializationError:
             # Unsupported state must not prevent an otherwise valid prompt.
             logger.warning("Could not checkpoint conversation %s", self._handle.id, exc_info=True)
-        self._handle.storage.invalidate_current_snapshot()
+        self._handle.invalidate_current_snapshot(checkpoint_id=checkpoint_id)
         previous_turn_count = self._handle.info.turn_count
         async with self._bridge.prompt(started_at, backend) as progress:
             turn = ForegroundTurn(

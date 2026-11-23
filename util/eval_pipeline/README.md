@@ -296,6 +296,63 @@ Each result includes:
 - `expected`: Expected output
 - `scores`: Per-scorer results
 - `trace_file`: Path to detailed trace
+- `token_usage`: Known input/output/total token subtotals, the number of observed
+  usage records, and a separate completeness flag for each dimension. The flat
+  `input_tokens`, `output_tokens`, and `total_tokens` fields are totals only when
+  every observed turn reports that dimension. Missing usage stays `null`; an
+  explicitly reported zero stays `0`. Cache and reasoning subsets are not added
+  again. Missing traces make completeness false, even when other results report usage.
+
+The completion record preserves the same `token_usage` evidence across results.
+Its `total_input_tokens`, `total_output_tokens`, and `total_tokens` fields remain
+unknown if any included result is incomplete. A known subtotal is a lower bound,
+not a complete bill. The schema remains version 1 and old files without
+`token_usage` still parse. When appending legacy results, non-null flat counts are
+treated as reported aggregate records; historical completeness cannot be proved
+if their original per-call usage has already been lost.
+
+### Frozen terminal evidence
+
+[`scripts/terminal_acceptance.py`](../../scripts/terminal_acceptance.py) runs ten
+fixed CodingAgent workspace tasks with an independent verifier. A live run on
+native Windows uses an explicitly selected saved model alias and sends requests:
+
+```powershell
+uv run python scripts/terminal_acceptance.py --model my-alias --output results/terminal --repeats 3
+```
+
+Each repeat has its own `repeat-N/report.json`; `aggregate.json` keeps completion,
+verification, observed pass rate, worker elapsed time, calls, manual interventions,
+recovery scope, known token/cost subtotals, and completeness separate. Report
+directories created by the runner are excluded from candidate comparison; source
+changes still invalidate comparability. A single run retains the existing output
+layout and accepts `--repeat-id N`. Selected `--task` subsets and interrupted
+reports are not complete suite evidence. Recovery is explicitly `not_exercised`;
+these tasks do not measure session recovery or terminal UI behavior.
+
+Reports retain the source candidate, fixture and runner hashes, limits, and actual
+resolved model identity. The alias is a display label. `model_identity` is a
+strict non-secret projection (`client_type`, `model`, sanitized `endpoint_origin`,
+`sampling`, `reasoning_level`); credentials, endpoint paths/query strings, headers,
+and arbitrary provider configuration are never exported or hashed. Fingerprints
+use SHA256 over canonical UTF-8 JSON (`sort_keys=True`, `separators=(",", ":")`,
+`ensure_ascii=True`, `allow_nan=False`). This projection is not proof of hidden
+provider defaults or the provider's deployed weights. FakeLLM runs are marked
+`offline-scripted` and cannot establish live model reliability.
+
+Existing reports can be summarized without calling a model:
+
+```powershell
+uv run python scripts/terminal_acceptance.py --aggregate results/terminal/repeat-1/report.json results/terminal/repeat-2/report.json results/terminal/repeat-3/report.json --repeats 3 --output results/terminal-summary
+```
+
+Aggregation rejects different candidates, fixtures, runner versions, identities,
+limits or measurement kinds; repeated/missing repeat IDs; partial task sets; and
+unfinished or contradictory results. A request dispatched without a response
+makes token/cost totals unknown while retaining completed-response subtotals.
+Missing usage is never converted to a free or zero-token request. Rates describe
+only the supplied fixed tasks and repeats. They are not production reliability
+estimates, and local JSON alone does not establish trusted release provenance.
 
 ---
 

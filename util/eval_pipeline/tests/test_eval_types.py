@@ -464,6 +464,36 @@ class TestSupportedVersions:
 class TestExperimentWriterIntegration:
     """Integration tests for ExperimentWriter with real file I/O."""
 
+    @pytest.mark.parametrize("counts, expected", [([10, None], None), ([0, 0], 0)])
+    def test_completion_totals_distinguish_missing_usage_and_zero(self, tmp_path, counts, expected):
+        from eval_pipeline.experiment_writer import ExperimentWriter
+
+        writer = ExperimentWriter(output_dir=tmp_path, experiment_name="tokens")
+        writer.start()
+        for index, count in enumerate(counts):
+            writer.append_result(
+                EvalTestResult(
+                    test_id=str(index),
+                    agent_class="Agent",
+                    method="run",
+                    model="fake",
+                    variant="default",
+                    passed=True,
+                    scores={},
+                    input=None,
+                    output=None,
+                    expected=None,
+                    input_tokens=count,
+                    output_tokens=count,
+                    total_tokens=count,
+                )
+            )
+        writer.finalize()
+        _, _, completion, _ = EvalFileParser().parse_file(writer.file_path)
+        assert completion.total_input_tokens == expected
+        assert completion.total_output_tokens == expected
+        assert completion.total_tokens == expected
+
     def test_writer_produces_parseable_output(self, tmp_path):
         """ExperimentWriter output can be parsed by EvalFileParser."""
         from eval_pipeline.experiment_writer import ExperimentWriter

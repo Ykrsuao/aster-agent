@@ -222,6 +222,87 @@ async def test_accept_edits_rejects_other_cells_before_any_side_effect(tmp_path,
         assert "rejected" in repr(llm.calls[-1].messages).lower()
 
 
+async def test_plan_inspects_new_files_through_real_codeact_without_execution(tmp_path):
+    source = tmp_path / "src" / "answer.py"
+    source.parent.mkdir()
+    original = b"def needle():\n    return 2718\n"
+    source.write_bytes(original)
+    codes = (
+        "await self.files.list('.')",
+        "await self.files.search('needle', path='src', glob='*.py')",
+        "await self.files.read('src/answer.py', start_line=1, end_line=2)",
+    )
+    async with _agent(tmp_path, _turn(*codes)) as (agent, controls, client, llm):
+        await controls.configure(permission_mode="plan")
+
+        result = await agent.handle(
+            {"user_messages": ["Inspect the implementation and plan a fix."]}
+        )
+
+        assert isinstance(result, Done)
+        assert len(_outputs(agent)) == 3
+        assert all(output.execution_status is ResultStatus.COMPLETE for output in _outputs(agent))
+        assert "return 2718" in repr(llm.calls[-1].messages)
+        assert not client.requests
+        assert source.read_bytes() == original
+        assert not any(isinstance(event, FileEdit) for event in agent.event_manager.values())
+
+
+async def test_plan_uses_host_reader_instead_of_mutable_agent_bindings(tmp_path, monkeypatch):
+    (tmp_path / "note.txt").write_text("host-owned reader", encoding="utf-8")
+    code = "await self.files.read('note.txt')"
+    async with _agent(tmp_path, _turn(code)) as (agent, controls, client, llm):
+
+        async def replaced_read(*args, **kwargs):
+            (tmp_path / "executed.txt").write_text("must not run")
+            raise AssertionError("The agent binding must not implement the Plan request")
+
+        monkeypatch.setattr(agent.files, "read", replaced_read)
+        await controls.configure(permission_mode="plan")
+        await agent.handle({"user_messages": ["Read the note for planning."]})
+
+        assert _outputs(agent)[0].execution_status is ResultStatus.COMPLETE
+        assert "host-owned reader" in repr(llm.calls[-1].messages)
+        assert not (tmp_path / "executed.txt").exists()
+        assert not client.requests
+
+
+@pytest.mark.parametrize("change", ["code", "permission", "permission-roundtrip"])
+async def test_plan_rechecks_requests_after_execution_middleware(tmp_path, change):
+    (tmp_path / "note.txt").write_text("not authorized after change", encoding="utf-8")
+    code = "await self.files.read('note.txt')"
+    async with _agent(tmp_path, _turn(code)) as (agent, controls, client, _):
+        await controls.configure(permission_mode="plan")
+
+        async def alter(ctx: ExecutePythonContext, nxt: ExecutePythonNext):
+            if ctx.code == code:
+                if change == "code":
+                    ctx.code = "open('unapproved.txt', 'w')"
+                else:
+                    controls.set_permission_mode("manual")
+                    if change == "permission-roundtrip":
+                        controls.set_permission_mode("plan")
+            return await nxt(ctx)
+
+        agent.event_manager.intercept("execute_python", alter)
+        await agent.handle({"user_messages": ["Read the note for planning."]})
+
+        assert _outputs(agent)[0].execution_status is ResultStatus.ERROR
+        assert not (tmp_path / "unapproved.txt").exists()
+        assert not client.requests
+
+
+async def test_leaving_plan_requires_manual_approval_for_workspace_inspection(tmp_path):
+    (tmp_path / "note.txt").write_text("workspace note", encoding="utf-8")
+    code = "await self.files.read('note.txt')"
+    async with _agent(tmp_path, _turn(code)) as (agent, controls, client, _):
+        controls.set_permission_mode("plan")
+        controls.set_permission_mode("manual")
+        await agent.handle({"user_messages": ["Read the note if permitted."]})
+        assert len(client.requests) == 1
+        assert _outputs(agent)[0].execution_status is ResultStatus.ERROR
+
+
 async def test_plan_does_not_auto_accept_a_direct_file_edit(tmp_path):
     code = "await self.shell.write_file('planned.txt', 'must not be written')"
     async with _agent(tmp_path, _turn(code)) as (agent, controls, client, llm):

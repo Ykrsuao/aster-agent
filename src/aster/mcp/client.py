@@ -7,6 +7,7 @@ from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from importlib.metadata import version as distribution_version
+from pathlib import Path
 from typing import Any, Literal, override
 
 import httpx
@@ -165,11 +166,14 @@ class MCPStdioClient(MCPBaseClient):
         args: list[str] | None = None,
         env: dict[str, str] | None = None,
         tool_call_timeout: timedelta = timedelta(seconds=60),
+        *,
+        cwd: str | Path | None = None,
     ):
         super().__init__(tool_call_timeout=tool_call_timeout)
         self._command = command
         self._args = args
         self._env = env
+        self._cwd = cwd
 
     @property
     def transport(self) -> Literal["sse", "stdio", "streamable-http"]:
@@ -179,12 +183,15 @@ class MCPStdioClient(MCPBaseClient):
     @property
     def server_config(self) -> dict[str, Any]:
         """Return the server configuration."""
-        return {
+        config = {
             "command": self._command,
             "args": self._args or [],
             "env": self._env,
             "transport": self.transport,
         }
+        if self._cwd is not None:
+            config["cwd"] = str(self._cwd)
+        return config
 
     @property
     def command(self) -> str:
@@ -201,6 +208,11 @@ class MCPStdioClient(MCPBaseClient):
         """Return the environment variables."""
         return self._env
 
+    @property
+    def cwd(self) -> str | Path | None:
+        """Return the server's explicit working directory, if supplied."""
+        return self._cwd
+
     @asynccontextmanager
     @override
     async def connect_to_server(self):
@@ -213,7 +225,7 @@ class MCPStdioClient(MCPBaseClient):
         """
 
         server_params = StdioServerParameters(
-            command=self._command, args=self._args or [], env=self._env
+            command=self._command, args=self._args or [], env=self._env, cwd=self._cwd
         )
         async with (
             stdio_client(server_params) as (read, write),
@@ -340,6 +352,8 @@ def create_mcp_client(
     env: dict[str, str] | None = None,
     headers: dict[str, str] | None = None,
     tool_call_timeout: timedelta = timedelta(seconds=60),
+    *,
+    cwd: str | Path | None = None,
 ) -> MCPBaseClient:
     """Create an MCP client based on the transport type and configuration.
 
@@ -351,6 +365,7 @@ def create_mcp_client(
         env: Environment variables for the server process (optional, for stdio transport)
         headers: Optional custom HTTP headers to include in requests (for HTTP transports)
         tool_call_timeout: How long one tool call may take before it fails
+        cwd: Explicit working directory for a stdio server process
 
     Returns:
         An MCPBaseClient instance configured for the specified transport
@@ -367,7 +382,7 @@ def create_mcp_client(
             if command is None:
                 raise ValueError("command must be provided for stdio transport")
             return MCPStdioClient(
-                command=command, args=args, env=env, tool_call_timeout=tool_call_timeout
+                command=command, args=args, env=env, tool_call_timeout=tool_call_timeout, cwd=cwd
             )
         case "sse":
             if url is None:

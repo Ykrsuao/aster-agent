@@ -7,7 +7,7 @@ import json
 import sqlite3
 
 import pytest
-from aster_memory.embeddings import HashingEmbedder
+from aster_memory.embeddings import EmbeddingMismatchError, HashingEmbedder
 from aster_memory.schema import Memory
 from aster_memory.store import SCHEMA_VERSION, MemorySchemaError, MemoryStore
 
@@ -86,12 +86,27 @@ def test_v1_file_migrates_in_place(tmp_path, emb):
 
     got = store.get(mid)
     assert got is not None
+    assert got.content == "written by v1 code"
     assert got.owner == ""  # legacy rows are unowned/shared
     assert got.status is None
-    # new writes with owner work on the migrated file
-    m = _add(store, emb, "post-migration memory", owner="alice")
-    assert store.get(m.id).owner == "alice"
-    store.close()
+    with pytest.raises(EmbeddingMismatchError, match="rebuild_embeddings"):
+        _add(store, emb, "post-migration memory", owner="alice")
+    assert store.count() == 1
+
+    destination = store.rebuild_embeddings(emb, tmp_path / "rebuilt.sqlite")
+    rebuilt = MemoryStore(destination, embedding_identity=emb.identity, embedding_dim=emb.dim)
+    try:
+        recovered = rebuilt.get(mid)
+        assert recovered is not None
+        assert recovered.content == got.content
+        assert recovered.owner == got.owner
+        assert recovered.status == got.status
+        m = _add(rebuilt, emb, "post-migration memory", owner="alice")
+        assert rebuilt.get(m.id).owner == "alice"
+        assert store.count() == 1
+    finally:
+        rebuilt.close()
+        store.close()
 
 
 def test_migration_is_idempotent(tmp_path):

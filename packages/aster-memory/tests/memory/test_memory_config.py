@@ -34,3 +34,12 @@ def test_merge_rejects_invalid_configuration(overrides):
     """Invalid owner and embedding settings fail during the merge, not at later use."""
     with pytest.raises(ValidationError):
         MemoryConfig().merge_with(**overrides)
+
+
+@pytest.mark.parametrize("field", ["dim", "dimensions"])
+@pytest.mark.parametrize("value", [0, -1])
+def test_embedding_dimensions_must_be_positive(field, value):
+    with pytest.raises(ValidationError):
+        EmbeddingConfig(**{field: value})
+    with pytest.raises(ValidationError):
+        MemoryConfig().merge_with(embedding={field: value})

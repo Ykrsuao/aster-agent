@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 
 DB_PATH = Path(os.environ.get("ASTER_TRACE_DB") or Path.cwd() / "traces.db")
 
-_db: sqlite3.Connection | None = None  # used only by init_db() for schema setup
+_db: sqlite3.Connection | None = None  # schema setup and read-only cache version observation
 
 # Thread-local storage for per-thread SQLite connections.
 #
@@ -88,6 +88,19 @@ def close_db(path: Path) -> None:
     for local in (_read_tls, _write_tls):
         if getattr(local, "conn", None) in connections:
             del local.conn
+
+
+def get_cache_version() -> tuple[sqlite3.Connection, int]:
+    """Observe all committed writes through one stable, otherwise read-only connection.
+
+    PRAGMA data_version is connection-local and excludes that connection's own
+    commits. Normal writes use the thread-local connections, never this one.
+    Including the connection identity also invalidates caches after init_db().
+    """
+    with _connections_lock:
+        if _db is None:
+            raise RuntimeError("Database not initialized. Call init_db() first.")
+        return _db, _db.execute("PRAGMA data_version").fetchone()[0]
 
 
 def _get_db() -> sqlite3.Connection:

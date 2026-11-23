@@ -34,6 +34,12 @@ from aster.config.strategy_config import PredictConfig
 from aster.decorators import strategy
 from aster.metaclass import no_trace
 from aster.strategies import PredictStrategy
+from aster.task_budget import (
+    TaskBudget,
+    TaskBudgetError,
+    current_task_budget,
+    task_budget_activity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +109,7 @@ class SummarizationAgent(Agent):
     _pending_task: Annotated[asyncio.Task[Any] | None, hidden]
     _pending_range: Annotated[tuple[str, str] | None, hidden]
     _pending_summary: Annotated[str | None, hidden]
+    _pending_budget: Annotated[TaskBudget | None, hidden] = None
     _unsub_before: Annotated[Callable[[], None] | None, hidden]
     _unsub_after: Annotated[Callable[[], None] | None, hidden]
     _unsub_close: Annotated[Callable[[], None] | None, hidden] = None
@@ -240,6 +247,7 @@ class SummarizationAgent(Agent):
         self._pending_task = None
         self._pending_range = None
         self._pending_summary = None
+        self._pending_budget = None
 
     # -------------------------------------------------------------------------
     # Event handlers
@@ -365,6 +373,7 @@ class SummarizationAgent(Agent):
             return
 
         self._pending_range = (start_tag, end_tag)
+        self._pending_budget = current_task_budget()
         self._pending_task = asyncio.create_task(self._run_summarization(None, start_tag, end_tag))
 
     @hidden
@@ -376,17 +385,21 @@ class SummarizationAgent(Agent):
         summary_llm = self._summary_llm()
         override_token = self._summary_llm_override.set(summary_llm)
         try:
-            if history_markdown is None:
-                history_markdown = self._render_range_to_markdown(start_tag, end_tag)
-            logger.debug(
-                f"Scheduling summarization: {start_tag} -> {end_tag} "
-                f"({len(history_markdown)} chars)"
-            )
-            summary = await self.summarize(history_markdown, self.config.target_chars)
-            self._pending_summary = summary
-            logger.debug(
-                f"Summarization complete: {start_tag} -> {end_tag} (summary: {len(summary)} chars)"
-            )
+            async with task_budget_activity():
+                if history_markdown is None:
+                    history_markdown = self._render_range_to_markdown(start_tag, end_tag)
+                logger.debug(
+                    f"Scheduling summarization: {start_tag} -> {end_tag} "
+                    f"({len(history_markdown)} chars)"
+                )
+                summary = await self.summarize(history_markdown, self.config.target_chars)
+                self._pending_summary = summary
+                logger.debug(
+                    f"Summarization complete: {start_tag} -> {end_tag} (summary: {len(summary)} chars)"
+                )
+        except TaskBudgetError:
+            self._pending_summary = None
+            raise
         except Exception as e:
             # Log error but don't crash - summarization is best-effort
             logger.warning(f"Summarization failed: {e}")
@@ -413,6 +426,8 @@ class SummarizationAgent(Agent):
         if not self._pending_task.done():
             return
 
+        error = None if self._pending_task.cancelled() else self._pending_task.exception()
+        budget = self._pending_budget
         # Get the result (summary is stored in _pending_summary by _run_summarization)
         if self._pending_summary is not None and self._pending_range is not None:
             start_tag, end_tag = self._pending_range
@@ -427,6 +442,12 @@ class SummarizationAgent(Agent):
         self._pending_task = None
         self._pending_range = None
         self._pending_summary = None
+        self._pending_budget = None
+        if isinstance(error, TaskBudgetError):
+            # A completed old task must not stop an explicitly created new task.
+            owner = current_task_budget()
+            if owner is None or owner is budget:
+                raise error
 
     # -------------------------------------------------------------------------
     # Utility methods
@@ -769,6 +790,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
         )
         self._pending_source = source
         self._pending_range = (start, end)
+        self._pending_budget = current_task_budget()
         self._pending_task = asyncio.create_task(self._run_fork(fork))
         # Pause this agent until compaction finishes. Keep the completed task
         # pending so history is still replaced at the next BeforeTurn boundary.
@@ -810,6 +832,9 @@ class TokenBudgetSummarizer(SummarizationAgent):
                 raise ValueError(f"Summary fork did not complete: {response.finish_reason}")
             self._pending_summary = text
             self._failed_forks = 0
+        except TaskBudgetError:
+            self._pending_summary = None
+            raise
         except Exception:
             logger.warning("Summary fork failed; history is unchanged", exc_info=True)
             self._pending_summary = None

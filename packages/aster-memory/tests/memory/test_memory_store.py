@@ -347,7 +347,7 @@ def test_store_serializes_connection_and_index_access(store, emb):
 
 def test_store_survives_foreground_and_reflection_thread_overlap(tmp_path, emb):
     path = tmp_path / "memory.sqlite"
-    store = MemoryStore(path)
+    store = MemoryStore(path, embedding_identity=emb.identity, embedding_dim=emb.dim)
     try:
         for i in range(12):
             _add(store, emb, f"seed memory {i}", type=MemoryType.INFO)

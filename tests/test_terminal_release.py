@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -19,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from scripts import build_terminal_release as release
+from scripts import terminal_release_smoke as smoke
 
 
 def _wheel(
@@ -74,6 +76,14 @@ def bundle(tmp_path):
         _wheel(tmp_path / "wheels", package)
     (tmp_path / "constraints.txt").write_text("click==8.2.1\n", encoding="utf-8")
     return tmp_path
+
+
+def _installed_package(version="1.2.3"):
+    return {
+        "versions": dict.fromkeys(release.PACKAGES, version),
+        "native_sha256": hashlib.sha256(b"MZfake-test-terminal").hexdigest(),
+        "bundled_terminal": True,
+    }
 
 
 def test_platform_hook_rejects_wrong_architecture_and_never_uses_universal_tag(
@@ -279,3 +289,133 @@ def test_installer_preserves_foreign_launcher_and_reinstalls_its_own_tool(bundle
         assert result.returncode == 0, result.stderr
         assert (tmp_path / "owned-bin/aster.exe").is_file()
         assert (tmp_path / "owned-bin/aster-acp.exe").is_file()
+
+
+def test_installed_smoke_binds_versions_and_native_bytes_to_clean_bundle(bundle):
+    release.assemble_bundle(bundle, commit="a" * 40, dirty=False)
+    manifest_path = bundle / "MANIFEST.json"
+    package = _installed_package()
+
+    bound = smoke.bind_bundle(package, manifest_path)
+
+    assert bound == {
+        **package,
+        "bundle_commit": "a" * 40,
+        "bundle_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+    }
+    assert "bundle_commit" not in package
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        ("dirty", "clean terminal bundle"),
+        ("installed-version", "clean terminal bundle"),
+        ("missing-installed-package", "clean terminal bundle"),
+        ("missing-bundle-package", "clean terminal bundle"),
+        ("platform", "clean terminal bundle"),
+        ("replaced-cli-wheel", "CLI wheel hash does not match"),
+        ("native", "does not match the bundled executable"),
+    ],
+)
+def test_installed_smoke_rejects_bundle_mismatch(bundle, failure, message):
+    release.assemble_bundle(bundle, commit="a" * 40, dirty=False)
+    manifest_path = bundle / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    package = _installed_package()
+    if failure == "dirty":
+        manifest["dirty"] = True
+    elif failure == "installed-version":
+        package["versions"]["aster-memory"] = "1.2.2"
+    elif failure == "missing-installed-package":
+        del package["versions"]["aster-bench"]
+    elif failure == "missing-bundle-package":
+        del manifest["packages"]["aster-acp"]
+    elif failure == "platform":
+        manifest["platform"] = "win_arm64"
+    elif failure == "replaced-cli-wheel":
+        _wheel(bundle / "wheels", "aster-cli", terminal=b"MZreplacement-terminal")
+    elif failure == "native":
+        package["native_sha256"] = hashlib.sha256(b"MZdifferent-installed-terminal").hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        smoke.bind_bundle(package, manifest_path)
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [("1.2.3", "1.2.3"), ("1.2.3", "1.2.2"), ("1.10.0", "1.9.0")],
+    ids=["reinstall", "downgrade", "numeric-downgrade"],
+)
+def test_upgrade_evidence_rejects_reinstall_and_downgrade(before, after):
+    with pytest.raises(ValueError, match="older version; reinstall is insufficient"):
+        smoke.require_upgrade(_installed_package(before), _installed_package(after))
+
+
+@pytest.mark.parametrize("phase", ["seed", "installed"])
+@pytest.mark.parametrize("failure", ["missing-package", "mixed-versions"])
+def test_upgrade_evidence_requires_all_five_packages_at_one_version(phase, failure):
+    seed, package = _installed_package("1.2.2"), _installed_package()
+    versions = (seed if phase == "seed" else package)["versions"]
+    if failure == "missing-package":
+        del versions["aster-acp"]
+        message = "all five package versions"
+    else:
+        versions["aster-acp"] = "1.1.0"
+        message = "older version; reinstall is insufficient"
+
+    with pytest.raises(ValueError, match=message):
+        smoke.require_upgrade(seed, package)
+
+
+def test_upgrade_evidence_compares_versions_numerically():
+    smoke.require_upgrade(_installed_package("1.9.0"), _installed_package("1.10.0"))
+
+
+async def test_upgrade_smoke_preserves_saved_input_and_continues_without_replaying(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "smoke"
+    (root / "user").mkdir(parents=True)
+    for name in tuple(os.environ):
+        if name.startswith("ASTER_"):
+            monkeypatch.delenv(name)
+    for name, value in {
+        "ASTER_USER_DIR": str(root / "user"),
+        "ASTER_PROJECT_DIR": str(root / "workspace" / ".aster"),
+        "ASTER_TRUST_ALL_WORKSPACES": "1",
+        "ASTER_MODEL_METADATA_REFRESH": "False",
+        "LITELLM_LOCAL_MODEL_COST_MAP": "True",
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr("aster_acp.server.load_coding_skills_dirs", lambda root: [])
+    seed_package, package = _installed_package("1.2.2"), _installed_package()
+
+    seed = await smoke.session_check(root, "seed", seed_package)
+    assert seed["session_seeded"] is True
+    state = json.loads((root / "smoke-state.json").read_text(encoding="utf-8"))
+    preserved = {relative: (root / relative).read_bytes() for relative in state["preserved_files"]}
+    continued = root / "workspace" / "continued.txt"
+
+    with pytest.raises(ValueError, match="older version; reinstall is insufficient"):
+        await smoke.session_check(root, "verify", seed_package, verify_upgrade=True)
+    assert not continued.exists()
+
+    report = await smoke.session_check(root, "verify", package, verify_upgrade=True)
+
+    assert report["versions"] == package["versions"]
+    assert report["seed_package"] == seed_package
+    assert report["seed_versions"] == seed_package["versions"]
+    for flag in (
+        "upgrade_verified",
+        "cross_version",
+        "session_reopened_without_execution",
+        "continued_after_install",
+        "saved_input_bytes_preserved",
+    ):
+        assert report[flag] is True, flag
+    assert continued.read_text(encoding="utf-8") == "continued\n"
+    assert (root / "workspace" / "result.txt").read_text(encoding="utf-8") == "user changes\n"
+    for relative, before in preserved.items():
+        assert (root / relative).read_bytes() == before, relative

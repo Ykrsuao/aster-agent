@@ -105,6 +105,7 @@ pub enum RuntimeRequest {
     StopTask,
     Context { view: u64 },
     Skills { view: u64 },
+    Mcp { view: u64, reconnect: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -185,6 +186,7 @@ struct Backup {
     hud: crate::hud::Telemetry,
     cost: String,
     commands: Vec<Command>,
+    commands_received: bool,
     scroll: usize,
     elapsed: Option<f64>,
     runtime: Value,
@@ -803,7 +805,14 @@ impl Controller {
         self.state.skills.generation = self.state.skills.generation.wrapping_add(1);
         self.state.skills.loading = false;
         if self.state.overlay == Some(Overlay::Skills) {
-            self.state.skills.error = Some("Backend disconnected. Use /reconnect, then reopen /skills.".into());
+            self.state.skills.error =
+                Some("Backend disconnected. Use /reconnect, then reopen /skills.".into());
+        }
+        self.state.mcp.generation = self.state.mcp.generation.wrapping_add(1);
+        self.state.mcp.loading = false;
+        if self.state.overlay == Some(Overlay::Mcp) {
+            self.state.mcp.error =
+                Some("Backend disconnected. Use /reconnect, then reopen /mcp.".into());
         }
         self.tree_search_request = None;
         self.tree_search_due = None;
@@ -842,6 +851,7 @@ impl Controller {
     pub fn reconnected(&mut self) -> Vec<Action> {
         self.reset_model_selection();
         self.state.skills.supported = false;
+        self.state.mcp.supported = false;
         self.pending.clear();
         self.starting = true;
         self.exiting = false;
@@ -858,6 +868,10 @@ impl Controller {
         self.state.skills = crate::state::SkillsBrowser {
             supported: self.state.skills.supported,
             generation: self.state.skills.generation.wrapping_add(1),
+            ..Default::default()
+        };
+        self.state.mcp = crate::state::McpBrowser {
+            generation: self.state.mcp.generation.wrapping_add(1),
             ..Default::default()
         };
         self.state.runtime = Value::Null;
@@ -1416,6 +1430,11 @@ impl Controller {
             generation: self.state.skills.generation.wrapping_add(1),
             ..Default::default()
         };
+        self.state.mcp = crate::state::McpBrowser {
+            supported: self.state.mcp.supported,
+            generation: self.state.mcp.generation.wrapping_add(1),
+            ..Default::default()
+        };
         self.state.runtime = Value::Null;
         self.state.mode = "code".into();
         self.state.approval_policy = "backend".into();
@@ -1444,6 +1463,7 @@ impl Controller {
         self.state.search_highlight.clear();
         self.state.queue_paused = false;
         self.state.commands = default_commands();
+        self.state.commands_received = false;
     }
 
     fn list(&mut self, purpose: ListPurpose) -> Vec<Action> {
@@ -1485,6 +1505,7 @@ impl Controller {
             hud: self.state.hud.telemetry.clone(),
             cost: self.state.cost.clone(),
             commands: self.state.commands.clone(),
+            commands_received: self.state.commands_received,
             scroll: self.state.scroll,
             elapsed: self.state.last_elapsed,
             runtime: self.state.runtime.clone(),
@@ -1539,6 +1560,7 @@ impl Controller {
             self.state.hud.telemetry = backup.hud;
             self.state.cost = backup.cost;
             self.state.commands = backup.commands;
+            self.state.commands_received = backup.commands_received;
             self.state.scroll = backup.scroll;
             self.state.last_elapsed = backup.elapsed;
             self.state.runtime = backup.runtime;
@@ -1669,6 +1691,24 @@ impl Controller {
                 self.state.query = argument.to_owned();
                 return self.request_skills(None);
             }
+            "/mcp" => {
+                self.state.open(Overlay::Mcp);
+                let (action, name) = argument
+                    .split_once(char::is_whitespace)
+                    .unwrap_or((argument, ""));
+                if action == "reconnect" {
+                    if name.trim().is_empty() {
+                        self.state.mcp.error = Some(
+                            "Use /mcp reconnect <name>, or select a server and press Ctrl+K."
+                                .into(),
+                        );
+                        return vec![];
+                    }
+                    return self.request_mcp(Some(name.trim().to_owned()));
+                }
+                self.state.query = argument.to_owned();
+                return self.request_mcp(None);
+            }
             "/stop" => {
                 return if argument.is_empty() {
                     self.open_tasks()
@@ -1776,7 +1816,9 @@ impl Controller {
             _ => {}
         }
         if self.state.busy() {
-            if !command.starts_with('/') && self.can_enqueue() {
+            if (!command.starts_with('/') || self.state.is_skill_command(command))
+                && self.can_enqueue()
+            {
                 self.enqueue(text);
                 return vec![];
             }
@@ -1829,9 +1871,7 @@ impl Controller {
             "/resume" => self.list(ListPurpose::Resume(argument.into())),
             "/rewind" => self.open_rewind(),
             "/tree" => self.open_tree(),
-            _ if command.starts_with('/')
-                && !self.state.commands.iter().any(|c| c.name == command) =>
-            {
+            _ if command.starts_with('/') && !self.state.is_known_command(command) => {
                 self.state.notice(
                     format!("Unknown command: {command}. Use /help or Ctrl+K."),
                     true,
@@ -1840,7 +1880,7 @@ impl Controller {
             }
             _ => {
                 if !self.state.queued.is_empty() {
-                    if command.starts_with('/') {
+                    if command.starts_with('/') && !self.state.is_skill_command(command) {
                         self.queue_blocks_switch();
                         return vec![];
                     }
@@ -2105,7 +2145,7 @@ impl Controller {
     }
 
     fn can_enqueue(&self) -> bool {
-        !self.exiting && (self.operation == "prompt" || self.state.preparing())
+        !self.exiting && (matches!(self.operation, "prompt" | "mcp") || self.state.preparing())
     }
 
     fn enqueue(&mut self, text: String) {
@@ -2439,7 +2479,8 @@ impl Controller {
             } if self.state.session_id.as_ref() == Some(session)
                 && *generation == self.state.conversation_generation)
         }) {
-            self.state.notice("Wait for the current permission change to finish.", false);
+            self.state
+                .notice("Wait for the current permission change to finish.", false);
             return vec![];
         }
         if (self.state.busy() && !live_permission) || self.state.phase == Phase::Failed {
@@ -2614,7 +2655,12 @@ impl Controller {
             .is_some_and(|target| target != session)
         {
             // Content belongs to the visible inspector and is never replayed.
-            if matches!(operation, RuntimeRequest::Context { .. } | RuntimeRequest::Skills { .. }) {
+            if matches!(
+                operation,
+                RuntimeRequest::Context { .. }
+                    | RuntimeRequest::Skills { .. }
+                    | RuntimeRequest::Mcp { .. }
+            ) {
                 return vec![];
             }
             if let Some(backup) = self.backup.as_mut() {
@@ -2651,6 +2697,32 @@ impl Controller {
     }
 
     fn apply_runtime_response(&mut self, operation: RuntimeRequest, value: &Value) -> Vec<Action> {
+        if let RuntimeRequest::Mcp { view, reconnect } = operation {
+            self.mcp_response(view, value);
+            if reconnect && self.operation == "mcp" {
+                let failed = value.get("error").is_some();
+                if failed && self.state.overlay != Some(Overlay::Mcp) {
+                    self.state.notice(
+                        "MCP retry failed. Open /mcp to inspect server status; this session is kept.",
+                        true,
+                    );
+                }
+                let mut actions = self.ready(if failed {
+                    "MCP retry failed; session kept"
+                } else {
+                    "MCP discovery finished"
+                });
+                if actions.is_empty() {
+                    if self.state.overlay == Some(Overlay::Mcp) && view != self.state.mcp.generation
+                    {
+                        actions.extend(self.request_mcp(None));
+                    }
+                    actions.extend(self.send_queued());
+                }
+                return actions;
+            }
+            return vec![];
+        }
         if let RuntimeRequest::Skills { view } = operation {
             self.skills_response(view, value);
             return vec![];
@@ -2731,7 +2803,9 @@ impl Controller {
                     false,
                 );
             }
-            RuntimeRequest::Context { .. } | RuntimeRequest::Skills { .. } => {
+            RuntimeRequest::Context { .. }
+            | RuntimeRequest::Skills { .. }
+            | RuntimeRequest::Mcp { .. } => {
                 unreachable!("inspector content is handled independently")
             }
         }
@@ -2766,6 +2840,108 @@ impl Controller {
         }
     }
 
+    fn request_mcp(&mut self, name: Option<String>) -> Vec<Action> {
+        self.state.mcp.generation = self.state.mcp.generation.wrapping_add(1);
+        self.state.mcp.error = None;
+        self.state.mcp.loading = false;
+        self.state.detail_scroll = 0;
+        if self.state.session_id.is_none() || self.state.preparing() {
+            self.state.mcp.error = Some("Session is preparing. Press Ctrl+R when ready.".into());
+            return vec![];
+        }
+        if !self.state.mcp.supported {
+            self.state.mcp.error = Some(
+                "This backend does not support MCP controls. Update aster-acp and reconnect."
+                    .into(),
+            );
+            return vec![];
+        }
+        if self.state.phase == Phase::Failed || self.exiting || self.opening.is_some() {
+            self.state.mcp.error = Some(
+                "Session is unavailable. Reconnect or finish switching conversations, then refresh."
+                    .into(),
+            );
+            return vec![];
+        }
+        let reconnect = name.is_some();
+        if reconnect && (self.state.busy() || self.background_running()) {
+            self.state.mcp.error = Some(
+                "Finish or stop foreground and background work before retrying MCP discovery. Ctrl+R can still read status."
+                    .into(),
+            );
+            return vec![];
+        }
+        if reconnect {
+            self.begin("mcp", "Retrying MCP discovery…");
+        }
+        self.state.mcp.loading = true;
+        self.runtime_request(
+            if reconnect {
+                "_aster/session/mcp/reconnect"
+            } else {
+                "_aster/session/mcp/status"
+            },
+            name.map_or_else(|| json!({}), |name| json!({"name": name})),
+            RuntimeRequest::Mcp {
+                view: self.state.mcp.generation,
+                reconnect,
+            },
+        )
+    }
+
+    fn mcp_response(&mut self, view: u64, value: &Value) {
+        if self.state.overlay != Some(Overlay::Mcp) || view != self.state.mcp.generation {
+            return;
+        }
+        self.state.mcp.loading = false;
+        if let Some(error) = value.get("error") {
+            let reason = error["data"]["reason"]
+                .as_str()
+                .or_else(|| error["message"].as_str())
+                .unwrap_or("Could not read MCP status.");
+            self.state.mcp.error = Some(clean(reason));
+            return;
+        }
+        let result = &value["result"];
+        let Some(servers) = result["servers"].as_array() else {
+            self.state.mcp.error = Some("Invalid MCP status. Press Ctrl+R to refresh.".into());
+            return;
+        };
+        let selected = self
+            .state
+            .choices()
+            .get(self.state.selected)
+            .map(|choice| choice.value.clone());
+        self.state.mcp.servers = servers
+            .iter()
+            .take(2000)
+            .filter(|server| server["name"].as_str().is_some_and(|name| !name.is_empty()))
+            .cloned()
+            .collect();
+        self.state.mcp.warnings = result["warnings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .take(100)
+            .map(clean)
+            .collect();
+        if servers.len() > 2000 {
+            self.state
+                .mcp
+                .warnings
+                .push("List limited to 2000 servers.".into());
+        }
+        self.state.selected = selected
+            .and_then(|name| {
+                self.state
+                    .choices()
+                    .iter()
+                    .position(|choice| choice.value == name)
+            })
+            .unwrap_or(0);
+    }
+
     fn request_skills(&mut self, name: Option<String>) -> Vec<Action> {
         self.state.skills.generation = self.state.skills.generation.wrapping_add(1);
         self.state.skills.error = None;
@@ -2777,11 +2953,17 @@ impl Controller {
             return vec![];
         }
         if !self.state.skills.supported {
-            self.state.skills.error = Some("This backend does not support the skills browser. Update aster-acp and reconnect.".into());
+            self.state.skills.error = Some(
+                "This backend does not support the skills browser. Update aster-acp and reconnect."
+                    .into(),
+            );
             return vec![];
         }
         if self.state.phase == Phase::Failed || self.exiting || self.opening.is_some() {
-            self.state.skills.error = Some("Session is unavailable. Reconnect or finish switching conversations, then retry.".into());
+            self.state.skills.error = Some(
+                "Session is unavailable. Reconnect or finish switching conversations, then retry."
+                    .into(),
+            );
             return vec![];
         }
         self.state.skills.loading = true;
@@ -2789,7 +2971,9 @@ impl Controller {
         self.runtime_request(
             "_aster/session/skills",
             params,
-            RuntimeRequest::Skills { view: self.state.skills.generation },
+            RuntimeRequest::Skills {
+                view: self.state.skills.generation,
+            },
         )
     }
 
@@ -2799,7 +2983,8 @@ impl Controller {
         }
         self.state.skills.loading = false;
         if let Some(error) = value.get("error") {
-            let reason = error["data"]["reason"].as_str()
+            let reason = error["data"]["reason"]
+                .as_str()
                 .or_else(|| error["message"].as_str())
                 .unwrap_or("Could not read skills.");
             self.state.skills.error = Some(format!("{} · Ctrl+R retry", clean(reason)));
@@ -2811,19 +2996,35 @@ impl Controller {
             if skill["name"] == detail["name"] && skill["text"].is_string() {
                 self.state.skills.detail = Some(skill.clone());
             } else {
-                self.state.skills.error = Some("Invalid skill detail. Ctrl+R retries; Esc returns to the list.".into());
+                self.state.skills.error =
+                    Some("Invalid skill detail. Ctrl+R retries; Esc returns to the list.".into());
             }
         } else if let Some(items) = result["skills"].as_array() {
-            let selected = self.state.choices().get(self.state.selected)
+            let selected = self
+                .state
+                .choices()
+                .get(self.state.selected)
                 .map(|choice| choice.value.clone());
-            self.state.skills.items = items.iter().take(2000)
+            self.state.skills.items = items
+                .iter()
+                .take(2000)
                 .filter(|item| item["name"].as_str().is_some_and(|name| !name.is_empty()))
-                .cloned().collect();
-            self.state.skills.total = result["total"].as_u64()
-                .map_or(self.state.skills.items.len(), |total| total.min(usize::MAX as u64) as usize);
+                .cloned()
+                .collect();
+            self.state.skills.total = result["total"]
+                .as_u64()
+                .map_or(self.state.skills.items.len(), |total| {
+                    total.min(usize::MAX as u64) as usize
+                });
             self.state.skills.truncated = result["truncated"] == true || items.len() > 2000;
-            self.state.selected = selected.and_then(|name| self.state.choices().iter()
-                .position(|choice| choice.value == name)).unwrap_or(0);
+            self.state.selected = selected
+                .and_then(|name| {
+                    self.state
+                        .choices()
+                        .iter()
+                        .position(|choice| choice.value == name)
+                })
+                .unwrap_or(0);
         } else {
             self.state.skills.error = Some("Invalid skills list. Press Ctrl+R to retry.".into());
         }
@@ -3656,6 +3857,7 @@ impl Controller {
                     result["_meta"]["aster"]["modelSelection"] == true;
                 self.state.tasks_supported = result["_meta"]["aster"]["structuredProgress"] == true;
                 self.state.skills.supported = result["_meta"]["aster"]["skills"] == true;
+                self.state.mcp.supported = result["_meta"]["aster"]["mcp"] == true;
                 self.state.phase = Phase::Ready;
                 if self.state.model.is_empty() && self.state.model_selection.supported {
                     self.operation = "";
@@ -4360,6 +4562,7 @@ impl Controller {
             }
             "available_commands_update" => {
                 self.state.commands = default_commands();
+                self.state.commands_received = true;
                 if let Some(commands) = update["availableCommands"].as_array() {
                     for command in commands {
                         if let Some(name) = command["name"].as_str() {
@@ -4367,9 +4570,46 @@ impl Controller {
                             if !self.state.commands.iter().any(|c| c.name == name) {
                                 self.state.commands.push(Command {
                                     name,
+                                    is_skill: command["_meta"]["aster"]["kind"] == "skill",
+                                    aliases: if command["_meta"]["aster"]["kind"] == "skill" {
+                                        command["_meta"]["aster"]["aliases"]
+                                            .as_array()
+                                            .into_iter()
+                                            .flatten()
+                                            .filter_map(Value::as_str)
+                                            .filter(|value| {
+                                                !value.is_empty()
+                                                    && !value.starts_with('/')
+                                                    && !value.chars().any(|character| {
+                                                        character.is_whitespace()
+                                                            || character.is_control()
+                                                    })
+                                            })
+                                            .map(|alias| format!("/{alias}"))
+                                            .collect()
+                                    } else {
+                                        Vec::new()
+                                    },
                                     description: clean(
                                         command["description"].as_str().unwrap_or(""),
                                     ),
+                                    argument_hint: clean(
+                                        command["input"]["hint"].as_str().unwrap_or(""),
+                                    ),
+                                    completions: command["_meta"]["aster"]["completions"]
+                                        .as_array()
+                                        .into_iter()
+                                        .flatten()
+                                        .filter_map(Value::as_str)
+                                        .filter(|value| {
+                                            !value.is_empty()
+                                                && !value.chars().any(|character| {
+                                                    character.is_whitespace()
+                                                        || character.is_control()
+                                                })
+                                        })
+                                        .map(str::to_owned)
+                                        .collect(),
                                 });
                             }
                         }
@@ -4696,10 +4936,18 @@ impl Controller {
                     return vec![];
                 }
                 KeyCode::Tab => {
-                    self.set_draft(&format!("{} ", choices[self.state.slash_selected].value));
+                    self.complete_slash(self.state.slash_selected);
                     return vec![];
                 }
-                KeyCode::Enter => return self.choose_slash(self.state.slash_selected),
+                KeyCode::Enter => {
+                    let choice = &choices[self.state.slash_selected];
+                    if !self.state.slash_choice_fills_draft(choice)
+                        && !self.state.slash_choice_is_exact(choice)
+                    {
+                        return self.send_editor(self.state.editor.lines().join("\n"));
+                    }
+                    return self.choose_slash(self.state.slash_selected);
+                }
                 KeyCode::Esc => {
                     self.state.escape_confirmation = None;
                     self.state.slash_dismissed = true;
@@ -4878,25 +5126,77 @@ impl Controller {
         }
     }
 
-    /// Select and execute an inline command without routing through a modal query.
+    fn complete_slash(&mut self, index: usize) {
+        let Some(completion) = self.state.draft_completion() else {
+            return;
+        };
+        let Some(choice) = completion.choices.get(index) else {
+            return;
+        };
+        let mut replacement = choice.value.clone();
+        if completion.row + 1 == self.state.editor.lines().len()
+            && completion.end == self.state.editor.lines()[completion.row].chars().count()
+        {
+            replacement.push(' ');
+        }
+        self.state.editor.cancel_selection();
+        for _ in self.state.editor.cursor().1..completion.end {
+            self.state.editor.move_cursor(CursorMove::Forward);
+        }
+        self.state.editor.start_selection();
+        for _ in completion.start..completion.end {
+            self.state.editor.move_cursor(CursorMove::Back);
+        }
+        self.paste(replacement);
+        self.state.slash_dismissed = true;
+    }
+
+    /// A skill selection edits the current token without submitting the draft.
     pub fn choose_slash(&mut self, index: usize) -> Vec<Action> {
-        let Some(choice) = self.state.slash_choices().get(index).cloned() else {
+        let Some(completion) = self.state.draft_completion() else {
+            return vec![];
+        };
+        let Some(choice) = completion.choices.get(index) else {
             return vec![];
         };
         self.state.slash_selected = index;
-        self.send_editor(choice.value)
+        if self.state.slash_choice_fills_draft(choice) {
+            self.complete_slash(index);
+            return vec![];
+        }
+        let mut lines = self.state.editor.lines().to_vec();
+        let characters: Vec<_> = lines[completion.row].chars().collect();
+        lines[completion.row] = format!(
+            "{}{}{}",
+            characters[..completion.start].iter().collect::<String>(),
+            choice.value,
+            characters[completion.end..].iter().collect::<String>(),
+        );
+        self.send_editor(lines.join("\n"))
     }
 
     fn send_editor(&mut self, text: String) -> Vec<Action> {
         let command = text.split_whitespace().next().unwrap_or("");
-        if self.state.model.is_empty() && !command.starts_with('/') {
+        if command.starts_with('/') && !self.state.is_known_command(command) {
+            self.state.notice(
+                if self.state.commands_received {
+                    format!("Unknown command: {command}. Use /help or Ctrl+K.")
+                } else {
+                    "The command catalog is not available yet. Wait a moment and try again. Your draft is kept.".into()
+                },
+                self.state.commands_received,
+            );
+            return vec![];
+        }
+        let needs_prompt = !command.starts_with('/') || self.state.is_skill_command(command);
+        if self.state.model.is_empty() && needs_prompt {
             self.state.notice(
                 "Choose a configured model with /model before sending. Your draft is kept.",
                 false,
             );
             return vec![];
         }
-        if self.state.attachment_loading && !command.starts_with('/') {
+        if self.state.attachment_loading && needs_prompt {
             self.state.notice(
                 "Reading the selected attachment. Your draft is kept until it is ready.",
                 false,
@@ -4924,7 +5224,7 @@ impl Controller {
             return vec![];
         }
         if self.state.busy()
-            && (command.starts_with('/') || !self.can_enqueue())
+            && (!needs_prompt || !self.can_enqueue())
             && !matches!(
                 command,
                 "/exit"
@@ -4952,6 +5252,7 @@ impl Controller {
                     | "/sandbox"
                     | "/tasks"
                     | "/skills"
+                    | "/mcp"
                     | "/stop"
             )
         {
@@ -5034,11 +5335,35 @@ impl Controller {
     }
 
     fn overlay_key(&mut self, overlay: Overlay, key: KeyEvent) -> Vec<Action> {
+        if overlay == Overlay::Mcp && key.modifiers == KeyModifiers::CONTROL {
+            if key.code == KeyCode::Char('r') {
+                return if key.kind == KeyEventKind::Repeat {
+                    vec![]
+                } else {
+                    self.request_mcp(None)
+                };
+            }
+            if key.code == KeyCode::Char('k') {
+                if key.kind == KeyEventKind::Press {
+                    if let Some(choice) = self.state.choices().get(self.state.selected) {
+                        return self.request_mcp(Some(choice.value.clone()));
+                    }
+                }
+                return vec![];
+            }
+        }
         if overlay == Overlay::Skills {
             if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::CONTROL {
-                if key.kind == KeyEventKind::Repeat { return vec![]; }
-                let name = self.state.skills.detail.as_ref()
-                    .and_then(|skill| skill["name"].as_str()).map(str::to_owned);
+                if key.kind == KeyEventKind::Repeat {
+                    return vec![];
+                }
+                let name = self
+                    .state
+                    .skills
+                    .detail
+                    .as_ref()
+                    .and_then(|skill| skill["name"].as_str())
+                    .map(str::to_owned);
                 return self.request_skills(name);
             }
             if self.state.skills.detail.is_some() {
@@ -5050,10 +5375,18 @@ impl Controller {
                         self.state.skills.error = None;
                         self.state.detail_scroll = 0;
                     }
-                    KeyCode::Up => self.state.detail_scroll = self.state.detail_scroll.saturating_sub(1),
-                    KeyCode::Down => self.state.detail_scroll = self.state.detail_scroll.saturating_add(1),
-                    KeyCode::PageUp => self.state.detail_scroll = self.state.detail_scroll.saturating_sub(10),
-                    KeyCode::PageDown => self.state.detail_scroll = self.state.detail_scroll.saturating_add(10),
+                    KeyCode::Up => {
+                        self.state.detail_scroll = self.state.detail_scroll.saturating_sub(1)
+                    }
+                    KeyCode::Down => {
+                        self.state.detail_scroll = self.state.detail_scroll.saturating_add(1)
+                    }
+                    KeyCode::PageUp => {
+                        self.state.detail_scroll = self.state.detail_scroll.saturating_sub(10)
+                    }
+                    KeyCode::PageDown => {
+                        self.state.detail_scroll = self.state.detail_scroll.saturating_add(10)
+                    }
                     KeyCode::Home => self.state.detail_scroll = 0,
                     KeyCode::End => self.state.detail_scroll = u16::MAX,
                     _ => {}
@@ -5441,6 +5774,10 @@ fn diff(item: &Value) -> String {
 }
 
 #[cfg(test)]
+#[path = "mcp_tests.rs"]
+mod mcp_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     fn ready() -> Controller {
@@ -5450,6 +5787,7 @@ mod tests {
             false,
         );
         c.ready("Ready");
+        c.state.commands_received = true;
         c
     }
     fn reply(c: &mut Controller, pending: Pending, result: Value) -> Vec<Action> {
@@ -7915,6 +8253,7 @@ mod tests {
         c.state.commands.push(Command {
             name: "/reset".into(),
             description: "Reset this view".into(),
+            ..Command::default()
         });
         c.key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         assert_eq!(c.state.slash_choices().len(), c.state.commands.len());
@@ -7933,6 +8272,7 @@ mod tests {
         c.state.commands.push(Command {
             name: "/compact".into(),
             description: "Compact context".into(),
+            ..Command::default()
         });
         c.key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         for ch in "compact".chars() {
@@ -8012,6 +8352,7 @@ mod tests {
             c.state.commands.push(Command {
                 name: "/custom".into(),
                 description: "Custom command".into(),
+                ..Command::default()
             });
             c.paste("important unsent draft\n中文".into());
             c.state.editor.move_cursor(CursorMove::Head);
@@ -8042,6 +8383,7 @@ mod tests {
             c.state.commands.push(Command {
                 name: "/custom".into(),
                 description: "Custom command".into(),
+                ..Command::default()
             });
             c.key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
             c.paste(query.into());
@@ -8058,6 +8400,7 @@ mod tests {
         c.state.commands.push(Command {
             name: "/compact".into(),
             description: "Compact context".into(),
+            ..Command::default()
         });
         let text = "/compact 保留中文\n    code = 1\n";
         c.paste(text.into());
@@ -8065,6 +8408,459 @@ mod tests {
         let actions = c.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(prompt_text(&actions), text);
         assert!(c.state.queued.is_empty());
+    }
+
+    fn text_skill_commands(c: &mut Controller, names: &[&str]) {
+        update(
+            c,
+            json!({
+                "sessionUpdate": "available_commands_update",
+                "availableCommands": names.iter().map(|name| json!({
+                    "name": name,
+                    "description": "Apply a text skill to the current task",
+                    "input": {"hint": "[task]"},
+                    "_meta": {"aster": {"kind": "skill"}}
+                })).collect::<Vec<_>>()
+            }),
+        );
+    }
+
+    #[test]
+    fn text_skill_waits_for_initial_commands_without_opening_the_browser() {
+        for text in [
+            "/skill",
+            "/SKILL",
+            "/review",
+            "/review inspect \"two words\"  ",
+        ] {
+            let mut c = ready();
+            c.state.commands_received = false;
+            c.state.session_id = Some("s".into());
+            c.paste(text.into());
+            c.state.attachments.push(polish_attachment("draft.png"));
+            let attachments = c.state.attachments.clone();
+            assert!(c.state.slash_choices().is_empty());
+            assert!(c.choose_slash(0).is_empty());
+            assert!(c
+                .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .is_empty());
+            assert_eq!(c.state.editor.lines(), &[text]);
+            assert_eq!(c.state.attachments, attachments);
+            assert!(c.state.overlay.is_none());
+            assert!(c.pending.is_empty());
+            assert!(c.state.queued.is_empty());
+            assert!(c.state.entries.iter().any(
+                |entry| matches!(entry, Entry::Notice { text, .. } if text.contains("not available yet"))
+            ));
+
+            text_skill_commands(&mut c, &["skill", "review"]);
+            assert!(c.state.commands_received);
+            assert_eq!(c.state.editor.lines(), &[text]);
+            if !text.contains(' ') {
+                assert!(c
+                    .key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+                    .is_empty());
+                assert_eq!(
+                    c.state.editor.lines(),
+                    &[format!("{} ", text.to_lowercase())]
+                );
+            }
+            assert_eq!(c.state.attachments, attachments);
+            assert!(c.pending.is_empty());
+            assert!(c.state.overlay.is_none());
+        }
+    }
+
+    #[test]
+    fn text_skill_unknown_prefix_enter_keeps_the_exact_draft() {
+        let mut c = ready();
+        c.state.session_id = Some("s".into());
+        text_skill_commands(&mut c, &["review"]);
+        for text in ["/skill", "/skill inspect", "/unknown-missing-skill  "] {
+            c.set_draft(text);
+            assert!(c
+                .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .is_empty());
+            assert_eq!(c.state.editor.lines(), &[text]);
+            assert!(c.state.overlay.is_none());
+            assert!(c.pending.is_empty());
+            assert!(c.state.queued.is_empty());
+        }
+        c.set_draft("/skill");
+        c.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(c.state.editor.lines(), &["/skills "]);
+        assert!(c.state.overlay.is_none());
+    }
+
+    #[test]
+    fn text_skill_completion_fills_the_draft_before_sending() {
+        for key in [KeyCode::Tab, KeyCode::Enter] {
+            let mut c = ready();
+            c.state.session_id = Some("s".into());
+            text_skill_commands(&mut c, &["review", "cmd.help"]);
+            c.paste("/rev".into());
+            assert_eq!(c.state.slash_choices()[0].value, "/review");
+            assert!(c.state.slash_choices()[0].label.contains("[task]"));
+            assert!(c.key(KeyEvent::new(key, KeyModifiers::NONE)).is_empty());
+            assert_eq!(c.state.editor.lines(), &["/review "]);
+            assert!(c.state.slash_choices().is_empty());
+            assert!(c.state.overlay.is_none());
+            assert!(c.pending.is_empty());
+
+            c.paste("inspect the task".into());
+            let actions = c.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert_eq!(prompt_text(&actions), "/review inspect the task");
+        }
+    }
+
+    #[test]
+    fn text_skill_completion_replaces_only_the_token_and_keeps_attachments() {
+        for (text, row, prefix, expected) in [
+            (
+                "/revOLD inspect \"two words\" C:\\repo\\file.py  \nnext",
+                0,
+                "/rev",
+                "/review inspect \"two words\" C:\\repo\\file.py  \nnext",
+            ),
+            (
+                "first\n检查 $revOLD  后续 \"two words\"  \nlast",
+                1,
+                "$rev",
+                "first\n检查 $review  后续 \"two words\"  \nlast",
+            ),
+            (
+                "first\n检查 $cmd.heOLD  后续\nlast",
+                1,
+                "$cmd.he",
+                "first\n检查 $cmd.help  后续\nlast",
+            ),
+            ("检查 $rev.  后续", 0, "$rev", "检查 $review.  后续"),
+            ("first\n$rev\nlast", 1, "$rev", "first\n$review\nlast"),
+        ] {
+            for key in [Some(KeyCode::Tab), Some(KeyCode::Enter), None] {
+                let mut c = ready();
+                text_skill_commands(&mut c, &["review", "cmd.help"]);
+                c.paste(text.into());
+                let line = &c.state.editor.lines()[row];
+                let column = line[..line.find(prefix).unwrap() + prefix.len()]
+                    .chars()
+                    .count();
+                c.state
+                    .editor
+                    .move_cursor(CursorMove::Jump(row as u16, column as u16));
+                c.state.attachments.push(polish_attachment("draft.png"));
+                let attachments = c.state.attachments.clone();
+                assert_eq!(c.state.slash_choices().len(), 1);
+                let actions = if let Some(key) = key {
+                    c.key(KeyEvent::new(key, KeyModifiers::NONE))
+                } else {
+                    c.choose_slash(0)
+                };
+                assert!(actions.is_empty());
+                assert_eq!(c.state.editor.lines().join("\n"), expected);
+                assert_eq!(c.state.attachments, attachments);
+                assert!(c.state.slash_choices().is_empty());
+                assert!(c.state.queued.is_empty());
+                assert!(c.pending.is_empty());
+                assert!(c.state.editor.undo());
+                assert!(c.state.editor.undo());
+                assert_eq!(c.state.editor.lines().join("\n"), text);
+            }
+        }
+    }
+
+    #[test]
+    fn text_skill_mentions_ignore_unknown_names_escapes_paths_and_code() {
+        for text in [
+            "$PATH",
+            "$reviewer",
+            r"literal \$re",
+            "url/$re",
+            "https://host.invalid?q=$re",
+            "word$re",
+            "    $re",
+            "\t$re",
+            " \t$re",
+            "  \t$re",
+            "`$re",
+            "``$re",
+            "```python\n$re",
+            "~~~python\n$re",
+            "~~~python\n> ~~~\n$re",
+            "~~~python\n- ~~~\n$re",
+            "> ~~~python\n> > ~~~\n> $re",
+            "- ~~~python\n  > ~~~\n  $re",
+            "first\n~~~\n$re",
+            "> ~~~python\n> $re",
+            "- ~~~python\n  $re",
+            "1. ~~~python\n  $re",
+            "> - ~~~python\n>   $re",
+            "$review.",
+        ] {
+            let mut c = ready();
+            c.state.session_id = Some("s".into());
+            text_skill_commands(&mut c, &["review"]);
+            c.paste(text.into());
+            assert!(c.state.slash_choices().is_empty(), "{text}");
+            let actions = c.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert_eq!(prompt_text(&actions), text);
+        }
+        for text in [
+            "`literal` $re",
+            "```python\n$literal\n```\n$re",
+            "~~~\n$literal\n~~~\n$re",
+            "> ~~~\n> $literal\n> ~~~\n$re",
+            "- ~~~\n  $literal\n  ~~~\n$re",
+            "> - ~~~\n>   $literal\n>   ~~~\n$re",
+            "> > ~~~\n> > $literal\n> > ~~~\n$re",
+            "literal $",
+        ] {
+            let mut c = ready();
+            text_skill_commands(&mut c, &["review"]);
+            c.paste(text.into());
+            assert_eq!(c.state.slash_choices()[0].value, "$review", "{text}");
+        }
+    }
+
+    #[test]
+    fn text_skill_picker_keeps_paths_with_a_token_under_the_cursor() {
+        for text in ["$re/path", r"$re\path", "first\n$re/path"] {
+            let mut c = ready();
+            text_skill_commands(&mut c, &["review"]);
+            c.paste(text.into());
+            let row = c.state.editor.lines().len() - 1;
+            c.state.editor.move_cursor(CursorMove::Jump(row as u16, 3));
+            assert!(c.state.slash_choices().is_empty(), "{text}");
+            assert!(c.choose_slash(0).is_empty());
+            assert_eq!(c.state.editor.lines().join("\n"), text);
+        }
+    }
+
+    #[test]
+    fn text_skill_aliases_share_identity_without_duplicate_menu_entries() {
+        let mut c = ready();
+        c.state.session_id = Some("s".into());
+        update(
+            &mut c,
+            json!({
+                "sessionUpdate": "available_commands_update",
+                "availableCommands": [{
+                    "name": "review",
+                    "description": "Review the task",
+                    "input": {"hint": "[task]"},
+                    "_meta": {"aster": {
+                        "kind": "skill",
+                        "aliases": ["cmd.review", "review-id", "", "bad value", "/invalid"]
+                    }}
+                }]
+            }),
+        );
+        assert!(c.state.is_skill_command("/review"));
+        assert!(c.state.is_skill_command("/CMD.REVIEW"));
+        assert!(c.state.is_known_command("/review-id"));
+        c.set_draft("/");
+        assert_eq!(c.state.slash_choices().len(), c.state.commands.len());
+        c.set_draft("$");
+        assert_eq!(c.state.slash_choices().len(), 1);
+        assert_eq!(c.state.slash_choices()[0].value, "$review");
+
+        for (text, expected) in [
+            ("/cmd.re", "/cmd.review "),
+            ("use $cmd.re", "use $cmd.review "),
+            ("use $review-i", "use $review-id "),
+        ] {
+            c.set_draft(text);
+            assert_eq!(c.state.slash_choices().len(), 1);
+            assert!(c
+                .key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+                .is_empty());
+            assert_eq!(c.state.editor.lines(), &[expected]);
+            assert!(c.pending.is_empty());
+        }
+        c.set_draft("/CMD.REVIEW inspect the task  ");
+        let actions = c.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(prompt_text(&actions), "/CMD.REVIEW inspect the task  ");
+
+        let mut unicode = ready();
+        unicode.state.commands.push(Command {
+            name: "/strasse".into(),
+            is_skill: true,
+            aliases: vec!["/straße".into(), "/prüfung".into()],
+            ..Command::default()
+        });
+        assert!(unicode.state.is_skill_command("/Straße"));
+        assert!(unicode.state.is_skill_command("/PRÜFUNG"));
+        unicode.paste("use $PRÜ".into());
+        assert_eq!(unicode.state.slash_choices()[0].value, "$prüfung");
+    }
+
+    #[test]
+    fn text_skill_refresh_and_escape_keep_the_inline_draft() {
+        let mut c = ready();
+        text_skill_commands(&mut c, &["cmd.old"]);
+        c.paste("keep $cmd.".into());
+        assert_eq!(c.state.slash_choices()[0].value, "$cmd.old");
+        text_skill_commands(&mut c, &["cmd.new"]);
+        assert_eq!(c.state.editor.lines(), &["keep $cmd."]);
+        assert_eq!(c.state.slash_choices()[0].value, "$cmd.new");
+        c.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(c.state.slash_choices().is_empty());
+        assert_eq!(c.state.editor.lines(), &["keep $cmd."]);
+        assert!(c.pending.is_empty());
+
+        text_skill_commands(&mut c, &["help", "cmd.help"]);
+        c.set_draft("/help");
+        assert_eq!(
+            c.state.slash_choices()[0].detail,
+            "Keyboard shortcuts and commands"
+        );
+        assert!(!c.state.is_skill_command("/help"));
+        assert!(c
+            .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .is_empty());
+        assert_eq!(c.state.overlay, Some(Overlay::Help));
+    }
+
+    #[test]
+    fn text_skill_submission_waits_for_the_model_and_attachment() {
+        for missing_model in [true, false] {
+            for text in [
+                "/REVIEW inspect the attachment  \nnext",
+                "Inspect the attachment with $review  \nnext",
+            ] {
+                let mut c = ready();
+                c.state.session_id = Some("s".into());
+                text_skill_commands(&mut c, &["review"]);
+                if missing_model {
+                    c.state.model.clear();
+                } else {
+                    c.state.attachment_loading = true;
+                }
+                c.paste(text.into());
+                c.state.attachments.push(polish_attachment("draft.png"));
+                let attachments = c.state.attachments.clone();
+                assert!(c
+                    .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                    .is_empty());
+                assert_eq!(c.state.editor.lines().join("\n"), text);
+                assert_eq!(c.state.attachments, attachments);
+                assert!(c.pending.is_empty());
+                assert!(c.state.queued.is_empty());
+                assert_eq!(c.state.phase, Phase::Ready);
+            }
+        }
+    }
+
+    #[test]
+    fn text_skill_task_arguments_are_sent_unchanged_without_completion() {
+        for text in [
+            "/review inspect \"two words\" C:\\repo\\file.py  ",
+            "/cmd.help 保留中文\n    code = {value}\n",
+            "Use $review for \"two words\"\n    code = {value}\n",
+        ] {
+            let mut c = ready();
+            c.state.session_id = Some("s".into());
+            text_skill_commands(&mut c, &["review", "cmd.help"]);
+            c.paste(text.into());
+            assert!(c.state.slash_choices().is_empty());
+            let actions = c.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert_eq!(prompt_text(&actions), text);
+            assert!(c.state.overlay.is_none());
+        }
+    }
+
+    #[test]
+    fn text_skill_drafts_can_queue_and_escape_closes_only_the_picker() {
+        let mut c = ready();
+        c.state.session_id = Some("s".into());
+        text_skill_commands(&mut c, &["review"]);
+        c.input("working".into());
+        c.paste("/review inspect later".into());
+        c.state.attachments.push(polish_attachment("queued.png"));
+        let attachments = c.state.attachments.clone();
+        assert!(c
+            .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .is_empty());
+        assert_eq!(c.state.queued[0].text, "/review inspect later");
+        assert_eq!(c.state.queued[0].attachments, attachments);
+
+        c.paste("next $re".into());
+        assert_eq!(c.state.slash_choices()[0].value, "$review");
+        assert!(c
+            .key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .is_empty());
+        assert_eq!(c.state.editor.lines(), &["next $re"]);
+        assert_eq!(c.state.phase, Phase::Busy);
+        assert!(!c.cancelled);
+    }
+
+    #[test]
+    fn text_skill_catalog_is_restored_after_a_failed_session_load() {
+        let mut c = ready();
+        c.state.session_id = Some("s".into());
+        text_skill_commands(&mut c, &["review"]);
+        let actions = c.resume("missing".into());
+        assert!(!c.state.commands_received);
+        assert!(!c.state.is_skill_command("/review"));
+        let pending = match &actions[0] {
+            Action::Request { pending, .. } => pending.clone(),
+            action => panic!("expected a load request, got {action:?}"),
+        };
+        c.paste("/review keep this task".into());
+        c.registered(42, pending);
+        c.message(json!({"id":42,"error":{"message":"could not restore"}}));
+        assert!(c.state.commands_received);
+        assert!(c.state.is_skill_command("/review"));
+        assert_eq!(c.state.editor.lines(), &["/review keep this task"]);
+
+        c.reset_conversation();
+        assert!(!c.state.commands_received);
+        text_skill_commands(&mut c, &[]);
+        assert!(c.state.commands_received);
+        assert!(!c.state.is_skill_command("/review"));
+    }
+
+    #[test]
+    fn text_skill_picker_yields_to_newline_and_existing_selections() {
+        for modifiers in [KeyModifiers::SHIFT, KeyModifiers::ALT] {
+            let mut c = ready();
+            text_skill_commands(&mut c, &["review"]);
+            c.paste("check $re".into());
+            assert!(!c.state.slash_choices().is_empty());
+            assert!(c.key(KeyEvent::new(KeyCode::Enter, modifiers)).is_empty());
+            assert_eq!(c.state.editor.lines(), &["check $re", ""]);
+            assert!(c.pending.is_empty());
+        }
+        let mut c = ready();
+        text_skill_commands(&mut c, &["review"]);
+        c.paste("check $re".into());
+        c.state.editor.select_all();
+        assert!(c.state.slash_choices().is_empty());
+    }
+
+    #[test]
+    fn typed_command_argument_completions_remain_available() {
+        let mut c = ready();
+        update(
+            &mut c,
+            json!({
+                "sessionUpdate": "available_commands_update",
+                "availableCommands": [{
+                    "name": "report",
+                    "description": "Choose a report",
+                    "input": {"hint": "<format>"},
+                    "_meta": {"aster": {"completions": ["json", "markdown", "bad value", ""]}}
+                }]
+            }),
+        );
+        c.paste("/report js".into());
+        assert_eq!(c.state.slash_choices()[0].value, "/report json");
+        assert!(!c.state.is_skill_command("/report"));
+        assert!(c
+            .key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .is_empty());
+        assert_eq!(c.state.editor.lines(), &["/report json "]);
+        assert!(c.pending.is_empty());
     }
 
     fn prompt_text(actions: &[Action]) -> &str {

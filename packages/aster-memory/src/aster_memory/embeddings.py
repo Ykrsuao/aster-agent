@@ -16,6 +16,7 @@ Embeddings are always **L2-normalised**, so cosine similarity == dot product.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from typing import Protocol, runtime_checkable
 
@@ -26,9 +27,32 @@ from aster_memory.config import EmbeddingConfig
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
+class EmbeddingMismatchError(ValueError):
+    """An embedding does not match its declared vector space."""
+
+
+def validate_embedding(vector: np.ndarray, dim: int) -> np.ndarray:
+    """Return a finite float32 vector of exactly the expected dimension."""
+    try:
+        with np.errstate(over="ignore", invalid="ignore"):
+            vector = np.asarray(vector, dtype=np.float32)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise EmbeddingMismatchError("Embedding must contain numeric float32 values") from exc
+    if dim <= 0 or vector.ndim != 1 or vector.size != dim:
+        raise EmbeddingMismatchError(
+            f"Embedding shape {vector.shape} does not match dimension {dim}"
+        )
+    if not np.isfinite(vector).all():
+        raise EmbeddingMismatchError("Embedding must contain only finite values")
+    return vector
+
+
 @runtime_checkable
 class Embedder(Protocol):
-    """Turns text into an L2-normalised float32 vector."""
+    """Turns text into an L2-normalised float32 vector in a stable vector space."""
+
+    @property
+    def identity(self) -> str: ...
 
     @property
     def dim(self) -> int: ...
@@ -40,10 +64,11 @@ class Embedder(Protocol):
 
 def _normalize(vec: np.ndarray) -> np.ndarray:
     vec = vec.astype(np.float32)
-    norm = float(np.linalg.norm(vec))
+    precise = vec.astype(np.float64)
+    norm = float(np.linalg.norm(precise))
     if norm == 0.0:
         return vec
-    return vec / norm
+    return (precise / norm).astype(np.float32)
 
 
 class HashingEmbedder:
@@ -58,6 +83,10 @@ class HashingEmbedder:
         if dim <= 0:
             raise ValueError("dim must be positive")
         self._dim = dim
+
+    @property
+    def identity(self) -> str:
+        return "hashing:blake2b-word-bigram-v1"
 
     @property
     def dim(self) -> int:
@@ -86,11 +115,29 @@ class LiteLLMEmbedder:
     """Synchronous embeddings via ``litellm.embedding`` (OpenAI-compatible)."""
 
     def __init__(self, config: EmbeddingConfig) -> None:
-        self._config = config
+        self._config = config.model_copy(
+            update={
+                "model": config.model.strip(),
+                "endpoint": (config.endpoint or "").strip().rstrip("/") or None,
+            }
+        )
+        descriptor = {
+            "model": self._config.model,
+            "endpoint": self._config.endpoint,
+            "dimensions": self._config.dimensions,
+        }
+        digest = hashlib.sha256(
+            json.dumps(descriptor, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        self._identity = f"litellm:v1:{digest}"
         # Dimension comes from the API: the requested `dimensions` (if set) or,
         # left None, probed from the first response. (`config.dim` is the *hashing*
         # backend's size and must NOT be used here.)
         self._dim: int | None = config.dimensions
+
+    @property
+    def identity(self) -> str:
+        return self._identity
 
     @property
     def dim(self) -> int:
@@ -100,7 +147,7 @@ class LiteLLMEmbedder:
         assert self._dim is not None
         return self._dim
 
-    def _call(self, texts: list[str]) -> list[np.ndarray]:
+    def _call(self, texts: list[str], dim: int | None) -> list[np.ndarray]:
         import litellm
 
         kwargs: dict[str, object] = {"model": self._config.model, "input": texts}
@@ -108,31 +155,48 @@ class LiteLLMEmbedder:
             kwargs["api_base"] = self._config.endpoint
         if self._config.api_key:
             kwargs["api_key"] = self._config.api_key
-        if self._config.dimensions:
+        if self._config.dimensions is not None:
             kwargs["dimensions"] = self._config.dimensions
         # Hard timeout + retries so a hung gateway embedding request can't stall the caller
         # forever (litellm aborts and retries instead of blocking indefinitely).
         kwargs["timeout"] = self._config.timeout
         kwargs["num_retries"] = self._config.num_retries
         resp = litellm.embedding(**kwargs)
-        out: list[np.ndarray] = []
-        for item in resp["data"]:
-            vec = _normalize(np.asarray(item["embedding"], dtype=np.float32))
-            out.append(vec)
-        if out:
-            self._dim = int(out[0].shape[0])
-        return out
+        try:
+            data = resp["data"]
+            if not isinstance(data, list) or len(data) != len(texts):
+                raise EmbeddingMismatchError(
+                    f"Embedding response must contain exactly {len(texts)} vectors"
+                )
+            if any("index" in item for item in data):
+                indices = [item.get("index") for item in data]
+                if any(type(index) is not int for index in indices) or sorted(indices) != list(
+                    range(len(texts))
+                ):
+                    raise EmbeddingMismatchError("Embedding response indices must match the inputs")
+                data = sorted(data, key=lambda item: item["index"])
+            expected_dim = dim if dim is not None else len(data[0]["embedding"])
+            return [
+                _normalize(validate_embedding(item["embedding"], expected_dim)) for item in data
+            ]
+        except (KeyError, TypeError, AttributeError) as exc:
+            raise EmbeddingMismatchError("Embedding response contains malformed vectors") from exc
 
     def embed(self, text: str) -> np.ndarray:
-        return self._call([text])[0]
+        return self.embed_batch([text])[0]
 
     def embed_batch(self, texts: list[str]) -> list[np.ndarray]:
         if not texts:
             return []
         bs = max(1, self._config.batch_size)
         out: list[np.ndarray] = []
+        dim = self._dim
         for i in range(0, len(texts), bs):
-            out.extend(self._call(texts[i : i + bs]))
+            batch = self._call(texts[i : i + bs], dim)
+            if dim is None:
+                dim = int(batch[0].size)
+            out.extend(batch)
+        self._dim = dim
         return out
 
 

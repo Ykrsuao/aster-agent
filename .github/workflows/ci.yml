@@ -15,6 +15,22 @@ on:
         description: Run experimental microVM tests on a self-hosted Apple Silicon Mac
         type: boolean
         default: false
+      release_candidate:
+        description: Seal a release candidate (dispatch on its final vX.Y.Z tag)
+        type: boolean
+        default: false
+      release_tag:
+        description: Final candidate tag, matching the selected workflow ref
+        type: string
+      upgrade_from_tag:
+        description: Previously published final release with a complete Windows bundle
+        type: string
+      task_report_artifact_id:
+        description: Artifact ID from the trusted terminal task acceptance workflow
+        type: string
+      model_fingerprint:
+        description: SHA256 of the predeclared non-secret model configuration
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -59,6 +75,51 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: Unit tests (no live API calls)
         run: uv run pytest -q -m "not integration and not stress and not sandbox"
+
+  linux-terminal:
+    name: Linux native terminal
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ASTER_MODEL_METADATA_REFRESH: "False"
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # tags needed for uv-dynamic-versioning
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      # Rust transport tests launch the real ACP backend with this environment.
+      - name: Sync terminal and ACP dependencies
+        run: uv sync --locked --extra tui --extra mcp --extra tracing --extra viewer
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Rust terminal regressions
+        run: |
+          cargo fmt --manifest-path packages/aster-tui/Cargo.toml -- --check
+          cargo clippy --locked --manifest-path packages/aster-tui/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path packages/aster-tui/Cargo.toml
+          cargo build --locked --release --manifest-path packages/aster-tui/Cargo.toml
+      - name: Terminal launcher and ACP subprocess regressions
+        run: >-
+          uv run --no-sync python -m pytest -q
+          -m "not integration and not stress and not sandbox"
+          packages/aster-cli/tests/test_tui_command.py
+          packages/aster-acp/tests/test_protocol.py
+          --junitxml=artifacts/linux-terminal.xml
+      - name: Upload Linux terminal results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-terminal
+          path: artifacts/linux-terminal.xml
 
   sandbox:
     name: Linux sandbox
@@ -231,8 +292,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
-      # Mirrors the publish workflow's build exactly (--no-sources included) so
-      # this job stays a real canary for release-build breakage.
+      # Release publication consumes these exact files after candidate acceptance.
       - name: Build all packages
         run: |
           rm -rf dist
@@ -415,6 +475,22 @@ jobs:
             packages/aster-cli/tests/test_tui_command.py \
             packages/aster-cli/tests/test_cli_utf8_output.py \
             packages/aster-acp/tests/test_session_titles.py
+      - name: Memory regressions (no live API calls)
+        shell: pwsh
+        env:
+          ASTER_MODEL_METADATA_REFRESH: "False"
+          LITELLM_LOCAL_MODEL_COST_MAP: "True"
+        run: >-
+          uv run --no-sync python -m pytest -q
+          -m "not integration and not stress and not sandbox"
+          packages/aster-memory/tests
+          --junitxml="$env:RUNNER_TEMP/windows-memory.xml"
+      - name: Upload Windows memory results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-memory
+          path: ${{ runner.temp }}/windows-memory.xml
       - name: Security regressions (no live API calls or VM)
         shell: pwsh
         env:
@@ -440,13 +516,13 @@ jobs:
           tests/agentdoc/test_variables_visibility.py
           tests/runtime/sandbox/test_broker_policy.py
           tests/viewer/test_main.py
-          --junitxml=artifacts/windows-security.xml
+          --junitxml="$env:RUNNER_TEMP/windows-security.xml"
       - name: Upload Windows security results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-security
-          path: artifacts/windows-security.xml
+          path: ${{ runner.temp }}/windows-security.xml
       - name: Terminal delivery and acceptance harness regressions
         shell: pwsh
         env:
@@ -474,7 +550,14 @@ jobs:
           cargo build --locked --release --manifest-path packages/aster-tui/Cargo.toml
       - name: Build the complete Windows terminal bundle
         shell: pwsh
-        run: uv run --no-sync python scripts/build_terminal_release.py --skip-cargo-build --out-dir dist/terminal-windows
+        run: |
+          uv run --no-sync python scripts/build_terminal_release.py --skip-cargo-build --out-dir dist/terminal-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $manifest = Get-Content -LiteralPath 'dist/terminal-windows/MANIFEST.json' -Raw | ConvertFrom-Json
+          if ($manifest.commit -ne $env:GITHUB_SHA -or $manifest.dirty -ne $false) {
+            git status --short
+            throw 'Terminal bundle must match the clean CI checkout.'
+          }
       - name: Install and reinstall outside the checkout
         shell: pwsh
         env:
@@ -491,19 +574,167 @@ jobs:
           Set-Location -LiteralPath $env:RUNNER_TEMP
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $bundle 'install.ps1') -ToolsDirectory $tools -BinDirectory $bin
           if ($LASTEXITCODE -ne 0) { throw 'Terminal installation failed.' }
-          & $python -I $smoke seed --state $state
+          & $python -I $smoke seed --state $state --bundle-manifest (Join-Path $bundle 'MANIFEST.json')
           if ($LASTEXITCODE -ne 0) { throw 'Installed terminal seed failed.' }
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $bundle 'install.ps1') -ToolsDirectory $tools -BinDirectory $bin
           if ($LASTEXITCODE -ne 0) { throw 'Terminal reinstallation failed.' }
-          & $python -I $smoke verify --state $state
+          & $python -I $smoke verify --state $state --bundle-manifest (Join-Path $bundle 'MANIFEST.json')
           if ($LASTEXITCODE -ne 0) { throw 'Installed terminal recovery failed.' }
+          $artifact = Join-Path $env:RUNNER_TEMP 'terminal-artifact'
+          New-Item -ItemType Directory -Path $artifact | Out-Null
+          Get-ChildItem -LiteralPath $bundle -Filter '*.zip' | Copy-Item -Destination $artifact
+          Copy-Item -LiteralPath (Join-Path $bundle 'MANIFEST.json'), (Join-Path $bundle 'SHA256SUMS') -Destination $artifact
+          Copy-Item -LiteralPath (Join-Path $state 'verify-result.json') -Destination (Join-Path $artifact 'install.json')
       - name: Upload Windows terminal bundle and installation evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: aster-terminal-windows
-          path: |
-            dist/terminal-windows/*.zip
-            dist/terminal-windows/MANIFEST.json
-            dist/terminal-windows/SHA256SUMS
-            ${{ runner.temp }}/aster-terminal-state/*-result.json
+          path: ${{ runner.temp }}/terminal-artifact/
+
+  # Ordinary CI does not require historical release assets or live-model evidence.
+  # Missing provenance blocks only this explicitly requested release candidate.
+  release-upgrade:
+    if: github.event_name == 'workflow_dispatch' && inputs.release_candidate
+    needs: windows-core-smoke
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      UPGRADE_FROM_TAG: ${{ inputs.upgrade_from_tag }}
+      TASK_ARTIFACT_ID: ${{ inputs.task_report_artifact_id }}
+      MODEL_FINGERPRINT: ${{ inputs.model_fingerprint }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Sync evidence checker dependencies
+        run: uv sync --locked
+      - uses: actions/download-artifact@v4
+        with:
+          name: aster-terminal-windows
+          path: ${{ runner.temp }}/terminal-build/
+      - name: Verify task provenance and fetch the previous distributed terminal
+        shell: pwsh
+        run: |
+          uv run --no-sync python scripts/check_release_evidence.py prepare `
+            --tag $env:RELEASE_TAG --upgrade-from-tag $env:UPGRADE_FROM_TAG `
+            --task-artifact-id $env:TASK_ARTIFACT_ID --model-fingerprint $env:MODEL_FINGERPRINT `
+            --bundle (Join-Path $env:RUNNER_TEMP 'terminal-build') `
+            --destination (Join-Path $env:RUNNER_TEMP 'release-inputs')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upgrade the previous installation and continue its saved task
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $releaseInput = Join-Path $env:RUNNER_TEMP 'release-inputs'
+          $tools = Join-Path $env:RUNNER_TEMP 'release-upgrade-tools'
+          $bin = Join-Path $env:RUNNER_TEMP 'release-upgrade-bin'
+          $state = Join-Path $env:RUNNER_TEMP 'release-upgrade-state'
+          $smoke = Join-Path $env:GITHUB_WORKSPACE 'scripts/terminal_release_smoke.py'
+          $python = Join-Path $tools 'aster-cli/Scripts/python.exe'
+          Set-Location -LiteralPath $env:RUNNER_TEMP
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $releaseInput 'baseline/install.ps1') -ToolsDirectory $tools -BinDirectory $bin
+          if ($LASTEXITCODE -ne 0) { throw 'Baseline terminal installation failed.' }
+          & $python -I $smoke seed --state $state --bundle-manifest (Join-Path $releaseInput 'baseline/MANIFEST.json')
+          if ($LASTEXITCODE -ne 0) { throw 'Baseline task seed failed.' }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $releaseInput 'candidate/install.ps1') -ToolsDirectory $tools -BinDirectory $bin
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate terminal upgrade failed.' }
+          & $python -I $smoke verify --state $state --require-upgrade --bundle-manifest (Join-Path $releaseInput 'candidate/MANIFEST.json')
+          if ($LASTEXITCODE -ne 0) { throw 'Upgraded terminal task recovery failed.' }
+          Copy-Item -LiteralPath (Join-Path $state 'verify-result.json') -Destination (Join-Path $releaseInput 'evidence/upgrade.json')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-upgrade-evidence
+          path: ${{ runner.temp }}/release-inputs/evidence/
+          if-no-files-found: error
+
+  release-candidate:
+    if: github.event_name == 'workflow_dispatch' && inputs.release_candidate
+    needs: [lint, test, linux-terminal, sandbox, python-313-error-compat, build, frontend-build, rust-dependency-audit, secret-scan, windows-core-smoke, release-upgrade]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      UPGRADE_FROM_TAG: ${{ inputs.upgrade_from_tag }}
+      TASK_ARTIFACT_ID: ${{ inputs.task_report_artifact_id }}
+      MODEL_FINGERPRINT: ${{ inputs.model_fingerprint }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: ${{ runner.temp }}/release-candidate/dist/
+      - uses: actions/download-artifact@v4
+        with:
+          name: aster-terminal-windows
+          path: ${{ runner.temp }}/release-candidate/terminal/
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-upgrade-evidence
+          path: ${{ runner.temp }}/release-candidate/evidence/
+      - name: Smoke-test the exact Python distributions outside the checkout
+        env:
+          RELEASE_DIR: ${{ runner.temp }}/release-candidate
+        run: |
+          uv venv "$RUNNER_TEMP/release-python" --python 3.12
+          VIRTUAL_ENV="$RUNNER_TEMP/release-python" uv pip install "$RELEASE_DIR"/dist/*.whl
+          CANDIDATE_PYTHON="$RUNNER_TEMP/release-python/bin/python"
+          cd "$RUNNER_TEMP"
+          "$CANDIDATE_PYTHON" -I - <<'PY'
+          import importlib
+          import importlib.metadata
+          import pathlib
+          import sys
+
+          prefix = pathlib.Path(sys.prefix).resolve()
+          versions = set()
+          for name in ("aster", "aster-cli", "aster-acp", "aster-memory", "aster-bench"):
+              module = importlib.import_module(name.replace("-", "_"))
+              assert pathlib.Path(module.__file__).resolve().is_relative_to(prefix), name
+              versions.add(importlib.metadata.version(name))
+          assert len(versions) == 1, versions
+          PY
+          "$RUNNER_TEMP/release-python/bin/aster" --version
+          "$RUNNER_TEMP/release-python/bin/aster" --help
+          "$RUNNER_TEMP/release-python/bin/aster-acp" --help
+      - name: Seal the exact accepted distributions and evidence
+        id: seal
+        env:
+          RELEASE_DIR: ${{ runner.temp }}/release-candidate
+        run: |
+          mv "$RELEASE_DIR/terminal/install.json" "$RELEASE_DIR/evidence/install.json"
+          uv run --no-project --with packaging==25.0 python scripts/check_release_evidence.py seal \
+            --tag "$RELEASE_TAG" --upgrade-from-tag "$UPGRADE_FROM_TAG" \
+            --task-artifact-id "$TASK_ARTIFACT_ID" --model-fingerprint "$MODEL_FINGERPRINT" \
+            --directory "$RELEASE_DIR"
+      - uses: actions/upload-artifact@v4
+        id: candidate
+        with:
+          name: ${{ steps.seal.outputs.artifact_name }}
+          path: ${{ runner.temp }}/release-candidate/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Record the explicit publication locator
+        env:
+          CANDIDATE_ARTIFACT_ID: ${{ steps.candidate.outputs.artifact-id }}
+        run: |
+          echo "Candidate artifact: $CANDIDATE_ARTIFACT_ID" >> "$GITHUB_STEP_SUMMARY"
+          echo 'Copy this line into the final release notes; publication rechecks its provenance.' >> "$GITHUB_STEP_SUMMARY"

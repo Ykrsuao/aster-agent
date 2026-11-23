@@ -127,6 +127,10 @@ def main(*, protocol_fd=None):
     lock = threading.RLock()
     try:
         init = conn.recv()
+        if init.get("task_budget_host_only"):
+            from aster.task_budget import require_host_model_calls
+
+            require_host_model_calls()
         if tuple(sys.version_info[:3]) != tuple(init["python_version"]):
             raise RuntimeError("host and sandbox Python versions must match")
         broker = ChildBroker(conn, lock)

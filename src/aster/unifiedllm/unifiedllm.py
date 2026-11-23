@@ -25,6 +25,7 @@ from aster.llm_types import (
     LLMUsage,
     ToolCall,
 )
+from aster.task_budget import TaskBudgetError, current_task_budget, task_budget_activity
 from aster.unifiedllm.cache_policy import (
     add_session_affinity_header,
     apply_cache_policy,
@@ -1225,6 +1226,14 @@ class UnifiedLLM(ABC):
     _registry_context: RegistryContext | None
     cache_breakpoint: Literal["auto", "openai", "anthropic"] | None
 
+    def __getstate__(self) -> Any:
+        if current_task_budget() is not None:
+            raise TaskBudgetError(
+                "Task budgets cannot serialize model clients into independent workers. "
+                "Keep clients on the owning host and invoke them through self.*."
+            )
+        return super().__getstate__()
+
     def __init__(
         self,
         model: str,
@@ -2016,6 +2025,11 @@ async def _run_async_provider_call[T](
     ``request_timeout`` bounds the whole attempt, stream included. On expiry it
     cancels the task and raises TimeoutError. None disables it.
     """
+    budget = current_task_budget()
+    if budget is not None:
+        async with task_budget_activity(budget):
+            return await _run_budgeted_async_provider_call(call, request_timeout=request_timeout)
+
     admission_controller = _current_admission_controller()
     if admission_controller is None:
         return await _await_provider_task(asyncio.create_task(call()), request_timeout)
@@ -2030,6 +2044,116 @@ async def _run_async_provider_call[T](
         permit.release()
         raise
 
+    return await _await_provider_task(task, request_timeout)
+
+
+def _budget_usage(raw_response: Any) -> LLMUsage | None:
+    # Normalization accepts strings/floats for compatibility. Accounting must not
+    # turn malformed provider counters into smaller, apparently known integers.
+    raw = getattr(raw_response, "usage", None)
+    if hasattr(raw, "model_dump"):
+        raw = raw.model_dump(exclude_unset=True)
+    for aliases in (("input_tokens", "prompt_tokens"), ("output_tokens", "completion_tokens")):
+        values = [
+            raw.get(key) if isinstance(raw, Mapping) else getattr(raw, key, None) for key in aliases
+        ]
+        value = next((item for item in values if item is not None), None)
+        if type(value) is not int or value < 0:
+            return None
+    try:
+        return _extract_usage(raw_response)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _validate_budget_retries(api_params: dict[str, Any]) -> None:
+    if current_task_budget() is not None:
+        if any(api_params.get(key, 0) not in (None, 0) for key in ("max_retries", "num_retries")):
+            raise TaskBudgetError(
+                "Task budgets require SDK retries disabled (max_retries=0); use RetryConfig."
+            )
+        api_params["max_retries"] = 0
+        client = api_params.get("client")
+        if client is not None:
+            api_params["client"] = _with_sdk_retries(client, 0)
+
+
+def _run_sync_provider_call[T](call: Callable[[], T]) -> T:
+    budget = current_task_budget()
+    if budget is None:
+        return call()
+    if budget.limits.time_seconds is not None:
+        raise TaskBudgetError(
+            "Time-limited tasks require cancellable provider calls; use acall() instead of call()."
+        )
+    with budget.active():
+        attempt = budget.reserve()
+        try:
+            response = call()
+        except BaseException:
+            budget.settle(attempt, None)
+            raise
+        budget.settle(attempt, _budget_usage(response))
+        return response
+
+
+async def _run_budgeted_async_provider_call[T](
+    call: Callable[[], Coroutine[Any, Any, T]], *, request_timeout: float | None
+) -> T:
+    budget = current_task_budget()
+    assert budget is not None
+    controller = _current_admission_controller()
+    while True:
+        budget.check()
+        permit = await controller.acquire(_record_admission_observation) if controller else None
+        try:
+            # This durable write is after admission and before provider dispatch.
+            attempt = budget.try_reserve()
+        except BaseException:
+            if permit is not None:
+                permit.release()
+            raise
+        if attempt is None:
+            if permit is not None:
+                permit.release()
+            await budget.wait_settled()
+            continue
+        break
+
+    started = False
+
+    async def run_attempt() -> T:
+        nonlocal started
+        started = True
+        # The provider owns settlement and active time, even if its shielded
+        # caller leaves. Its independent deadline also performs cancellation.
+        async with task_budget_activity(budget, check=False):
+            try:
+                response = await call()
+            except BaseException:
+                budget.settle(attempt, None)
+                raise
+            budget.settle(attempt, _budget_usage(response))
+            return response
+
+    operation = _run_admitted_attempt(run_attempt, permit) if permit else run_attempt()
+    try:
+        task = asyncio.create_task(operation)
+    except BaseException:
+        operation.close()
+        if permit is not None:
+            permit.release()
+        budget.abandon_before_dispatch(attempt)
+        raise
+    budget.track_provider(task)
+
+    def never_started(_task: asyncio.Task[T]) -> None:
+        if not started:
+            if permit is not None:
+                permit.release()
+            budget.abandon_before_dispatch(attempt)
+
+    task.add_done_callback(never_started)
     return await _await_provider_task(task, request_timeout)
 
 
@@ -2841,6 +2965,7 @@ class CompletionClient(UnifiedLLM):
         # retry each attempt twice more, tripling the configured budget. An
         # explicit max_retries passthrough still opts into SDK retries.
         api_params.setdefault("max_retries", 0)
+        _validate_budget_retries(api_params)
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
@@ -2856,15 +2981,19 @@ class CompletionClient(UnifiedLLM):
                 api_params["client"] = http_client
 
         def _make_call():
-            observed = _ResponseUsageObservation(api_params.get("logger_fn"))
-            attempt_params = {**api_params, "logger_fn": observed}
-            with self._native_output_request_scope(
-                attempt_params, output_model, native_output, is_async=False
-            ):
-                raw_response = _collect_sync(
-                    litellm.completion(**attempt_params), messages=prepared_messages
-                )
-            observed.apply(raw_response)
+            def provider_call():
+                observed = _ResponseUsageObservation(api_params.get("logger_fn"))
+                attempt_params = {**api_params, "logger_fn": observed}
+                with self._native_output_request_scope(
+                    attempt_params, output_model, native_output, is_async=False
+                ):
+                    response = _collect_sync(
+                        litellm.completion(**attempt_params), messages=prepared_messages
+                    )
+                observed.apply(response)
+                return response
+
+            raw_response = _run_sync_provider_call(provider_call)
             reasoning, _ = _extract_reasoning_and_usage(raw_response)
             text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
 
@@ -2969,6 +3098,7 @@ class CompletionClient(UnifiedLLM):
         # retry each attempt twice more, tripling the configured budget. An
         # explicit max_retries passthrough still opts into SDK retries.
         api_params.setdefault("max_retries", 0)
+        _validate_budget_retries(api_params)
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
@@ -3294,9 +3424,12 @@ class ResponsesClient(UnifiedLLM):
         assert http_client is not None
         if http_client.sync_client is not None:
             api_params.setdefault("client", http_client.sync_client)
+        _validate_budget_retries(api_params)
 
         def _make_call():
-            return cast("litellm.ResponsesAPIResponse", litellm.responses(**api_params))
+            return _run_sync_provider_call(
+                lambda: cast("litellm.ResponsesAPIResponse", litellm.responses(**api_params))
+            )
 
         # Track LLM call for debugging (visible via SIGUSR2 if aster debug handler installed)
         with _track_llm_call(model=effective_model, endpoint=self.config.get("api_base")):
@@ -3385,6 +3518,7 @@ class ResponsesClient(UnifiedLLM):
         assert http_client is not None
         if http_client.async_client is not None:
             api_params.setdefault("client", http_client.async_client)
+        _validate_budget_retries(api_params)
 
         async def _make_call():
             async def call_provider():

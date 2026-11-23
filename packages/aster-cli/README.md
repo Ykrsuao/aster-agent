@@ -180,6 +180,32 @@ the same `<workspace>/.aster/sessions` storage as Zed's ACP integration. Close
 the session in its current host before opening it in another: each saved
 session has one writer. Reopening restores conversation and agent context;
 it does not resurrect a running command or a terminated process.
+If a process stops after generated Python or a host shell/file operation starts
+but before its progress is saved, the restored session pauses further execution
+and asks you to check the effects:
+
+```text
+/recovery
+/recovery ACTION_ID --note "Checked the file; the appended line is present once"
+```
+
+The first command lists unresolved actions; the second records your inspection
+without calling the model or repeating an action. Review each listed ID. A Python
+cell and its shell tool can have separate records for the same operation.
+While review is pending, the agent can inspect workspace files through bounded
+`self.files.read/list/search` requests and ask questions, but cannot execute
+ordinary Python, perform more edits, or mark the coding task complete. An
+unrelated reply can retain the task with `complete_task: false` and a recovery
+notice.
+
+The journal distinguishes an operation returning from agent progress being saved.
+Restoring an older checkpoint keeps later effects as pending review because
+conversation navigation does not roll back working files. Inspection is required
+again when the selected state does not cover those effects. Journal writes must
+succeed before execution starts. These records cannot infer the full effects of
+arbitrary code, reverse external changes, or guarantee exactly-once execution;
+they prevent blindly continuing after an observed interruption.
+
 The backend replays saved Python calls, command output and file diffs alongside
 messages. Terminal/file activity is saved starting with this version; older
 sessions cannot recover events that were never recorded. `/changes` offers both
@@ -259,9 +285,110 @@ folder. A directory named by `ASTER_PROJECT_DIR` is always used, because the
 person starting the process chose it. Scripts that import Aster as a library are
 not affected.
 
+## Project memory
+
+Project memory is optional and off by default. From this checkout, install it
+with `uv sync --extra tui --extra memory`, then explicitly enable it in the
+trusted workspace's own `.aster/settings.yaml`:
+
+```yaml
+coding:
+  project_memory:
+    enabled: true
+    database: main
+    embedding:
+      backend: hashing
+      dim: 64
+```
+
+User settings, `ASTER_SETTINGS` and `ASTER_PROJECT_DIR` cannot opt a project in.
+The host mounts the existing `aster.memory` skill as `self.memory`; the agent
+can explicitly save useful notes with its memory tools, and relevant notes are
+retrieved on later turns. Automatic event/episode recording and background
+reflection are disabled.
+
+| Command | Effect |
+| --- | --- |
+| `/memory` or `/memory status` | Show whether project memory is available |
+| `/memory list` | Inspect saved notes, up to 100 records |
+| `/memory view ID` | Inspect one note, including archived notes |
+| `/memory delete ID` | Permanently delete the note and stop retrieving it |
+| `/memory off` | Save `enabled: false` in project settings and unload the skill |
+| `/memory reload` | Apply the project's current memory settings |
+| `/memory rebuild NEW_DATABASE` | Re-embed a consistent source snapshot into a new named database |
+
+Host commands do not send their output to the model. Turning memory off keeps
+saved notes available for explicit inspection or deletion and stays off after a
+restart, including when an older conversation snapshot is restored. Deleting a
+note prevents future retrieval; it does not redact conversation messages already
+saved. Finish background jobs before changing memory settings or records.
+
+Every session in the same canonical workspace shares its notes. Different
+workspaces, including separate Git worktrees, use separate databases; changing
+the agent's working directory does not change its memory scope. Files live under
+`<Aster user directory>/project-memory/<workspace-path hash>/<database>.sqlite`.
+The user directory defaults to `~/.config/aster` and honors `XDG_CONFIG_HOME` or
+`ASTER_USER_DIR`. Database names accept 1–64 lowercase letters, digits, underscores
+and hyphens, excluding Windows device names. Linked paths cannot redirect one
+project's database into another project's directory.
+
+For remote embeddings, use an explicitly selected model or an existing embedding
+alias. For example, a saved `.aster/llm_config.yaml` entry has this form; substitute
+your model, endpoint and existing credential environment variable:
+
+```yaml
+models:
+  notes:
+    client_type: embedding
+    model: <explicit-pinned-embedding-model>
+    endpoint: <explicit-endpoint>
+    api_key_env: <existing-environment-variable>
+```
+
+Reference it from the project memory configuration:
+
+```yaml
+coding:
+  project_memory:
+    enabled: true
+    database: main
+    embedding:
+      backend: litellm
+      alias: notes
+      dimensions: 1024  # Replace with the model's actual requested dimensions.
+```
+
+Startup requires explicit remote dimensions and does not probe the provider.
+Credentials are resolved through the existing model configuration; plaintext
+`api_key` values in memory settings are rejected. When a task budget is active,
+remote embedding calls fail before dispatch because their usage is not yet
+included in that budget. Local hashing remains available.
+
+The host's memory status, list, view, delete and off commands remain available
+after a task budget stops. They do not restart or refund its allowance. Reload
+and rebuild still run under the task budget, and remote embeddings are blocked
+whenever the session has an allowance, including calls made outside a model turn.
+
+Changing the embedding model, endpoint or dimensions requires an explicit rebuild,
+even when two models have the same dimension. After changing the embedding
+settings, use `/memory reload`; a compatibility error leaves saved text available
+to inspect and delete. Pause other writers, run `/memory rebuild next`, then set
+`database: next` and `/memory reload` in every session. Rebuilding retains the
+source and does not overwrite an existing target. Failure or interruption does
+not publish a partial target. Writes after the source snapshot are not copied,
+so keep writers paused until switching finishes. Remote rebuilding sends saved
+note text to the selected embedding provider.
+
+The offline acceptance path uses SQLite, NumPy, local hashing and a scripted
+model through real ACP process restarts on native Windows. It checks saving,
+cross-session recall, restoration, deletion and persistent opt-out. This is
+lifecycle coverage; it does not establish remote-provider compatibility or the
+real-task benefit of enabling memory. Those require separate provider and task
+evaluations.
+
 ## Interactive coding sessions
 
-Trusted hosts can require explicit checks after a coding turn changes specified
+Trusted hosts can require explicit checks after a coding task changes specified
 files. Configure them in the existing `.aster/settings.yaml` (or user settings
 and `ASTER_SETTINGS` layers):
 
@@ -293,20 +420,37 @@ return a nonzero exit code on failure; use formatter `--check`, not an auto-fix
 command. Check results record actual exit/timeout status and file hashes. A
 failed, skipped or outdated result cannot be replaced by a `Done.evidence` claim.
 
-The existing completion validator requires every configured check to pass on
-the final file contents if the turn changed a listed file or explicitly invoked
-verification. Changes during a check invalidate that result. A pure conversation
-with no listed file changes does not run commands or require checks. No checks
-are enabled by default, and the framework does not guess test tools or file
-dependencies.
+Changing a listed file or explicitly requesting verification creates a pending
+task. Its identity, file baseline, check contract and outcomes are saved in the
+existing session snapshot. A new turn or restored session retains that task,
+including partial successful checks; a `Done` reply requires every current check
+to pass on the final contents. Changes during a check invalidate its result, and
+late results from a previous turn or superseded attempt cannot replace current
+evidence. `self.verification_status()` shows pending files and check outcomes
+without running commands.
 
-Definitions stay fixed for the session; results are not restored from snapshots
-or reused across turns. This first version checks the declared files in the
-current turn, not every historical edit: after reopening or continuing a failed
-turn without further edits, explicitly request `verify` before claiming those
-earlier changes are validated. Background changes after completion and files
-omitted from the configured list are outside this guarantee. This prevents
-accidental completion claims; it is not a security boundary against arbitrary
+The host reloads check settings at turn start, before `verify`, and before task
+acceptance. Changes to a command, timeout, file list or workspace invalidate the
+saved evidence. Changing covered contents makes old passes stale, including
+changes made outside the agent while a session was closed. Removing all checks
+explicitly disables the gate and clears its evidence; re-enabling them requires
+fresh checks. No checks are enabled by default, and the framework does not guess
+test tools or file dependencies.
+
+Ordinary conversation without a pending task needs no checks. With an earlier
+task still pending, the coding reply can set `complete_task: false` in the
+`return_result` JSON object to answer an unrelated question or provide a plan.
+The host retains the task and appends its pending verification status to the
+reply. This flag cannot bypass checks for edits or verification requested in the
+current turn. `NeedInput` and `Waiting` also retain pending work.
+
+Persistence requires the host's normal session snapshots; an agent without
+persistent storage retains this state only in memory. Old snapshots created
+before task verification have no historical baseline to recover. Changes after
+the last observation are detected when the next turn or status check observes
+them; this is not a background file watcher. Files omitted from the configured
+list and arbitrary side effects are outside this contract. These checks prevent
+accidental completion claims; they are not a security boundary against arbitrary
 agent-generated Python.
 
 `aster_cli.sessions` owns durable coding-agent session identity, metadata, and
@@ -314,3 +458,12 @@ conversation replay shared by CLI hosts such as the native TUI and ACP. The
 process running an agent owns the writable session handle; other hosts attach
 through their transport or use read-only discovery. Generic event and SQLite
 storage primitives remain in the core `aster` package.
+
+Optional `coding.task_budget` settings bound cumulative `calls`, observed
+`tokens` (input plus output), and active `time_seconds` across prompts, child
+agents, summaries and restored sessions. `/task-budget` inspects the current
+allowance; `/task-budget new` explicitly starts a new task with current settings.
+The SQLite ledger is independent of chat snapshots. Rewind and forks retain the
+latest consumption and stop until an explicit new allowance is requested. See
+[task budgets](../../docs/task-budget.md) for configuration, unknown usage,
+deadline behavior and supported process boundaries.

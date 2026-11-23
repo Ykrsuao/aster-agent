@@ -24,7 +24,7 @@ router = APIRouter(prefix="/api/explorer", tags=["explorer"])
 # ---------------------------------------------------------------------------
 
 _CACHE_MAX_SIZE = 16
-_explorer_cache: OrderedDict[str, Any] = OrderedDict()
+_explorer_cache: OrderedDict[str, tuple[tuple[object, int], Any]] = OrderedDict()
 _cache_lock = threading.Lock()
 
 # Per-session build locks serialize concurrent first-builds. This map is bounded:
@@ -58,18 +58,25 @@ def _get_build_lock(session_id: str) -> threading.Lock:
 
 
 def _get_cached_explorer(session_id: str):
-    """Return a cached TraceExplorer or None."""
+    """Return an explorer only while its database snapshot is current."""
     with _cache_lock:
-        if session_id in _explorer_cache:
-            _explorer_cache.move_to_end(session_id)
-            return _explorer_cache[session_id]
+        cached = _explorer_cache.get(session_id)
+        if cached is not None:
+            version, explorer = cached
+            if version == otlp_store.get_cache_version():
+                _explorer_cache.move_to_end(session_id)
+                return explorer
+            del _explorer_cache[session_id]
     return None
 
 
-def _put_cached_explorer(session_id: str, explorer):
-    """Store a TraceExplorer in the cache, evicting LRU if full."""
+def _put_cached_explorer(session_id: str, explorer, version: tuple[object, int]):
+    """Cache an unchanged snapshot, evicting the oldest entry when full."""
     with _cache_lock:
-        _explorer_cache[session_id] = explorer
+        # A write during reconstruction must not make an old snapshot current.
+        if version != otlp_store.get_cache_version():
+            return
+        _explorer_cache[session_id] = (version, explorer)
         _explorer_cache.move_to_end(session_id)
         while len(_explorer_cache) > _CACHE_MAX_SIZE:
             _explorer_cache.popitem(last=False)
@@ -128,10 +135,14 @@ def _build_explorer(session_id: str):
 
         from aster.trace_explorer.explorer import TraceExplorer
 
+        version = otlp_store.get_cache_version()
         if not otlp_store.session_exists(session_id):
             raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
 
-        otlp_spans = otlp_store.get_session_spans(session_id, augment=True)
+        try:
+            otlp_spans = otlp_store.get_session_spans(session_id, augment=True)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         if not otlp_spans:
             raise HTTPException(
                 status_code=404,
@@ -145,7 +156,7 @@ def _build_explorer(session_id: str):
             quiet=True,
         )
 
-        _put_cached_explorer(session_id, explorer)
+        _put_cached_explorer(session_id, explorer, version)
         return explorer
 
 
