@@ -250,6 +250,7 @@
 - 原 Linux deadline 反例和新增的 `run`/`run_stream` 取消用例证明子进程在取消后继续写入。控制等待现在复用已有进程树中断恢复，并在两路输出消费的 `finally` 回收 reader。Linux Bash/Shell 与预算范围 **497 passed**；当前集成后的 Bash/配置并发回归 **24 passed**，验证无迟到追加、只启动一次、原有后台任务存活和同会话立即复用。
 - Windows 首轮的两处失败分别是 SDK 缓存冷建占用协议等待，以及配置测试在第二个进程仍准备 SDK 时判断锁竞争。模型选择现在先在隔离目录准备真实安装 SDK 的可复用缓存，保持每次协议请求的 **30 秒**上限；专用冷启动测试仍从空缓存验证 loader、资源和原生扩展。配置测试把就绪信号移到实际取锁前，使用显式 Responses 配置避免无关 SDK 冷导入，保留所有原超时和数据断言。离线缓存 profiling 为冷建 **14.245 秒**、复用 **0.043 秒**，不把测试范围调整称为生产冷启动提速。
 - 全仓 Ruff、格式及差异检查通过，SPDX 检查通过 **1,382** 个源码 Python 文件。日志与 JUnit 保存在本机临时目录 `aster-audit-delivery-da31de6dc7`；草稿 PR 的远端检查绑定其最终候选。
+- 最终 A5 候选 `439d0488` 的 [CI](https://github.com/Ykrsuao/aster-agent/actions/runs/45108439348) 与 [WSL full](https://github.com/Ykrsuao/aster-agent/actions/runs/45108443201) 均成功。Linux unit 与 WSL 各 **17,120 passed、56 skipped、584 deselected、3 xfailed**；Windows 完整包安装、Linux 原生终端、Linux sandbox 及其余启用检查通过。
 - 边界：响应可超过剩余 token 额度，后续调用才停止；本项不是供应商硬 token 上限或最终账单。async deadline 不能抢占阻塞事件循环的同步 Python，有时间限额时同步 provider 派发会预先拒绝。预算对象跨独立进程、guest 自建模型客户端或未结算的 broker 导出显式拒绝；任意用户程序直连供应商不在框架计量范围。模型均为离线替身，M1b 与 R1/R2 继续独立验收，A1 保持候选方向。
 
 ## M1b 实施与验收（2026-11-23）
@@ -261,4 +262,14 @@
 - Windows 接入实现阶段完整 CLI **2,433 passed、47 skipped、1 deselected**；接到最终 A5 后，预算/恢复/记忆管理联合范围 **71 passed、4 skipped**，最终完整 ACP **1,007 passed、9 deselected、3 xfailed**。Linux Python 3.13 最终完整 CLI **2,474 passed、6 skipped、1 deselected**；完整 ACP 与记忆包联合范围 **1,487 passed、16 skipped、10 deselected、3 xfailed**，其中 ACP **1,006 passed**，记忆包 **481 passed**。范围重叠，不相加。
 - 真实 ACP 离线旅程覆盖 trusted project 启用、写入、关闭进程、重开检索、不同项目隔离、删除、持久关闭、恢复后的 hook/连接清理与重新启用。Windows 本机不能创建符号链接的四项用例明确跳过，Linux 完整 CLI 已实际通过这四项；没有把 Windows 跳过当作通过。
 - 全仓 Ruff、格式与差异检查通过，SPDX 检查通过 **1,386** 个源码 Python 文件。初轮联合测试中旧 mock 整块替换预算模块导致四项失败，现只替换所需符号；保持真实 owner/ledger 路径，单文件 **30 passed、4 skipped**，后续联合与完整协议验证通过。日志与 JUnit 位于本机临时目录 `aster-audit-delivery-da31de6dc7`。
+- 最终 M1b 候选 `3f0325e6` 的 [CI](https://github.com/Ykrsuao/aster-agent/actions/runs/45110932561) 与 [WSL full](https://github.com/Ykrsuao/aster-agent/actions/runs/45110936623) 均成功。Linux unit 与 WSL 各 **17,155 passed、56 skipped、584 deselected、3 xfailed**；Windows 完整包安装、Linux 原生终端、Linux sandbox 及其余启用检查通过。
 - 平台边界限定为已验证的本地 hashing/NumPy/SQLite 项目记忆和 native Windows/Linux 宿主流程；未调用真实 embedding 或模型 API，未验收真实 Chroma 服务或全部可选后端，不据此扩大通用 memory 包的平台声明。记忆收益与过期事实判断归 R2，发行安装/跨版升级仍归 R1；A1 保持候选方向。
+
+## R1 实施与验收（2026-11-23）
+
+- 实施分支：`codex/release-evidence-20261122`，基于最终 M1b 候选 `3f0325e6`。同一 final tag、版本、干净 SHA 与一次候选构建绑定 wheel/sdist、完整 Windows ZIP、安装/重装、跨版恢复和任务报告的字节哈希。发布端只消费已经验收的产物，不再重新构建；门槛和渠道说明见 [RELEASING.md](../RELEASING.md)。
+- 普通 CI 不要求历史旧包或真实模型报告；只有显式 `release_candidate=true` 才进入严格候选验收。候选 SHA 必须可达默认分支，旧包必须来自本仓库已发布的 final release，具有 API digest 与完整 manifest，且版本严格增加。缺少材料时拒绝严格候选，不伪造同版本重装为跨版升级。
+- checker 从 GitHub API 核验仓库与 head-repository、workflow 路径/ID、dispatch run、当前 attempt、同一 SHA、必需成功 jobs 和 artifact digest。十任务报告要求独立完成/代码验收、固定预算、实际模型五键 identity/fingerprint、fixture/runner 哈希及可信来源 run/attempt；拒绝 fork、旧 attempt、过期或篡改产物。下载重定向不转发 token，解包校验路径、链接和体积。
+- 发布继续沿用 `release: published` 到 PyPI、手工 dispatch 到 TestPyPI；未新增 tag push 自动发布或凭据。发布说明精确指定一个 `Candidate artifact: ID`。runner 与冻结 fixture 的 Git 属性固定为 LF，保证 Windows checkout 的源码字节哈希与冻结 Git blob 一致。
+- Windows Python 3.12 离线 gate、terminal release smoke、make-release 合同及候选 harness 共 **237 passed**；Linux Python 3.13 同范围 **233 passed、4 skipped**，四项跳过属于 Windows 专用安装旅程。全仓 Ruff、格式、**1,388** 个源码 Python 文件 SPDX 与差异检查通过。未执行 make_release 主流程、publish workflow、真实模型、tag 或 release 操作。
+- 完成边界：门槛实现与离线验收已完成，端到端发行验收仍未完成。可信 `.github/workflows/terminal-acceptance.yml` 真实任务 producer 尚未提供，历史已发布完整 Windows 包及真实跨版本安装仍缺材料；当前严格 gate 因而保持拒绝。离线替身、旧 dirty 包或同版本重装不能代替这些材料。
