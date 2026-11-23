@@ -236,4 +236,18 @@
 - 真实 ACP 强杀验收覆盖 shell/Python × intent/outcome 四格：非幂等追加并 `fsync` 后强杀进程，重开时拒绝重复追加和提前完成，受限读取仍可用；逐项人工核对后继续，文件始终只有一行。另覆盖真实 native Python 部分写入后 timeout、ACP cancel 后正常 finalize/保存/重开，以及核对后执行、再保存、再次重开。
 - Windows Python 3.12 完整 CLI **2,389 passed、43 skipped、1 deselected**，最终完整 ACP **1,005 passed、9 deselected、3 xfailed**；Linux Python 3.13 完整 CLI **2,426 passed、6 skipped、1 deselected**，最终完整 ACP **1,004 passed、1 skipped、9 deselected、3 xfailed**。四格强杀包含在完整 ACP 内，范围不重复相加。全仓 Ruff、格式、全部 **1,372** 个源码 Python 文件 SPDX 与差异检查通过。
 - 初轮完整 ACP 的九个命令清单断言补入了宿主 `/recovery`，保留技能 metadata、顺序和路由断言。Windows 另有一次模型会话初始化 30 秒超时，启动日志停在 `provider_code_cache`；本地离线缓存探针冷建 **12.891 秒**、复用 **0.047 秒**，上述完整 ACP 复验通过，未扩大超时，未确认该次耗时变化的根因。较早 Python intent 强杀用例的一次会话读取失败未再复现；测试保留底层读取诊断，最终两平台四格均通过。日志与 JUnit 位于本机临时目录 `aster-audit-delivery-da31de6dc7`，远端结果绑定最终候选后记入草稿 PR。
+- 最终 A4 候选 `1417a44c` 的 [CI](https://github.com/Ykrsuao/aster-agent/actions/runs/45042013985) 与 [WSL full](https://github.com/Ykrsuao/aster-agent/actions/runs/45042018982) 均成功。Linux unit 与 WSL 各 **17,018 passed、56 skipped、584 deselected、3 xfailed**；Windows 完整终端包安装/重装、Linux 原生终端、Linux sandbox 及其余启用检查通过，macOS 条件任务未启用。
 - 边界：一个 Python cell 与内部 shell 可能分别产生记录，用户须核对全部列出的 ID。记录只能表明宿主观察到的执行边界，不能推断任意代码的全部外部效果、自动回滚、阻止绕过框架的任意程序，或保证副作用恰好执行一次。模型均为离线脚本，未调用真实模型 API；A5、M1b 与 R1/R2 的集成和验收继续独立推进，A1 保持候选方向。
+
+## A5 实施与验收（2026-11-23）
+
+- 实施分支：`codex/task-budget-20261122`，基于最终 A4 候选 `1417a44c`。显式 `coding.task_budget` 提供调用数、token 与累计活动时间限额，默认关闭；复用实际 Completion/Responses 客户端和 admission 边界。契约与示例见 [任务预算](task-budget.md)。
+- 宿主在 admission 成功后、provider 派发前持久化调用预留，每次框架重试单独计数。排队拒绝和排队取消不花调用；预算绑定时拒绝 SDK 隐式重试。token 按供应商实际报告的输入/输出结算，不重复加入缓存和 reasoning 子集；缺失、错误或中断 usage 保持未知，有 token 限额时阻止继续派发。未知费用保留未知，明确的零费用仍为已知零。
+- SQLite 的独立 `task_budgets` ledger 不随聊天快照、回合、模型切换、摘要或恢复退款。后台工作、子代理、摘要和 Python 技能共享 owner；活动时间按并发区间的并集累计。强杀后保守计入未结束区间直至恢复，时钟回退导致时间未知时停止任务。
+- `/task-budget` 可查看原因，`/task-budget new` 显式创建新额度；有活动任务或未结算请求时拒绝重置。rewind/fork 复制最新消费并停为 `forked_task`，不能利用旧快照退款。预算耗尽后仍可用宿主 `/recovery` 核对；豁免按实际绑定的宿主方法识别，同名用户技能继续受限。
+- 联动反例已修复：预算耗尽曾拦住恢复管理（三种限额均复现）；部分 Python 写入后嵌套模型调用到限，正常保存曾清掉不确定动作。现在预算中断保留待核对 journal，保存或新额度都不能清掉它。使用真实 SessionStore、实际文件追加和离线 CompletionClient 验证，修前红灯、修后通过。
+- Linux 完整 CLI **2,440 passed、6 skipped、1 deselected**，完整 ACP **1,005 passed、1 skipped、9 deselected、3 xfailed**；UnifiedLLM/storage/任务预算相关核心范围 **3,923 passed、53 deselected**。Windows 完整 CLI **2,403 passed、43 skipped、1 deselected**，最终完整 ACP **1,006 passed、9 deselected、3 xfailed**；最终预算/恢复/配置并发/模型选择与缓存关键范围 **77 passed**。各范围有重叠，不相加。
+- 原 Linux deadline 反例和新增的 `run`/`run_stream` 取消用例证明子进程在取消后继续写入。控制等待现在复用已有进程树中断恢复，并在两路输出消费的 `finally` 回收 reader。Linux Bash/Shell 与预算范围 **497 passed**；当前集成后的 Bash/配置并发回归 **24 passed**，验证无迟到追加、只启动一次、原有后台任务存活和同会话立即复用。
+- Windows 首轮的两处失败分别是 SDK 缓存冷建占用协议等待，以及配置测试在第二个进程仍准备 SDK 时判断锁竞争。模型选择现在先在隔离目录准备真实安装 SDK 的可复用缓存，保持每次协议请求的 **30 秒**上限；专用冷启动测试仍从空缓存验证 loader、资源和原生扩展。配置测试把就绪信号移到实际取锁前，使用显式 Responses 配置避免无关 SDK 冷导入，保留所有原超时和数据断言。离线缓存 profiling 为冷建 **14.245 秒**、复用 **0.043 秒**，不把测试范围调整称为生产冷启动提速。
+- 全仓 Ruff、格式及差异检查通过，SPDX 检查通过 **1,382** 个源码 Python 文件。日志与 JUnit 保存在本机临时目录 `aster-audit-delivery-da31de6dc7`；草稿 PR 的远端检查绑定其最终候选。
+- 边界：响应可超过剩余 token 额度，后续调用才停止；本项不是供应商硬 token 上限或最终账单。async deadline 不能抢占阻塞事件循环的同步 Python，有时间限额时同步 provider 派发会预先拒绝。预算对象跨独立进程、guest 自建模型客户端或未结算的 broker 导出显式拒绝；任意用户程序直连供应商不在框架计量范围。模型均为离线替身，M1b 与 R1/R2 继续独立验收，A1 保持候选方向。
