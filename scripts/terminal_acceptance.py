@@ -565,8 +565,7 @@ def run_suite(args, tasks: list[dict], fixture_hash: str) -> int:
             "model": args.model,
             "workspace": str(workspace),
             "meter": str(meter),
-            "prompt": task["prompt"]
-            + f"\nHard budget: {args.max_calls} model responses total. "
+            "prompt": task["prompt"] + f"\nHard budget: {args.max_calls} model responses total. "
             "Batch related inspection and edits; implement the smallest fix and run focused checks once. "
             "Stop when the checks pass; reserve the final response to call return_result(Done(...)). "
             "Work only inside the supplied workspace. Use standard-library code; no package installation or internet is needed.",
