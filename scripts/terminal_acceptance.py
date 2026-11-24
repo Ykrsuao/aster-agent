@@ -566,7 +566,10 @@ def run_suite(args, tasks: list[dict], fixture_hash: str) -> int:
             "workspace": str(workspace),
             "meter": str(meter),
             "prompt": task["prompt"]
-            + "\nWork only inside the supplied workspace. Use standard-library code; no package installation or internet is needed. Run your own checks before reporting completion.",
+            + f"\nHard budget: {args.max_calls} model responses total. "
+            "Batch related inspection and edits; implement the smallest fix and run focused checks once. "
+            "Stop when the checks pass; reserve the final response to call return_result(Done(...)). "
+            "Work only inside the supplied workspace. Use standard-library code; no package installation or internet is needed.",
             "max_calls": args.max_calls,
             "max_output_tokens": args.max_output_tokens,
             "expected_model_fingerprint": getattr(args, "expected_model_fingerprint", None),
