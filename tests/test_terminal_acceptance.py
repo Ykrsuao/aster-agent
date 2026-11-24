@@ -223,6 +223,8 @@ def test_report_requires_completion_and_independent_verification(
         if "--worker" not in args:
             return original(args, **kwargs)
         payload = json.loads(kwargs["text"])
+        assert "Hard budget: 8 model calls total." in payload["prompt"]
+        assert "use the last call to submit return_result(Done(...))" in payload["prompt"]
         if correct_patch:
             acceptance.write_files(Path(payload["workspace"]), task["solution"])
         acceptance.write_json(
