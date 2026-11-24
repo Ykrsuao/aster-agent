@@ -62,6 +62,20 @@ def test_ripgrep_uses_a_pinned_upstream_archive_with_integrity_check(workflow):
     assert "$rg.DirectoryName >> $env:GITHUB_PATH" in run
 
 
+def test_windows_core_smoke_uses_verified_ripgrep_release():
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
+    job = workflow["jobs"]["windows-core-smoke"]
+    install = next(step for step in job["steps"] if step.get("name") == "Install ripgrep")
+    run = install["run"]
+    assert "community.chocolatey.org" not in run
+    assert "Get-FileHash -LiteralPath $archive -Algorithm SHA256" in run
+    assert "71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5" in run
+    assert "$rg.DirectoryName >> $env:GITHUB_PATH" in run
+
+
 def test_candidate_and_secrets_are_passed_only_to_the_validating_driver(workflow):
     assert workflow["permissions"] == {}
     assert "env" not in workflow
