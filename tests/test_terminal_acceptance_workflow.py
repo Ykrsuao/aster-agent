@@ -45,6 +45,23 @@ def test_provider_requests_and_workflow_runs_remain_serial(workflow):
     assert job["timeout-minutes"] == "45"
 
 
+def test_ripgrep_uses_a_pinned_upstream_archive_with_integrity_check(workflow):
+    steps = next(iter(workflow["jobs"].values()))["steps"]
+    install = next(step for step in steps if step.get("name") == "Install ripgrep")
+    run = install["run"]
+    archive_url = (
+        "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/"
+        "ripgrep-15.2.0-x86_64-pc-windows-msvc.zip"
+    )
+    assert "community.chocolatey.org" not in run
+    assert archive_url in run
+    digest = "71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5"
+    assert f"if ($actualHash -ne '{digest}')" in run
+    assert "Get-FileHash -LiteralPath $archive -Algorithm SHA256" in run
+    assert "Expand-Archive -LiteralPath $archive" in run
+    assert "$rg.DirectoryName >> $env:GITHUB_PATH" in run
+
+
 def test_candidate_and_secrets_are_passed_only_to_the_validating_driver(workflow):
     assert workflow["permissions"] == {}
     assert "env" not in workflow

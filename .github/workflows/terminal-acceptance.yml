@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       confirm_live:
-        description: Authorize live calls for 10 tasks (180s, 8 calls, 4096 output tokens per task)
+        description: 10 tasks, 180s and 8 calls per task, 4096 output tokens per call (327680 total); no hard input-token or USD cap
         type: boolean
         required: true
         default: false
@@ -53,9 +53,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Install ripgrep
         run: |
-          choco install ripgrep --no-progress -y
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          rg --version
+          $archive = Join-Path $env:RUNNER_TEMP 'ripgrep-15.2.0-x86_64-pc-windows-msvc.zip'
+          $url = 'https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-pc-windows-msvc.zip'
+          $ErrorActionPreference = 'Stop'
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne '71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5') { throw 'ripgrep archive SHA-256 mismatch' }
+          $destination = Join-Path $env:RUNNER_TEMP 'ripgrep-15.2.0'
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination -Force
+          $rg = Get-ChildItem -LiteralPath $destination -Filter rg.exe -File -Recurse | Select-Object -First 1
+          if (-not $rg) { throw 'rg.exe not found in verified archive' }
+          $rg.DirectoryName >> $env:GITHUB_PATH
+          & $rg.FullName --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Check frozen task verifiers offline
         run: |
