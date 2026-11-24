@@ -1,0 +1,93 @@
+# Live calls require a manual dispatch and approval of the protected environment.
+# Keep all tasks and runs serial for providers with a two-request concurrency limit.
+name: Terminal task acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_live:
+        description: Authorize live calls for 10 tasks (180s, 8 calls, 4096 output tokens per task)
+        type: boolean
+        required: true
+        default: false
+      candidate_sha:
+        description: Complete SHA of the selected branch or tag, already reachable from the default branch
+        type: string
+        required: true
+      model_fingerprint:
+        description: Expected SHA256 of the resolved model identity
+        type: string
+        required: true
+
+permissions: {}
+
+concurrency:
+  group: terminal-task-acceptance
+  cancel-in-progress: false
+
+jobs:
+  terminal-acceptance:
+    name: Terminal task acceptance
+    if: github.event_name == 'workflow_dispatch' && inputs.confirm_live
+    runs-on: windows-latest
+    timeout-minutes: 45
+    environment: terminal-acceptance
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Sync acceptance dependencies
+        run: |
+          uv sync --locked --extra cli --group dev
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install ripgrep
+        run: |
+          choco install ripgrep --no-progress -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rg --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check frozen task verifiers offline
+        run: |
+          uv run --no-sync python scripts/terminal_acceptance.py --self-check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run the approved frozen tasks
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          EXPECTED_MODEL_FINGERPRINT: ${{ inputs.model_fingerprint }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          TERMINAL_ACCEPTANCE_MODEL_CONFIG: ${{ vars.TERMINAL_ACCEPTANCE_MODEL_CONFIG }}
+          TERMINAL_ACCEPTANCE_API_KEY: ${{ secrets.TERMINAL_ACCEPTANCE_API_KEY }}
+        run: |
+          uv run --no-sync python scripts/terminal_acceptance_ci.py `
+            --candidate-sha "$env:CANDIDATE_SHA" `
+            --model-fingerprint "$env:EXPECTED_MODEL_FINGERPRINT" `
+            --output (Join-Path $env:RUNNER_TEMP 'terminal-task-acceptance')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Locate the sanitized report
+        id: report
+        if: always()
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'terminal-task-acceptance/report.json'
+          if (Test-Path -LiteralPath $report -PathType Leaf) {
+            'present=true' >> $env:GITHUB_OUTPUT
+          }
+      # Failed runs may retain a report, but the release checker rejects their provenance.
+      - name: Upload only the sanitized report
+        if: always() && steps.report.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terminal-task-acceptance
+          path: ${{ runner.temp }}/terminal-task-acceptance/report.json
+          if-no-files-found: error
+          retention-days: 30

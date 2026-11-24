@@ -27,8 +27,8 @@ from packaging.version import Version
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGES = {"aster", "aster-cli", "aster-acp", "aster-memory", "aster-bench"}
 CI_WORKFLOW = ".github/workflows/ci.yml"
-# Reserved for a separately reviewed, real-model evidence producer. It does not
-# exist yet; neither a manual JSON upload nor the ordinary CI can substitute.
+# Only the manual real-model producer can satisfy this provenance contract;
+# neither a manual JSON upload nor ordinary CI can substitute.
 TASK_WORKFLOW = ".github/workflows/terminal-acceptance.yml"
 TASK_JOB = "Terminal task acceptance"
 TASK_ARTIFACT = "terminal-task-acceptance"
