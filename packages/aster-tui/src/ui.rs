@@ -220,6 +220,107 @@ fn pair(frame: &mut Frame, area: Rect, left: &str, right: &str, style: Style, mu
     );
 }
 
+fn activity_status_line(
+    area: Rect,
+    label: &str,
+    compact_label: &str,
+    elapsed: Option<&str>,
+    actions: &[(&str, &str, &str, &str)],
+    status_style: Style,
+    muted_style: Style,
+) -> Line<'static> {
+    let available = area.width as usize;
+    if available >= 64 {
+        let full_action_width = actions
+            .iter()
+            .map(|(key, label, _, _)| width(&format!("[{key}] {label}")))
+            .sum::<usize>()
+            + actions.len().saturating_sub(1) * 2;
+        let use_compact = full_action_width > available / 2;
+        let action_text = actions
+            .iter()
+            .map(|(_, _, compact, _)| *compact)
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let right_width = if use_compact {
+            width(&action_text)
+        } else {
+            full_action_width
+        };
+        let left_width = available.saturating_sub(right_width + 2);
+        let elapsed_width = elapsed.map_or(0, |text| width(text) + 3);
+        let left = fit(label, left_width.saturating_sub(elapsed_width));
+        let gap = available.saturating_sub(width(&left) + elapsed_width + right_width);
+        let mut spans = vec![Span::styled(left, status_style)];
+        if let Some(elapsed) = elapsed {
+            spans.push(Span::styled(" · ", muted_style));
+            spans.push(Span::styled(elapsed.to_owned(), muted_style));
+        }
+        if !actions.is_empty() {
+            spans.push(Span::raw(" ".repeat(gap)));
+        }
+        if !actions.is_empty() {
+            if use_compact {
+                spans.push(Span::styled(action_text, status_style));
+            } else {
+                for (index, (key, label, _, _)) in actions.iter().enumerate() {
+                    if index > 0 {
+                        spans.push(Span::raw("  "));
+                    }
+                    spans.push(Span::styled(format!("[{key}]"), status_style));
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled((*label).to_owned(), muted_style));
+                }
+            }
+        }
+        return Line::from(spans);
+    }
+
+    let label = if available < 42 { compact_label } else { label };
+    let action_text = actions
+        .iter()
+        .map(|(_, _, compact, small)| if available < 30 { *small } else { *compact })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let elapsed_text = elapsed;
+    let action_text = fit(&action_text, available);
+    let action_width = width(&action_text);
+    let min_label_width = width(label).min(4);
+    let show_elapsed = elapsed_text.is_some_and(|text| {
+        min_label_width
+            + usize::from(!label.is_empty()) * 3
+            + width(text)
+            + usize::from(!action_text.is_empty()) * 3
+            + action_width
+            <= available
+    });
+    let reserved = action_width
+        + usize::from(!action_text.is_empty() && !label.is_empty()) * 3
+        + if show_elapsed {
+            elapsed_text.map_or(0, |text| width(text) + usize::from(!label.is_empty()) * 3)
+        } else {
+            0
+        };
+    let label = fit(label, available.saturating_sub(reserved));
+    let mut spans = Vec::new();
+    if !label.is_empty() {
+        spans.push(Span::styled(label, status_style));
+    }
+    if show_elapsed {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ", muted_style));
+        }
+        spans.push(Span::styled(elapsed_text.unwrap().to_owned(), muted_style));
+    }
+    if !action_text.is_empty() {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ", muted_style));
+        }
+        spans.push(Span::styled(action_text, status_style));
+    }
+    Line::from(spans)
+}
+
 fn markdown(text: &str, p: Palette) -> Vec<Line<'static>> {
     crate::markdown::render_transcript(
         text,
@@ -1342,6 +1443,15 @@ const WELCOME_MENU: [(&str, &str, &str); 4] = [
     ("Quit", "ctrl+q", "/exit"),
 ];
 
+const WELCOME_LOGO: [&str; 6] = [
+    "█████╗  ███████╗ ████████╗ ███████╗ ██████╗",
+    "██╔══██╗ ██╔════╝ ╚══██╔══╝ ██╔════╝ ██╔══██╗",
+    "███████║ ███████╗    ██║    █████╗   ██████╔╝",
+    "██╔══██║ ╚════██║    ██║    ██╔══╝   ██╔══██╗",
+    "██║  ██║ ███████║    ██║    ███████╗ ██║  ██║",
+    "╚═╝  ╚═╝ ╚══════╝    ╚═╝    ╚══════╝ ╚═╝  ╚═╝",
+];
+
 fn welcome_menu_columns(columns: u16) -> usize {
     let minimum = WELCOME_MENU
         .iter()
@@ -1353,16 +1463,12 @@ fn welcome_menu_columns(columns: u16) -> usize {
 
 fn welcome(frame: &mut Frame, area: Rect, p: Palette, hits: &mut HitAreas) {
     // ASTER wordmark; measure the artwork so narrow terminals never crop letters.
-    let logo = [
-        " █████╗  ███████╗ ████████╗ ███████╗ ██████╗ ",
-        "██╔══██╗ ██╔════╝ ╚══██╔══╝ ██╔════╝ ██╔══██╗",
-        "███████║ ███████╗    ██║    █████╗   ██████╔╝",
-        "██╔══██║ ╚════██║    ██║    ██╔══╝   ██╔══██╗",
-        "██║  ██║ ███████║    ██║    ███████╗ ██║  ██║",
-        "╚═╝  ╚═╝ ╚══════╝    ╚═╝    ╚══════╝ ╚═╝  ╚═╝",
-    ];
-    let logo_width = logo.iter().map(|line| width(line)).max().unwrap_or(0);
-    let menu_columns = if area.height as usize >= logo.len() + WELCOME_MENU.len() {
+    let logo_width = WELCOME_LOGO
+        .iter()
+        .map(|line| width(line))
+        .max()
+        .unwrap_or(0);
+    let menu_columns = if area.height as usize >= WELCOME_LOGO.len() + WELCOME_MENU.len() {
         1
     } else {
         welcome_menu_columns(area.width)
@@ -1376,14 +1482,18 @@ fn welcome(frame: &mut Frame, area: Rect, p: Palette, hits: &mut HitAreas) {
     let x = area.x + (area.width - total_width) / 2;
     let menu_rows = WELCOME_MENU.len().div_ceil(menu_columns) as u16;
     let full_logo = area.width as usize >= logo_width
-        && usize::from(area.height) >= logo.len() + usize::from(menu_rows);
-    let logo_height = if full_logo { logo.len() as u16 } else { 1 };
+        && usize::from(area.height) >= WELCOME_LOGO.len() + usize::from(menu_rows);
+    let logo_height = if full_logo {
+        WELCOME_LOGO.len() as u16
+    } else {
+        1
+    };
     let menu_height = menu_rows.min(area.height.saturating_sub(logo_height));
     let gap = area.height.saturating_sub(logo_height + menu_height).min(2);
     let mut y = area.y + area.height.saturating_sub(logo_height + gap + menu_height) / 3;
     if full_logo {
         let logo_x = area.x + (area.width - logo_width as u16) / 2;
-        for line in logo {
+        for line in WELCOME_LOGO {
             line_at(
                 frame,
                 Rect::new(logo_x, y, logo_width as u16, 1),
@@ -4396,7 +4506,8 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
     );
     let activity_height = u16::from(
         screen.height >= 12
-            && ((state.busy() && (!state.preparing() || !state.queued.is_empty()))
+            && ((state.hud.config.layout == crate::hud::Layout::Expanded
+                || (state.busy() && (!state.preparing() || !state.queued.is_empty())))
                 || state.phase == Phase::Failed
                 || (!state.preparing() && state.last_elapsed.is_some())
                 || state.exit_confirmation.is_some()),
@@ -4417,7 +4528,17 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
         let menu_height = WELCOME_MENU
             .len()
             .div_ceil(welcome_menu_columns(inner.width)) as u16;
-        (1 + menu_height).min(
+        let logo_width = WELCOME_LOGO
+            .iter()
+            .map(|line| width(line))
+            .max()
+            .unwrap_or(0);
+        let wordmark_height = if screen.height >= 24 && inner.width as usize >= logo_width {
+            WELCOME_LOGO.len() as u16
+        } else {
+            1
+        };
+        (wordmark_height + menu_height).min(
             screen
                 .height
                 .saturating_sub(header_height + fixed_footer + above + 1 + hud_min),
@@ -4429,6 +4550,26 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
     } else {
         u16::from(screen.height >= 6)
     };
+    let body_reserve =
+        if state.hud.config.layout == crate::hud::Layout::Expanded && screen.height >= 24 {
+            let menu_height = WELCOME_MENU
+                .len()
+                .div_ceil(welcome_menu_columns(inner.width)) as u16;
+            let logo_width = WELCOME_LOGO
+                .iter()
+                .map(|line| width(line))
+                .max()
+                .unwrap_or(0);
+            body_reserve.max(
+                (if inner.width as usize >= logo_width {
+                    WELCOME_LOGO.len() as u16
+                } else {
+                    1
+                }) + menu_height,
+            )
+        } else {
+            body_reserve
+        };
     let editor_width = inner.width.saturating_sub(2);
     let editor_width = editor_width.saturating_sub(if editor_width >= 12 { 4 } else { 0 });
     let composer_height =
@@ -4463,7 +4604,16 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
             .collect::<Vec<_>>();
         if let [text] = task_status.as_slice() {
             if text == &state.status && width(text) + 32 <= inner.width as usize {
-                hud_rows.retain(|row| row.element != "tasks");
+                if let Some(row) = hud_rows.iter_mut().find(|row| row.element == "tasks") {
+                    row.line = Line::styled(
+                        if state.hud.config.language == "zh" {
+                            "状态见上方"
+                        } else {
+                            "Status shown above"
+                        },
+                        p.muted(),
+                    );
+                }
             }
         }
     }
@@ -4772,10 +4922,12 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
         state.overlay.is_none(),
     );
     let color = match state.phase {
-        Phase::Ready | Phase::Connecting | Phase::Preparing => p.muted,
+        Phase::Ready => p.green,
+        Phase::Connecting | Phase::Preparing => p.muted,
         Phase::Failed => p.red,
         Phase::Cancelling => p.amber,
-        _ => p.accent,
+        Phase::Busy => p.suggestion,
+        Phase::Closing => p.accent,
     };
     let duration = if state.preparing() {
         None
@@ -4793,13 +4945,8 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
     } else {
         "Ctrl+C again to exit"
     };
-    let preparation_hint = if inner.width >= 70 {
-        "Esc edit · Ctrl+E queue"
-    } else {
-        "Esc edit"
-    };
-    let mut status = if confirming_exit {
-        exit_hint.into()
+    let (mut status, compact_status) = if confirming_exit {
+        (exit_hint.to_owned(), exit_hint.to_owned())
     } else if state.preparing() {
         let count = state.queued.len();
         if inner.width < 42 {
@@ -4810,7 +4957,7 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
                 (false, 0 | 1) => "Starting".into(),
                 (false, _) => format!("{count} waiting"),
             };
-            format!("{label} · Esc edit")
+            (label.clone(), label)
         } else {
             let label = if state.queue_paused {
                 "Sending paused"
@@ -4823,47 +4970,75 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
             if count > 1 {
                 text.push_str(&format!(" · {count} messages"));
             }
-            text
+            (text, label.to_owned())
         }
     } else {
-        format!("{} {}", if state.busy() { "·" } else { "✓" }, state.status)
+        let marker = if state.phase == Phase::Failed {
+            "!"
+        } else if state.busy() {
+            "●"
+        } else {
+            "✓"
+        };
+        let label = format!("{marker} {}", state.status);
+        let compact = if state.phase == Phase::Cancelling {
+            "Stopping".to_owned()
+        } else if state.phase == Phase::Failed {
+            "Failed".to_owned()
+        } else if state.status == "Waiting for model" {
+            "Waiting".to_owned()
+        } else {
+            state.status.clone()
+        };
+        (label, compact)
     };
-    if !confirming_exit {
-        if let Some(seconds) = duration {
-            let seconds = seconds.max(0.0) as u64;
-            let time = if seconds < 60 {
-                format!("{seconds}s")
-            } else {
-                format!("{}m {:02}s", seconds / 60, seconds % 60)
-            };
-            status.push_str(&format!(" · {time}"));
+    let mut actions = Vec::new();
+    if !confirming_exit && !state.preparing() && !state.queued.is_empty() && queue_height == 0 {
+        status.push_str(&format!(
+            " · {} queued{}",
+            state.queued.len(),
+            if state.queue_paused { " (paused)" } else { "" }
+        ));
+    }
+    if !confirming_exit && state.overlay.is_none() {
+        if state.preparing() {
+            actions.push(("Esc", "Edit", "Esc edit", "Esc edit"));
+            if inner.width >= 70 {
+                actions.push(("Ctrl+E", "Queue", "Ctrl+E", "Ctrl+E"));
+            }
+        } else if state.phase == Phase::Cancelling {
+            actions.push(("Ctrl+C", "twice to exit", "Ctrl+C x2", "Ctrl+C x2"));
+        } else if state.can_cancel() {
+            actions.push(("Esc", "Stop", "Esc stop", "Esc"));
         }
-        if !state.preparing() && !state.queued.is_empty() && queue_height == 0 {
-            status.push_str(&format!(
-                " · {} queued{} · Ctrl+E",
-                state.queued.len(),
-                if state.queue_paused { " (paused)" } else { "" }
-            ));
+        if !state.preparing() && !state.queued.is_empty() && queue_height == 0 && actions.len() < 2
+        {
+            actions.push(("Ctrl+E", "Manage", "Ctrl+E manage", "Ctrl+E"));
         }
     }
+    let elapsed = (if confirming_exit { None } else { duration }).map(|seconds| {
+        let seconds = seconds.max(0.0) as u64;
+        if seconds < 60 {
+            format!("{seconds}s")
+        } else {
+            format!("{}m{:02}s", seconds / 60, seconds % 60)
+        }
+    });
     if activity_height > 0 {
-        pair(
+        let status_style = p.text().fg(color).add_modifier(Modifier::BOLD);
+        let area = Rect::new(inner.x, composer_y - 1, inner.width, 1);
+        line_at(
             frame,
-            Rect::new(inner.x, composer_y - 1, inner.width, 1),
-            &status,
-            if confirming_exit || state.overlay.is_some() {
-                ""
-            } else if state.preparing() {
-                preparation_hint
-            } else if state.phase == Phase::Cancelling {
-                "Ctrl+C twice to exit"
-            } else if state.can_cancel() {
-                "Esc to stop"
-            } else {
-                ""
-            },
-            p.text().fg(color),
-            p.muted(),
+            area,
+            activity_status_line(
+                area,
+                &status,
+                &compact_status,
+                elapsed.as_deref(),
+                &actions,
+                status_style,
+                p.muted(),
+            ),
         );
     }
     let choices = state.slash_choices();
@@ -5022,13 +5197,18 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
     {
         frame.render_widget(Clear, footer);
         frame.render_widget(Block::default().style(p.text()), footer);
-        pair(
+        line_at(
             frame,
             footer,
-            &status,
-            preparation_hint,
-            p.muted(),
-            p.muted(),
+            activity_status_line(
+                footer,
+                &status,
+                &compact_status,
+                None,
+                &actions,
+                p.muted().add_modifier(Modifier::BOLD),
+                p.muted(),
+            ),
         );
     }
     if confirming_exit && (activity_height == 0 || state.overlay.is_some()) {
@@ -5138,7 +5318,7 @@ mod render_tests;
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     fn mcp_state() -> State {
         let mut state = State::new("C:/workspace".into(), "model".into(), false);
@@ -6433,14 +6613,104 @@ mod tests {
     }
 
     #[test]
+    fn expanded_full_hud_keeps_activity_rows_at_a_stable_height() {
+        let mut state = State::new("workspace".into(), "model".into(), false);
+        state.hud.config.layout = crate::hud::Layout::Expanded;
+        state.hud.config.elements = crate::hud::config::ELEMENTS
+            .iter()
+            .map(|element| (*element).to_owned())
+            .collect();
+        state.hud.config.max_rows = 16;
+
+        let (idle, idle_hits) = snapshot(&mut state, 120, 50);
+        assert!(idle.contains("Tools"), "{idle}");
+        assert!(idle.contains("idle"), "{idle}");
+        assert!(idle.contains("Jobs"), "{idle}");
+
+        state.phase = Phase::Busy;
+        state.active_turn_id = Some("turn-1".into());
+        state.started = Some(Instant::now());
+        state.status = "Waiting for model".into();
+        state.tasks = serde_json::json!({
+            "waitReason": "Waiting for model",
+            "jobs": [{"id":"job-1", "title":"Background task", "status":"running"}]
+        });
+        state.entries.push(Entry::Tool(tool()));
+        let (active, active_hits) = snapshot(&mut state, 120, 50);
+        assert_eq!(active_hits.hud_rows.len(), idle_hits.hud_rows.len());
+        assert!(active.contains("Status shown above"), "{active}");
+
+        state.phase = Phase::Ready;
+        state.active_turn_id = None;
+        state.started = None;
+        state.tasks = serde_json::json!({});
+        state.entries.clear();
+        let (_, finished_hits) = snapshot(&mut state, 120, 50);
+        assert_eq!(finished_hits.hud_rows.len(), idle_hits.hud_rows.len());
+    }
+
+    #[test]
     fn activity_timer_uses_stable_whole_seconds() {
         let mut state = State::new("workspace".into(), "model".into(), false);
         state.phase = Phase::Ready;
         state.status = "Ready".into();
         state.last_elapsed = Some(12.87);
         let (text, _) = snapshot(&mut state, 80, 24);
+        assert!(text.contains("Ready"), "{text}");
         assert!(text.contains("Ready · 12s"), "{text}");
         assert!(!text.contains("12.87"), "{text}");
+        state.last_elapsed = Some(65.87);
+        let (text, _) = snapshot(&mut state, 80, 24);
+        assert!(text.contains("Ready · 1m05s"), "{text}");
+    }
+
+    #[test]
+    fn activity_status_keeps_actions_visible_on_narrow_rows() {
+        let actions = [("Esc", "Stop", "Esc stop", "Esc")];
+        for columns in [22, 34, 40, 62] {
+            let line = activity_status_line(
+                Rect::new(0, 0, columns, 1),
+                "● Waiting for model",
+                "Waiting",
+                Some("5s"),
+                &actions,
+                Style::default(),
+                Style::default(),
+            );
+            let text = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            assert!(text.contains("Esc"), "{columns} columns: {text}");
+            assert!(text.contains("5s"), "{columns} columns: {text}");
+            assert_eq!(
+                text.starts_with("Waiting"),
+                columns < 42,
+                "{columns} columns: {text}"
+            );
+            assert!(
+                width(&text) <= columns as usize,
+                "{columns} columns: {text}"
+            );
+        }
+
+        let cancelling = activity_status_line(
+            Rect::new(0, 0, 22, 1),
+            "● Cancelling…",
+            "Stopping",
+            Some("5s"),
+            &[("Ctrl+C", "twice to exit", "Ctrl+C x2", "Ctrl+C x2")],
+            Style::default(),
+            Style::default(),
+        );
+        let text = cancelling
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("Ctrl+C x2"), "{text}");
+        assert!(width(&text) <= 22, "{text}");
     }
 
     #[test]
@@ -6741,13 +7011,35 @@ mod tests {
         let mut state = State::new("workspace".into(), "model".into(), false);
         state.phase = Phase::Busy;
         state.active_turn_id = Some("turn-1".into());
-        state.status = "Working".into();
+        state.status = "Waiting for model".into();
+        state.started = Some(Instant::now() - Duration::from_secs(5));
         let (text, _) = snapshot(&mut state, 100, 30);
-        assert!(text.contains("Esc to stop"));
+        assert!(text.contains("[Esc] Stop"));
+        assert!(text.contains("● Waiting for model · 5s"));
         assert!(!text.to_lowercase().contains("ctrl+c to stop"));
+        for (columns, expected_action, expected_elapsed) in [
+            (24, "Esc", "5s"),
+            (36, "Esc stop", "5s"),
+            (42, "Esc stop", "5s"),
+            (80, "[Esc] Stop", "5s"),
+        ] {
+            let (text, _) = snapshot(&mut state, columns, 30);
+            let activity = text
+                .lines()
+                .find(|line| line.contains("Waiting") || line.contains("Waiting for model"))
+                .unwrap_or_default();
+            assert!(
+                activity.contains(expected_action),
+                "{columns} columns:\n{text}"
+            );
+            assert!(
+                activity.contains(expected_elapsed),
+                "{columns} columns:\n{text}"
+            );
+        }
         state.active_turn_id = None;
         state.status = "Applying session settings…".into();
-        assert!(!snapshot(&mut state, 100, 30).0.contains("Esc to stop"));
+        assert!(!snapshot(&mut state, 100, 30).0.contains("[Esc] Stop"));
         state.open(Overlay::Help);
         let (text, _) = snapshot(&mut state, 120, 50);
         assert!(text.contains("Shift+Tab"));
@@ -6820,7 +7112,11 @@ mod tests {
                     text.contains("Starting") || text.contains("Connecting"),
                     "{columns}x{rows}\n{text}"
                 );
-                assert!(text.contains("Esc edit"), "{columns}x{rows}\n{text}");
+                if columns >= 70 {
+                    assert!(text.contains("[Esc] Edit"), "{columns}x{rows}\n{text}");
+                } else {
+                    assert!(text.contains("Esc edit"), "{columns}x{rows}\n{text}");
+                }
                 assert!(!text.contains("Esc to stop"));
                 state.queue_paused = true;
                 let (paused, _) = snapshot(&mut state, columns, rows);

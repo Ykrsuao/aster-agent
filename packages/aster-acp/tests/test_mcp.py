@@ -46,7 +46,7 @@ def configure(path: Path, servers: dict) -> None:
 
 
 @asynccontextmanager
-async def session(workspace: Path, *, servers=None):
+async def session(workspace: Path, *, servers=None, wait_for_mcp: bool = True):
     llm = FakeLLMClient([], strict_exhaustion=True)
     adapter = CodingACPAdapter(lambda: llm)
     adapter.on_connect(AsyncMock())
@@ -54,6 +54,10 @@ async def session(workspace: Path, *, servers=None):
         initialized = await adapter.initialize(1)
         created = await adapter.new_session(str(workspace), mcp_servers=servers)
         runtime = await adapter._get_runtime(created.session_id)
+        if wait_for_mcp:
+            await runtime.value.bootstrap_ready.wait()
+            if runtime.value.mcp_startup_task is not None:
+                await runtime.value.mcp_startup_task
         yield adapter, created.session_id, runtime, llm, initialized
     finally:
         await adapter.close()
@@ -195,6 +199,142 @@ async def test_reconnect_withdraws_tools_when_configuration_is_disabled_invalid_
             else:
                 assert snapshot["servers"][0]["state"] == expected
                 assert snapshot["servers"][0]["toolCount"] == 0
+
+
+@pytest.mark.parametrize("disable", [True, False])
+async def test_reconnect_waits_for_startup_before_applying_updated_configuration(tmp_path, disable):
+    project_file = tmp_path / ".mcp.json"
+    configure(project_file, {"lookup": {"command": "old-server"}})
+    started = asyncio.Event()
+    release = asyncio.Event()
+    requested = asyncio.Event()
+    old_tool, new_tool = LookupTools(), LookupTools()
+
+    async def discover(*args, **kwargs):
+        if kwargs["command"] == "old-server":
+            started.set()
+            await release.wait()
+            return old_tool
+        await runtime.value.mcp_startup_task
+        return new_tool
+
+    with patch("aster_acp._mcp.MCPManager.create_stdio_server", side_effect=discover):
+        async with session(tmp_path, wait_for_mcp=False) as (adapter, sid, runtime, _, _):
+            await asyncio.wait_for(started.wait(), 1)
+            configure(
+                project_file,
+                {"lookup": {"disabled": True} if disable else {"command": "new-server"}},
+            )
+
+            async def request_reconnect():
+                requested.set()
+                return await reconnect(adapter, sid)
+
+            operation = asyncio.create_task(request_reconnect())
+            try:
+                await asyncio.wait_for(requested.wait(), 1)
+                assert not operation.done()
+                release.set()
+                snapshot = await asyncio.wait_for(operation, 1)
+                await runtime.value.mcp_startup_task
+                if disable:
+                    assert snapshot["servers"][0]["state"] == "disabled"
+                    assert not hasattr(runtime.value.agent, "lookup")
+                    assert "mcp.lookup" not in runtime.value.agent.skills.activated()
+                else:
+                    assert snapshot["servers"][0]["state"] == "ready"
+                    assert runtime.value.agent.lookup is new_tool
+            finally:
+                release.set()
+                await asyncio.gather(operation, return_exceptions=True)
+
+
+@pytest.mark.parametrize("close_session", [False, True])
+async def test_cancelling_reconnect_while_waiting_for_startup(tmp_path, close_session):
+    configure(tmp_path / ".mcp.json", {"lookup": {"command": "server"}})
+    started = asyncio.Event()
+    release = asyncio.Event()
+    requested = asyncio.Event()
+    cleaned = asyncio.Event()
+
+    async def discover(*args, **kwargs):
+        started.set()
+        try:
+            await release.wait()
+            return LookupTools()
+        finally:
+            cleaned.set()
+
+    with patch("aster_acp._mcp.MCPManager.create_stdio_server", side_effect=discover):
+        async with session(tmp_path, wait_for_mcp=False) as (adapter, sid, runtime, _, _):
+            await asyncio.wait_for(started.wait(), 1)
+            startup = runtime.value.mcp_startup_task
+            assert startup is not None
+
+            async def request_reconnect():
+                requested.set()
+                return await reconnect(adapter, sid)
+
+            operation = asyncio.create_task(request_reconnect())
+            try:
+                await asyncio.wait_for(requested.wait(), 1)
+                if close_session:
+                    await asyncio.wait_for(adapter.close_session(sid), 1)
+                    with pytest.raises(RequestError):
+                        await operation
+                    assert startup.cancelled()
+                    assert cleaned.is_set()
+                else:
+                    operation.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await operation
+                    assert not startup.done()
+                    assert not cleaned.is_set()
+                    release.set()
+                    await asyncio.wait_for(startup, 1)
+                    assert (await status(adapter, sid))["servers"][0]["state"] == "ready"
+                    assert (await reconnect(adapter, sid))["servers"][0]["state"] == "ready"
+            finally:
+                release.set()
+                await asyncio.gather(operation, return_exceptions=True)
+
+
+async def test_closing_reconnect_before_bootstrap_does_not_wait_for_late_discovery(tmp_path):
+    configure(tmp_path / ".mcp.json", {"lookup": {"command": "server"}})
+    requested = asyncio.Event()
+    release = asyncio.Event()
+    publish_bootstrap = CodingACPAdapter._defer_bootstrap_updates
+
+    async def discover(*args, **kwargs):
+        await release.wait()
+        return LookupTools()
+
+    with (
+        patch.object(CodingACPAdapter, "_defer_bootstrap_updates"),
+        patch("aster_acp._mcp.MCPManager.create_stdio_server", side_effect=discover),
+    ):
+        async with session(tmp_path, wait_for_mcp=False) as (adapter, sid, runtime, _, _):
+
+            async def request_reconnect():
+                requested.set()
+                return await reconnect(adapter, sid)
+
+            operation = asyncio.create_task(request_reconnect())
+            await asyncio.wait_for(requested.wait(), 1)
+            closing = asyncio.create_task(adapter.close_session(sid))
+            try:
+                async with asyncio.timeout(1):
+                    while not runtime.value.mcp.is_closed:
+                        await asyncio.sleep(0)
+                publish_bootstrap(adapter, runtime.value)
+                await asyncio.wait_for(runtime.value.bootstrap_ready.wait(), 1)
+                assert runtime.value.mcp_startup_task is None
+                await asyncio.wait_for(closing, 10)
+                with pytest.raises(RequestError):
+                    await operation
+            finally:
+                release.set()
+                await asyncio.gather(operation, closing, return_exceptions=True)
 
 
 async def test_reconnect_preserves_a_skill_that_took_over_the_registration(tmp_path):
@@ -421,15 +561,23 @@ async def test_cancelled_startup_waits_for_every_discovery_cleanup(tmp_path):
     adapter.on_connect(AsyncMock())
     try:
         with patch("aster_acp._mcp.MCPManager.create_stdio_server", side_effect=discover):
-            operation = asyncio.create_task(adapter.new_session(str(tmp_path)))
+            created = await adapter.new_session(str(tmp_path))
+            runtime = await adapter._get_runtime(created.session_id)
+            await runtime.value.bootstrap_ready.wait()
+            startup = runtime.value.mcp_startup_task
+            assert startup is not None
             await asyncio.wait_for(all_entered.wait(), 2)
-            operation.cancel()
+            await asyncio.wait_for(adapter.close_session(created.session_id), 2)
             with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(operation, 2)
+                await startup
         assert cleaned == names
         assert await adapter._sessions.ids() == ()
         configure(tmp_path / ".mcp.json", {})
         created = await adapter.new_session(str(tmp_path))
+        runtime = await adapter._get_runtime(created.session_id)
+        await runtime.value.bootstrap_ready.wait()
+        if runtime.value.mcp_startup_task is not None:
+            await runtime.value.mcp_startup_task
         assert (await status(adapter, created.session_id))["servers"] == []
     finally:
         await adapter.close()

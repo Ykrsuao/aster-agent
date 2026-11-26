@@ -662,6 +662,7 @@ class ACPEventBridge:
             if context_window and context_window > 0
             else 0
         )
+        self._hud.sequence += 1
         metadata: dict[str, Any] = {"hud": self._hud.snapshot(self.agent)}
         pending = self._context_usage is None
         if pending:

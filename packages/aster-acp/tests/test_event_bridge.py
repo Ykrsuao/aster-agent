@@ -460,6 +460,17 @@ async def test_bridge_accumulates_known_cost_including_explicit_zero(tmp_path):
             0.25,
             0.75,
         ]
+        last = updates[-1].field_meta["aster"]["hud"]
+        bridge.refresh_usage()
+        await bridge.flush()
+        refreshed = client.updates[-1][1]
+        hud = refreshed.field_meta["aster"]["hud"]
+        assert hud["streamId"] == last["streamId"]
+        assert hud["sequence"] > last["sequence"]
+        assert hud["calls"] == 3
+        assert hud["tokens"] == last["tokens"]
+        assert hud["days"] == last["days"]
+        assert refreshed.cost.amount == 0.75
     finally:
         await bridge.close()
         await agent.close()

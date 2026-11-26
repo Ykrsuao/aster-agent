@@ -110,6 +110,8 @@ class _ACPSession:
     commands: CodingSlashCommandRegistry
     foreground: ForegroundTurns = field(init=False)
     mcp: SessionMCP | None = None
+    mcp_startup_task: asyncio.Task[None] | None = field(default=None, repr=False)
+    bootstrap_ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     controls: RuntimeControls | None = None
     configuring: bool = False
     startup_warnings: tuple[str, ...] = ()
@@ -122,6 +124,9 @@ class _ACPSession:
         self.foreground = ForegroundTurns(self.agent, self.handle, self.dispatcher, self.bridge)
 
     async def prepare_close(self) -> None:
+        if self.mcp_startup_task is not None and not self.mcp_startup_task.done():
+            self.mcp_startup_task.cancel()
+            await asyncio.gather(self.mcp_startup_task, return_exceptions=True)
         if self.mcp is not None:
             await self.mcp.close()
         await self.foreground.cancel()
@@ -542,12 +547,27 @@ class CodingACPAdapter:
                     if session.mcp is None:
                         raise RequestError.resource_not_found(params["name"])
                     try:
+                        await session.bootstrap_ready.wait()
+                        startup = session.mcp_startup_task
+                        if startup is not None:
+                            # Request cancellation must not cancel shared startup discovery.
+                            await asyncio.shield(startup)
+                        if session.mcp.is_closed:
+                            raise RequestError.resource_not_found(session_id)
                         return await session.mcp.reconnect(params["name"])
                     except KeyError:
                         raise RequestError.resource_not_found(params["name"]) from None
                     except asyncio.CancelledError:
                         task = asyncio.current_task()
-                        if session.mcp.is_closed and task is not None and not task.cancelling():
+                        startup = session.mcp_startup_task
+                        if (
+                            task is not None
+                            and not task.cancelling()
+                            and (
+                                session.mcp.is_closed
+                                or (startup is not None and startup.cancelled())
+                            )
+                        ):
                             raise RequestError.resource_not_found(session_id) from None
                         raise
                 if method == "aster/session/configure":
@@ -687,6 +707,10 @@ class CodingACPAdapter:
         if parsed.context is not None:
             session.agent.event_manager.add(parsed.context)
         try:
+            if not await self._wait_for_prompt_bootstrap(session):
+                progress.stop("cancelled")
+                session.agent.message("Stopped at your request.")
+                return PromptResponse(stop_reason="cancelled")
             if not session.commands_sent_on_prompt:
                 session.bridge.publish(_available_commands_update(session.commands.commands()))
                 session.commands_sent_on_prompt = True
@@ -825,6 +849,93 @@ class CodingACPAdapter:
                 raise RequestError.invalid_params({"reason": str(exc)}) from exc
             self._pending_model = None
 
+    async def _wait_for_prompt_bootstrap(self, session: _ACPSession) -> bool:
+        cancelled = asyncio.create_task(session.foreground.wait_cancelled())
+        bootstrap = asyncio.create_task(session.bootstrap_ready.wait())
+        try:
+            done, _ = await asyncio.wait(
+                (bootstrap, cancelled), return_when=asyncio.FIRST_COMPLETED
+            )
+            if cancelled in done:
+                return False
+            startup = session.mcp_startup_task
+            if startup is None:
+                return True
+            if not startup.done():
+                session.bridge.set_wait_reason("Connecting to MCP servers")
+            try:
+                done, _ = await asyncio.wait(
+                    (startup, cancelled), return_when=asyncio.FIRST_COMPLETED
+                )
+                if cancelled in done:
+                    return False
+                try:
+                    await startup
+                except asyncio.CancelledError:
+                    if startup.cancelled():
+                        return False
+                    raise
+                return True
+            finally:
+                session.bridge.set_wait_reason("")
+        finally:
+            for task in (bootstrap, cancelled):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(bootstrap, cancelled, return_exceptions=True)
+
+    def _start_mcp_startup(self, session: _ACPSession) -> None:
+        if session.mcp is None or session.mcp.is_closed or session.mcp_startup_task is not None:
+            return
+        task = asyncio.create_task(self._finish_mcp_startup(session), name="aster-acp-mcp-startup")
+        session.mcp_startup_task = task
+        session.notification_tasks.add(task)
+
+        def _finished(done: asyncio.Task[None]) -> None:
+            session.notification_tasks.discard(done)
+            if done.cancelled():
+                return
+            if (error := done.exception()) is not None:
+                logger.warning(
+                    "MCP startup task failed for session %s",
+                    session.bridge.session_id,
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+
+        task.add_done_callback(_finished)
+
+    async def _finish_mcp_startup(self, session: _ACPSession) -> None:
+        mcp = session.mcp
+        if mcp is None:
+            return
+        try:
+            with phase("session_mcp"):
+                await mcp.start()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "MCP startup failed for session %s",
+                session.bridge.session_id,
+                exc_info=True,
+            )
+            warnings = mcp.startup_warnings() or (
+                "MCP servers could not be initialized; see the agent log.",
+            )
+        else:
+            warnings = mcp.startup_warnings()
+        session.startup_warnings = warnings
+        if warnings:
+            details = "\n".join(f"- {warning}" for warning in warnings)
+            session.bridge.publish_best_effort(
+                update_agent_message(
+                    text_block(
+                        "Aster started without one or more MCP servers. The session is still "
+                        f"usable.\n\n{details}"
+                    )
+                )
+            )
+
     async def _create_runtime(
         self,
         handle: SessionHandle,
@@ -864,9 +975,7 @@ class CodingACPAdapter:
                 handle.storage.restore_current_snapshot(agent)
                 # Saved conversations can come from another workspace or host.
                 agent.refresh_host_context()
-            with phase("session_mcp"):
-                mcp = SessionMCP(agent, root, mcp_servers)
-                await mcp.start()
+            mcp = SessionMCP(agent, root, mcp_servers)
             coding_strategy = CodingReplyStrategy(
                 config=CodeActConfig(
                     cell_timeout=1800.0,
@@ -882,6 +991,7 @@ class CodingACPAdapter:
                 stream_messages=self._stream_messages,
                 structured_progress=self._structured_progress,
             )
+            mcp.on_change = bridge.refresh_usage
             # Every client gets execution approval. It uses the standard ACP
             # permission request, so it does not depend on an ASTER capability.
             controls = RuntimeControls(
@@ -910,14 +1020,12 @@ class CodingACPAdapter:
                 commands,
                 mcp=mcp,
                 controls=controls,
-                startup_warnings=mcp.startup_warnings(),
                 trust_notice=workspace_trust.restricted_notice(root),
                 unsubscribe_activity=record_activity(agent.event_manager, handle),
             )
             commands.set_on_change(
                 lambda available: bridge.publish(_available_commands_update(available)),
             )
-            mcp.on_change = bridge.refresh_usage
             try:
                 runtime = await self._sessions.add(
                     handle.id,
@@ -949,34 +1057,28 @@ class CodingACPAdapter:
         except KeyError:
             raise RequestError.resource_not_found(session_id) from None
 
-    @staticmethod
-    def _defer_bootstrap_updates(session: _ACPSession) -> None:
-        """Publish bootstrap updates after the session response can reach clients such as Zed."""
+    def _defer_bootstrap_updates(self, session: _ACPSession) -> None:
+        """Publish initial state after the client has registered the new session."""
 
         async def _publish() -> None:
-            await asyncio.sleep(0)
-            session.bridge.publish_best_effort(
-                _available_commands_update(session.commands.commands())
-            )
-            if session.controls is not None:
-                session.controls.publish()
-            session.bridge.refresh_tasks()
-            session.bridge.refresh_usage()
-            if session.trust_notice:
+            try:
+                await asyncio.sleep(0)
                 session.bridge.publish_best_effort(
-                    update_agent_message(text_block(session.trust_notice))
+                    _available_commands_update(session.commands.commands())
                 )
-            if session.startup_warnings:
-                details = "\n".join(f"- {warning}" for warning in session.startup_warnings)
-                session.bridge.publish_best_effort(
-                    update_agent_message(
-                        text_block(
-                            "Aster started without one or more MCP servers. The session is still "
-                            f"usable.\n\n{details}"
-                        )
+                if session.controls is not None:
+                    session.controls.publish()
+                session.bridge.refresh_tasks()
+                session.bridge.refresh_usage()
+                self._start_mcp_startup(session)
+                session.bootstrap_ready.set()
+                if session.trust_notice:
+                    session.bridge.publish_best_effort(
+                        update_agent_message(text_block(session.trust_notice))
                     )
-                )
-            await session.bridge.flush()
+                await session.bridge.flush()
+            finally:
+                session.bootstrap_ready.set()
 
         task = asyncio.create_task(_publish(), name="aster-acp-bootstrap")
         session.notification_tasks.add(task)

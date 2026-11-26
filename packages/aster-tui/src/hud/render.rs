@@ -97,9 +97,9 @@ impl Theme<'_> {
     }
 
     fn metric_label(&self, label: &str) -> Span<'static> {
-        let padding = self.label_width().saturating_sub(label.width()) + 2;
+        let padding = self.label_width().saturating_sub(label.width());
         Span::styled(
-            format!("{label}{}", " ".repeat(padding)),
+            format!("{label}{} │ ", " ".repeat(padding)),
             self.style("muted"),
         )
     }
@@ -287,7 +287,7 @@ fn project(state: &State, columns: usize, theme: &Theme<'_>, inline_effort: bool
     spans.extend(controls.spans);
     let mut details = vec![Span::styled(
         clean(&path_name(&state.workspace, cfg.path_levels)),
-        theme.style("project"),
+        theme.style("project").add_modifier(Modifier::BOLD),
     )];
     if let Some(git) = state.hud.host.git.as_ref().filter(|_| cfg.git) {
         let mut label = format!(
@@ -389,14 +389,20 @@ fn usage(state: &State, columns: usize, theme: &Theme<'_>) -> Row {
             pending_window
                 .map(|window| format!("0k / {}", count(Some(window))))
                 .or_else(|| match state.hud.config.context_value.as_str() {
-                    "tokens" => snapshot
-                        .map(|value| format!("{} / {}", count_k(value.used), count(value.window))),
+                    "tokens" => snapshot.map(|value| {
+                        format!(
+                            "{:.0}% used · {} / {}",
+                            ratio * 100.0,
+                            count_k(value.used),
+                            count(value.window)
+                        )
+                    }),
                     "remaining" => snapshot.and_then(|value| value.used.zip(value.window)).map(
                         |(used, total)| format!("{} left", count(Some(total.saturating_sub(used)))),
                     ),
                     "both" => snapshot.map(|value| {
                         format!(
-                            "{:.0}% · {} / {}",
+                            "{:.0}% used · {} / {}",
                             ratio * 100.0,
                             count_k(value.used),
                             count(value.window)
@@ -404,8 +410,8 @@ fn usage(state: &State, columns: usize, theme: &Theme<'_>) -> Row {
                     }),
                     _ => None,
                 })
-                .unwrap_or_else(|| format!("{:.0}%", ratio * 100.0));
-        let bar_width = if columns >= 100 { 10 } else { 6 };
+                .unwrap_or_else(|| format!("{:.0}% used", ratio * 100.0));
+        let bar_width = 10;
         let label_width = label.width();
         spans.push(label);
         if state.hud.config.context_bar
@@ -413,7 +419,8 @@ fn usage(state: &State, columns: usize, theme: &Theme<'_>) -> Row {
             && label_width + bar_width + value.width() < context_width
         {
             let filled = (ratio.clamp(0.0, 1.0) * bar_width as f64).round() as usize;
-            spans.push(Span::styled("█".repeat(filled), theme.usage(ratio)));
+            let filled = if ratio > 0.0 { filled.max(1) } else { filled };
+            spans.push(Span::styled("▓".repeat(filled), theme.usage(ratio)));
             spans.push(Span::styled(
                 "░".repeat(bar_width - filled),
                 theme.style("muted"),
@@ -445,7 +452,8 @@ fn usage(state: &State, columns: usize, theme: &Theme<'_>) -> Row {
     line.spans.push(Span::styled(" │ ", theme.style("muted")));
     if let Some(value) = cost.strip_prefix("cost ") {
         line.spans.push(Span::styled("cost ", theme.style("muted")));
-        line.spans.push(theme.value(value));
+        line.spans
+            .push(Span::styled(value.to_owned(), theme.style("project")));
     } else {
         line.spans.push(theme.value(cost));
     }
@@ -457,7 +465,8 @@ fn usage(state: &State, columns: usize, theme: &Theme<'_>) -> Row {
         .filter(|value| value.is_finite() && *value >= 0.0)
     {
         theme.separate(&mut line.spans);
-        line.spans.push(theme.value(format!("{speed:.1}")));
+        line.spans
+            .push(Span::styled(format!("{speed:.1}"), theme.style("project")));
         line.spans
             .push(Span::styled(" tok/s", theme.style("muted")));
     }
@@ -468,7 +477,14 @@ fn usage(state: &State, columns: usize, theme: &Theme<'_>) -> Row {
     }
 }
 
-fn element(state: &State, name: &str, columns: usize, theme: &Theme<'_>, now: f64) -> Option<Row> {
+fn element(
+    state: &State,
+    name: &str,
+    columns: usize,
+    theme: &Theme<'_>,
+    now: f64,
+    reserve_expanded_rows: bool,
+) -> Option<Row> {
     let hud = &state.hud;
     let metrics = &hud.telemetry;
     let fresh = |updated: Option<f64>| {
@@ -621,7 +637,7 @@ fn element(state: &State, name: &str, columns: usize, theme: &Theme<'_>, now: f6
                     }
                 })
                 .collect();
-            if tools.is_empty() {
+            if tools.is_empty() && !reserve_expanded_rows {
                 return None;
             }
             let active: Vec<_> = tools
@@ -674,7 +690,8 @@ fn element(state: &State, name: &str, columns: usize, theme: &Theme<'_>, now: f6
             let current = state.tasks["currentTask"]
                 .as_str()
                 .filter(|task| !task.trim().is_empty());
-            if steps.is_empty() && waiting.is_none() && current.is_none() {
+            if steps.is_empty() && waiting.is_none() && current.is_none() && !reserve_expanded_rows
+            {
                 return None;
             }
             let done = steps
@@ -703,12 +720,16 @@ fn element(state: &State, name: &str, columns: usize, theme: &Theme<'_>, now: f6
             } else if waiting.is_none() {
                 theme.separate(&mut details);
                 details.push(theme.value(theme.label(
-                    if done == steps.len() {
+                    if steps.is_empty() {
+                        "idle"
+                    } else if done == steps.len() {
                         "complete"
                     } else {
                         "pending"
                     },
-                    if done == steps.len() {
+                    if steps.is_empty() {
+                        "空闲"
+                    } else if done == steps.len() {
                         "已完成"
                     } else {
                         "待处理"
@@ -737,7 +758,19 @@ fn element(state: &State, name: &str, columns: usize, theme: &Theme<'_>, now: f6
         "agents" => {
             let jobs = state.tasks["jobs"]
                 .as_array()
-                .filter(|jobs| !jobs.is_empty())?;
+                .filter(|jobs| !jobs.is_empty());
+            let Some(jobs) = jobs else {
+                if !reserve_expanded_rows {
+                    return None;
+                }
+                return Some(metric_row(
+                    "agents",
+                    "/tasks",
+                    theme.label("Jobs", "后台作业"),
+                    vec![theme.value("0 running")],
+                    theme,
+                ));
+            };
             let active = jobs.iter().filter(|job| job["status"] == "running").count();
             let mut details = vec![
                 theme.value(format!("{active}/{}", jobs.len())),
@@ -946,7 +979,16 @@ fn element(state: &State, name: &str, columns: usize, theme: &Theme<'_>, now: f6
         }
         "custom" => {
             if hud.config.custom_text.is_empty() {
-                return None;
+                if !reserve_expanded_rows {
+                    return None;
+                }
+                return Some(metric_row(
+                    "custom",
+                    "/hud",
+                    theme.label("Custom", "自定义"),
+                    vec![theme.value("—")],
+                    theme,
+                ));
             }
             Row {
                 element: "custom",
@@ -965,6 +1007,8 @@ pub fn rows(state: &State, columns: usize, max_rows: usize) -> Vec<Row> {
         return vec![];
     }
     let columns = columns.min(cfg.max_width);
+    let budget = max_rows.min(cfg.max_rows);
+    let reserve_expanded_rows = cfg.layout == Layout::Expanded;
     let theme = Theme {
         config: cfg,
         monochrome: state.monochrome,
@@ -974,9 +1018,8 @@ pub fn rows(state: &State, columns: usize, max_rows: usize) -> Vec<Row> {
     let mut rows: Vec<_> = cfg
         .elements
         .iter()
-        .filter_map(|name| element(state, name, columns, &theme, now))
+        .filter_map(|name| element(state, name, columns, &theme, now, reserve_expanded_rows))
         .collect();
-    let budget = max_rows.min(cfg.max_rows);
     let reasoning_visible = |merged: bool| {
         if budget == 1 && rows.iter().any(|row| row.element == "usage") {
             return false;
@@ -1054,4 +1097,40 @@ pub fn rows(state: &State, columns: usize, max_rows: usize) -> Vec<Row> {
         row.line = clip(std::mem::take(&mut row.line), columns);
     }
     rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_hud_keeps_visible_activity_rows_within_a_short_budget() {
+        let mut state = State::new("workspace".into(), "model".into(), false);
+        state.hud.config.layout = Layout::Expanded;
+        state.hud.config.elements = super::super::config::ELEMENTS
+            .iter()
+            .map(|element| (*element).to_owned())
+            .collect();
+        state.hud.config.max_rows = 16;
+
+        let short = rows(&state, 120, 8);
+        assert_eq!(short.len(), 8);
+        assert!(short.iter().any(|row| row.element == "tools"));
+        assert!(short.iter().any(|row| row.element == "tasks"));
+        assert!(!short.iter().any(|row| row.element == "agents"));
+
+        let bounded = rows(&state, 120, 12);
+        assert_eq!(bounded.len(), 12);
+        state.tasks = serde_json::json!({
+            "waitReason": "Waiting for model",
+            "jobs": [{"id":"job-1", "title":"Background task", "status":"running"}]
+        });
+        assert_eq!(rows(&state, 120, 12).len(), bounded.len());
+
+        let full = rows(&state, 120, state.hud.config.elements.len());
+        assert_eq!(full.len(), state.hud.config.elements.len());
+        for element in ["tools", "tasks", "agents", "custom"] {
+            assert!(full.iter().any(|row| row.element == element));
+        }
+    }
 }

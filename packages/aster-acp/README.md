@@ -126,6 +126,10 @@ with later launches helps distinguish cold startup from recurring costs; a
 fresh process alone does not reset the operating system's filesystem cache.
 Unset the variable to disable the diagnostic output.
 
+### HUD during session startup
+
+The ACP session sends its first HUD snapshot as soon as the client has registered the session. MCP discovery then continues in the background, so a slow MCP server no longer delays known model, context-window, skill, and zero-usage fields. The first prompt waits for MCP discovery to finish and reports that wait as activity. Exact request tokens, cost, and provider limits remain pending until the model returns them; startup does not estimate those values.
+
 ### Waiting for a reply
 
 Each prompt shows a separate activity card while Aster prepares the execution
