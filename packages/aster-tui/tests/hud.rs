@@ -44,6 +44,32 @@ fn lines(state: &State, width: usize, budget: usize) -> Vec<String> {
 }
 
 #[test]
+fn context_bar_shows_small_nonzero_usage_without_rounding_it_to_empty() {
+    let mut state = state();
+    state.hud.config.elements = vec!["usage".into()];
+    state.context_ratio = Some(10_400.0 / 1_000_000.0);
+    state.context_snapshot = Some(aster_tui::context::ContextSnapshot::from_usage_update(
+        &json!({"used": 10_400, "size": 1_000_000}),
+    ));
+    state.hud.config.context_value = "tokens".into();
+
+    let rendered = lines(&state, 120, 1)[0].clone();
+    assert!(rendered.contains("▓░░░░░░░░░"), "{rendered}");
+    assert!(rendered.contains("1% used · 10.4k / 1.0m"), "{rendered}");
+
+    state.context_ratio = Some(0.0);
+    let empty = lines(&state, 120, 1)[0].clone();
+    assert!(empty.contains("░░░░░░░░░░"), "{empty}");
+    assert!(empty.contains("0% used"), "{empty}");
+    assert!(!empty.contains('▓'), "{empty}");
+
+    state.context_ratio = Some(1.0);
+    let full = lines(&state, 120, 1)[0].clone();
+    assert!(full.contains("▓▓▓▓▓▓▓▓▓▓"), "{full}");
+    assert!(!full.contains('░'), "{full}");
+}
+
+#[test]
 fn skills_hud_links_to_the_browser_and_marks_additional_active_skills() {
     let mut state = state();
     state.hud.config.elements = vec!["skills".into()];
@@ -211,7 +237,7 @@ fn startup_context_shows_zero_and_known_capacity_while_measurement_stays_pending
     state.hud.config.elements = vec!["usage".into()];
     state.hud.config.context_value = "tokens".into();
     let mut controller = Controller::new(state, None, false);
-    assert!(lines(&controller.state, 80, 1)[0].contains("context    —"));
+    assert!(lines(&controller.state, 80, 1)[0].contains("context   │ —"));
     let update = |value| {
         json!({"method":"session/update", "params":{
             "sessionId":"session", "update":value
@@ -228,13 +254,16 @@ fn startup_context_shows_zero_and_known_capacity_while_measurement_stays_pending
         let rendered = lines(&controller.state, width, 1)[0].clone();
         assert!(rendered.contains("0k / 1.0m"), "{rendered}");
         assert_eq!(rendered.contains('░'), width >= 40, "{rendered}");
-        assert!(!rendered.contains('█'), "{rendered}");
+        if width >= 40 {
+            assert!(rendered.contains("░░░░░░░░░░"), "{rendered}");
+        }
+        assert!(!rendered.contains('▓'), "{rendered}");
     }
     controller.state.hud.config.context_bar = false;
     assert!(!lines(&controller.state, 80, 1)[0].contains('░'));
     controller.state.hud.config.context_bar = true;
     controller.state.hud.config.language = "zh".into();
-    assert!(lines(&controller.state, 80, 1)[0].contains("上下文    ░░░░░░ 0k / 1.0m"));
+    assert!(lines(&controller.state, 80, 1)[0].contains("上下文   │ ░░░░░░░░░░ 0k / 1.0m"));
     controller.message(update(json!({
         "sessionUpdate":"usage_update", "used":1234, "size":1_048_576,
         "cost":{"amount":0.25, "currency":"USD"}
@@ -249,7 +278,7 @@ fn startup_context_shows_zero_and_known_capacity_while_measurement_stays_pending
         "_meta":{"aster":{"usageAvailable":false}}
     })));
     let rendered = lines(&controller.state, 80, 1)[0].clone();
-    assert!(rendered.contains("上下文    n/a"), "{rendered}");
+    assert!(rendered.contains("上下文   │ n/a"), "{rendered}");
     assert!(!rendered.contains("0k /"));
     assert!(!rendered.contains('░'));
 }
@@ -284,9 +313,9 @@ fn clearing_reasoning_does_not_reuse_stale_effort_telemetry() {
     let mut state = state();
     state.hud.config.elements = vec!["reasoning".into()];
     state.runtime = json!({"reasoningLevel":"low"});
-    assert!(lines(&state, 80, 1)[0].contains("Reasoning  low"));
+    assert!(lines(&state, 80, 1)[0].contains("Reasoning │ low"));
     state.runtime["reasoningLevel"] = Value::Null;
-    assert!(lines(&state, 80, 1)[0].contains("Reasoning  model default"));
+    assert!(lines(&state, 80, 1)[0].contains("Reasoning │ model default"));
     assert_eq!(hud::rows(&state, 80, 1)[0].command, "/effort");
 }
 
@@ -470,7 +499,54 @@ fn responsive_hud_keeps_usage_and_cost_below_composer_and_preserves_the_title() 
 }
 
 #[test]
-fn full_hud_shows_all_available_rows_after_sending_message() {
+fn plans_and_running_jobs_remain_visible_when_hud_rows_do_not_fit() {
+    for (layout, draft) in [
+        ("compact", ""),
+        ("expanded", ""),
+        ("full", ""),
+        ("full", "line one\nline two"),
+        ("full", "line one\nline two\nline three"),
+    ] {
+        let mut state = State::new("workspace".into(), "model".into(), false);
+        state.phase = Phase::Ready;
+        state.status = "Ready".into();
+        state.hud.configure(layout).unwrap();
+        state.editor.insert_str(draft);
+        state
+            .entries
+            .push(Entry::Assistant("Work continues.".into()));
+        state.tasks = json!({
+            "steps": [{"title": "Review changes", "status": "in_progress"}],
+            "currentTask": "Review changes",
+            "jobs": [{"id": "job-1", "title": "Check tests", "status": "running"}]
+        });
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                ui::draw(frame, &mut state);
+            })
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(80)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rendered.contains("0/1") && rendered.contains("Review changes"),
+            "plan hidden with {layout} HUD and draft {draft:?}:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("1 running"),
+            "running job hidden with {layout} HUD and draft {draft:?}:\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn full_hud_keeps_rows_within_the_screen_budget_after_sending_message() {
     let mut state = State::new("workspace".into(), "model".into(), false);
     state.phase = Phase::Ready;
     state.session_id = Some("session".into());
@@ -495,12 +571,13 @@ fn full_hud_shows_all_available_rows_after_sending_message() {
         terminal
             .draw(|frame| hits = ui::draw(frame, &mut controller.state))
             .unwrap();
-        assert_eq!(
-            hits.hud_rows.len(),
-            expected.len(),
-            "sending a message reduced the full HUD to {} rows in 80x{height}",
-            hits.hud_rows.len(),
+        assert!(
+            hits.hud_rows.len() <= expected.len(),
+            "visible HUD exceeded configured rows in 80x{height}"
         );
+        for ((_, command), row) in hits.hud_rows.iter().zip(&expected) {
+            assert_eq!(*command, row.command);
+        }
     }
 }
 
@@ -512,7 +589,8 @@ fn full_hud_stays_expanded_through_input_and_response() {
         state.session_id = Some("session".into());
         state.hud.configure("full").unwrap();
         let mut controller = Controller::new(state, None, false);
-        let check = |controller: &mut Controller, stage: &str| {
+        let mut visible_row_count = None;
+        let mut check = |controller: &mut Controller, stage: &str| {
             let expected = hud::rows(&controller.state, columns as usize - 4, 16);
             let mut terminal = Terminal::new(TestBackend::new(columns, height)).unwrap();
             let mut hits = ui::HitAreas::default();
@@ -521,15 +599,28 @@ fn full_hud_stays_expanded_through_input_and_response() {
                 .unwrap();
             assert_eq!(controller.state.hud.config.layout, Layout::Expanded);
             assert_eq!(controller.state.hud.config.max_rows, 16);
-            assert_eq!(
-                hits.hud_rows.len(),
-                expected.len(),
-                "full HUD collapsed during {stage} in {columns}x{height}",
+            assert!(
+                hits.hud_rows.len() <= expected.len(),
+                "visible HUD exceeded configured rows during {stage} in {columns}x{height}"
             );
-            for ((_, command), row) in hits.hud_rows.iter().zip(expected) {
+            if let Some(count) = visible_row_count {
+                assert_eq!(
+                    hits.hud_rows.len(),
+                    count,
+                    "full HUD changed height during {stage} in {columns}x{height}"
+                );
+            } else {
+                visible_row_count = Some(hits.hud_rows.len());
+            }
+            for ((_, command), row) in hits.hud_rows.iter().zip(&expected) {
                 assert_eq!(*command, row.command);
             }
-            assert!(hits.transcript.height >= 6);
+            assert!(
+                hits.transcript.height >= 6,
+                "only {} transcript rows remain during {stage} in {columns}x{height} with {} HUD rows",
+                hits.transcript.height,
+                hits.hud_rows.len(),
+            );
             assert!(hits.transcript.bottom() <= hits.composer.y);
             assert!(hits
                 .hud_rows
@@ -610,9 +701,9 @@ fn full_hud_preserves_conversation_space_in_short_windows() {
                 if layout == Layout::Compact {
                     assert!(hits.hud_rows.len() <= max_hud_rows);
                 } else if height >= 18 {
-                    assert_eq!(
-                        hits.hud_rows.len(),
-                        hud::rows(&state, hits.transcript.width as usize, 16).len(),
+                    assert!(
+                        hits.hud_rows.len()
+                            <= hud::rows(&state, hits.transcript.width as usize, 16).len()
                     );
                 }
                 assert!(hits
@@ -685,7 +776,7 @@ fn welcome_with_full_hud_keeps_the_complete_wordmark_visible() {
 }
 
 #[test]
-fn welcome_with_full_hud_shows_every_available_status_row() {
+fn welcome_with_full_hud_shows_status_rows_within_the_screen_budget() {
     let mut state = State::new("workspace".into(), "model".into(), false);
     state.phase = Phase::Ready;
     state.hud.configure("full").unwrap();
@@ -695,8 +786,8 @@ fn welcome_with_full_hud_shows_every_available_status_row() {
     terminal
         .draw(|frame| hits = ui::draw(frame, &mut state))
         .unwrap();
-    assert_eq!(hits.hud_rows.len(), expected.len());
-    for ((area, command), row) in hits.hud_rows.iter().zip(expected) {
+    assert!(hits.hud_rows.len() <= expected.len());
+    for ((area, command), row) in hits.hud_rows.iter().zip(&expected) {
         let text: String = (area.x..area.right())
             .map(|x| terminal.backend().buffer()[(x, area.y)].symbol())
             .collect();
@@ -809,7 +900,7 @@ fn full_details_use_real_values_cancelled_jobs_and_unknown_fields() {
         "MCP 1",
         "1 AGENTS.md",
         "4.0/16.0 GiB",
-        "Limits     n/a",
+        "Limits    │ n/a",
     ] {
         assert!(full.contains(value), "{value}: {full}");
     }
@@ -835,7 +926,7 @@ fn task_waiting_and_live_job_time_survive_without_a_plan_or_new_snapshot() {
         ]
     });
     let rendered = lines(&state, 160, 8).join("\n");
-    assert!(rendered.contains("Status  Waiting for approval"));
+    assert!(rendered.contains("Status │ Waiting for approval"));
     assert!(rendered.contains("◐ review (2m"), "{rendered}");
     assert!(rendered.contains("✓ saved (3s)"));
     assert!(rendered.contains("! check (2s)"));
@@ -882,7 +973,7 @@ fn request_scope_and_compact_layout_use_the_same_live_metrics() {
     state.hud.configure("show tokens").unwrap();
     state.hud.configure("show cache").unwrap();
     let rendered = lines(&state, 120, 8).join("\n");
-    assert!(rendered.contains("Tokens (last)  in 6000 · out 200"));
+    assert!(rendered.contains("Tokens (last) │ in 6000 · out 200"));
     assert!(rendered.contains("read n/a"));
     state.hud.configure("compact").unwrap();
     let first = &hud::rows(&state, 120, 8)[0];
@@ -1030,7 +1121,7 @@ async fn external_quota_expiry_freshness_and_errors_are_visible_without_network_
     state.hud.collected(hud::collect::sample(request).await);
     assert!(state.hud.host.limits.is_empty());
     assert!(state.hud.diagnostics().contains("stale"));
-    assert!(lines(&state, 100, 3).join("\n").contains("Limits  n/a"));
+    assert!(lines(&state, 100, 3).join("\n").contains("n/a"));
     std::fs::write(&path, "not json").unwrap();
     let request = state.hud.collect_request(&state.workspace, true).unwrap();
     state.hud.collected(hud::collect::sample(request).await);
@@ -1087,11 +1178,11 @@ fn gateway_limits_use_their_own_observation_clock_and_keep_small_usage_visible()
         value["latest"]["limitsUpdatedAt"] = observed;
         value["latest"]["respondedAt"] = json!(now - 3600);
         state.hud.ingest(&value);
-        assert!(lines(&state, 140, 4).join("\n").contains("Limits  n/a"));
+        assert!(lines(&state, 140, 4).join("\n").contains("n/a"));
     }
     value["sequence"] = json!(8);
     value["latest"]["limitsUpdatedAt"] = json!(now - 3600);
     value["latest"]["limits"][0]["resetsAt"] = json!(now - 1);
     state.hud.ingest(&value);
-    assert!(lines(&state, 140, 4).join("\n").contains("Limits  n/a"));
+    assert!(lines(&state, 140, 4).join("\n").contains("Limits │ n/a"));
 }

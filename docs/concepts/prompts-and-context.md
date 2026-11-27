@@ -92,6 +92,12 @@ Fixed versus expression-backed content and prefix versus suffix placement are
 independent choices. A bare `agent.context["key"] = value` is fixed content in
 the volatile suffix.
 
+For context that can be retrieved again, such as a skill catalog, use
+`Context(expr="self.render_catalog()", prefix=True, optional=True)`. It stays
+in the cacheable prefix while it fits. When the context budget is exceeded,
+optional blocks are replaced by an `EVICTED` notice before other blocks.
+Ordinary prefix blocks remain protected from budget eviction.
+
 ## Events are history, not configuration
 
 Each call records task, model, code-execution, error, and result events. The

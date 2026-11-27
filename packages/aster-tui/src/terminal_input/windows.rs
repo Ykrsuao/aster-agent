@@ -648,6 +648,11 @@ fn native_key(vk: u16, modifiers: KeyModifiers) -> Option<KeyCode> {
         0x70..=0x87 => KeyCode::F((vk - 0x70 + 1) as u8),
         _ => return None,
     })
+    .filter(|code| {
+        // A virtual key without Unicode can be an uncommitted IME composition key.
+        !matches!(code, KeyCode::Char(_))
+            || modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    })
 }
 
 fn vt_key(key: VtKey, modifiers: KeyModifiers) -> Option<KeyCode> {
@@ -893,6 +898,50 @@ mod tests {
         key.bKeyDown = 1;
         decoder.key(&key, &mut events);
         assert_eq!(events.last(), events.first());
+    }
+
+    #[test]
+    fn native_keys_without_text_wait_for_a_unicode_commit_and_keep_shortcuts() {
+        for control_state in [0, 0x10] {
+            let mut decoder = Decoder::new();
+            let mut events = Vec::new();
+            // SAFETY: KEY_EVENT_RECORD is a C record consisting entirely of integers.
+            let mut key: KEY_EVENT_RECORD = unsafe { std::mem::zeroed() };
+            key.wRepeatCount = 1;
+            key.dwControlKeyState = control_state;
+            for vk in [0x4e, 0x49, 0x31, 0x20] {
+                key.wVirtualKeyCode = vk;
+                key.bKeyDown = 1;
+                decoder.key(&key, &mut events);
+                key.bKeyDown = 0;
+                decoder.key(&key, &mut events);
+                assert!(events.is_empty(), "uncommitted key {vk:#x}: {events:?}");
+            }
+            key.bKeyDown = 1;
+            key.wVirtualKeyCode = 0xe7;
+            key.dwControlKeyState = 0;
+            key.uChar.UnicodeChar = '你' as u16;
+            decoder.key(&key, &mut events);
+            assert_eq!(events, [Event::Key(KeyCode::Char('你').into())]);
+        }
+
+        for (vk, control_state, code, modifiers) in [
+            (0x41, 0x08, KeyCode::Char('a'), KeyModifiers::CONTROL),
+            (0x31, 0x02, KeyCode::Char('1'), KeyModifiers::ALT),
+            (0x20, 0x08, KeyCode::Char(' '), KeyModifiers::CONTROL),
+            (0x25, 0, KeyCode::Left, KeyModifiers::NONE),
+        ] {
+            let mut decoder = Decoder::new();
+            let mut events = Vec::new();
+            // SAFETY: KEY_EVENT_RECORD is a C record consisting entirely of integers.
+            let mut key: KEY_EVENT_RECORD = unsafe { std::mem::zeroed() };
+            key.bKeyDown = 1;
+            key.wRepeatCount = 1;
+            key.wVirtualKeyCode = vk;
+            key.dwControlKeyState = control_state;
+            decoder.key(&key, &mut events);
+            assert_eq!(events, [Event::Key(KeyEvent::new(code, modifiers))]);
+        }
     }
 
     #[test]

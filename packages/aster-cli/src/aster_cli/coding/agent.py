@@ -197,7 +197,25 @@ class CodingAgent(InteractiveAgent):
     @no_trace
     def refresh_host_context(self) -> None:
         """Rebuild current host information after construction or snapshot restoration."""
+        from aster.context_blocks import DynamicContext
+
         self._verification.configure(load_required_checks(self.cwd), state=self._verification_state)
+
+        cm = self.context_manager
+        disabled_skills = cm.disabled() & {"skills", "text_skill_catalog"}
+        previous_skills = dict(cm._raw_items()).get("skills")
+        if (
+            "skills" in disabled_skills
+            and isinstance(previous_skills, DynamicContext)
+            and previous_skills.expr == "self.skills.status()"
+        ):
+            disabled_skills.add("text_skill_catalog")
+        # Restore older sessions without putting the catalog back after changing history.
+        self.context["skills"] = Context(expr="self.skills._tool_status()")
+        self.context["text_skill_catalog"] = Context(
+            expr="self.skills._text_skill_catalog()", prefix=True, optional=True
+        )
+        cm.disable(*disabled_skills)
         # Keep paths as literal data, separate from fixed behavioral instructions.
         # They must never become a context expression or a prompt template.
         self.context["workspace_paths"] = Context(
@@ -322,34 +340,7 @@ class CodingAgent(InteractiveAgent):
     async def handle(self, notification: dict[str, list[Any]]) -> Done | NeedInput | Waiting:
         """Fulfill the newest user request delivered in ``notification``.
 
-        For ordinary conversation, answer directly with the separate
-        ``return_result`` JSON tool; no execution or workspace inspection is
-        needed. When a request needs tools, work until it is complete or
-        genuinely needs user input. Use small execution cells and inspect
-        each result before proceeding. Never claim a check passed without running it.
-        For multi-step work, create todos and keep the active step and completed
-        steps up to date. Begin substantial execution cells with a short purpose
-        comment so the person can tell what is running.
-
-        End the turn with exactly one ``return_result(...)`` of one of these:
-
-        - ``Done(message=..., explanation=...)`` — the request or the
-          user-requested stage is complete.
-          ``message`` is the reply the host shows the user; ``explanation``
-          is a short status line. Add ``evidence=[...]`` for checks you ran.
-          Write ordinary replies using the separate ``return_result`` tool
-          with JSON ``{"result": {"message": "...", "explanation": "..."}}``.
-          Put ``message`` first so the host can display it as it is generated.
-          Do not wrap prose in Python or use ``self.message`` for the final
-          answer. Keep executable work in ``execute_python``. When Python
-          has actually computed the complete result, inline
-          ``return_result(computed_result)`` delivers it without rewriting it.
-        - ``NeedInput(question=...)`` — you cannot continue without an
-          answer. The host shows the question, so do not also send it with
-          ``self.message()``. Add ``options=[...]`` for a single choice.
-        - ``Waiting(message=..., explanation=..., on=[...])`` — a background
-          job is still running; ``on`` names the job or channel. Do not use
-          this to wait for the user's next message.
+        Follow the turn and result rules in ``strategy_prompt``.
         """
         ...
 
@@ -359,6 +350,7 @@ class CodingAgent(InteractiveAgent):
         try:
             await self.aclose()
             await self.skills.aclose()
+            self.context.pop("text_skill_catalog", None)
         finally:
             try:
                 if self._project_memory is not None:

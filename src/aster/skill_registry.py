@@ -1389,6 +1389,12 @@ class SkillRegistry(Skill):
 
         Show tool summaries and an eligible text-skill catalog, never text-skill bodies.
         """
+        return "\n\n".join(
+            part for part in (self._tool_status(), self._text_skill_catalog()) if part
+        )
+
+    def _tool_status(self) -> str:
+        """Render the currently active and available Python tools."""
         lines: list[str] = []
 
         # Active skills (excluding cmd.*)
@@ -1445,6 +1451,11 @@ class SkillRegistry(Skill):
             for name, desc in available:
                 lines.append(f"  {name:28s} {desc}")
 
+        return "\n".join(lines)
+
+    def _text_skill_catalog(self) -> str:
+        """Render eligible text-skill summaries, refreshed after discovery or reload."""
+        lines: list[str] = []
         text_skills = []
         for name, skill in self.text_skills().items():
             try:
@@ -1453,8 +1464,6 @@ class SkillRegistry(Skill):
                 continue
             text_skills.append((name, skill))
         if text_skills:
-            if lines:
-                lines.append("")
             lines.extend(
                 [
                     "Text Skills (select those relevant to the current task):",

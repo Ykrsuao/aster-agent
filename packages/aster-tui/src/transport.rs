@@ -1144,29 +1144,42 @@ asyncio.run(main())
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         async fn inspect(controller: &mut Controller, transport: &mut Transport) {
-            let actions = controller.input("/mcp".into());
-            assert!(controller.state.mcp.loading);
-            send_actions(controller, transport, actions).await;
             timeout(Duration::from_secs(30), async {
-                while controller.state.mcp.loading {
-                    let actions = match next(transport).await {
-                        Event::Message(value) => controller.message(value),
-                        Event::Diagnostic(text) => {
-                            controller.diagnostic(text);
-                            vec![]
-                        }
-                        Event::Closed(reason) => panic!("Backend closed: {reason}"),
-                    };
-                    assert!(!send_actions(controller, transport, actions).await);
+                loop {
+                    let actions = controller.input("/mcp".into());
+                    assert!(controller.state.mcp.loading);
+                    send_actions(controller, transport, actions).await;
+                    while controller.state.mcp.loading {
+                        let actions = match next(transport).await {
+                            Event::Message(value) => controller.message(value),
+                            Event::Diagnostic(text) => {
+                                controller.diagnostic(text);
+                                vec![]
+                            }
+                            Event::Closed(reason) => panic!("Backend closed: {reason}"),
+                        };
+                        assert!(!send_actions(controller, transport, actions).await);
+                    }
+                    assert!(
+                        controller.state.mcp.error.is_none(),
+                        "{:?}",
+                        controller.state.mcp.error
+                    );
+                    if !controller.state.mcp.servers.is_empty()
+                        && controller
+                            .state
+                            .mcp
+                            .servers
+                            .iter()
+                            .all(|server| server["state"] != "connecting")
+                    {
+                        break;
+                    }
+                    sleep(Duration::from_millis(20)).await;
                 }
             })
             .await
-            .expect("the MCP inspector receives its read-only status");
-            assert!(
-                controller.state.mcp.error.is_none(),
-                "{:?}",
-                controller.state.mcp.error
-            );
+            .expect("MCP discovery finishes and the inspector receives its read-only status");
             assert_eq!(controller.state.overlay, Some(Overlay::Mcp));
         }
 
@@ -1200,6 +1213,7 @@ asyncio.run(main())
         settle(&mut controller, &mut transport).await;
         assert!(controller.state.mcp.supported);
         let original = controller.state.session_id.clone().unwrap();
+        inspect(&mut controller, &mut transport).await;
         let discovered = std::fs::read_to_string(&events).unwrap();
         inspect(&mut controller, &mut transport).await;
         assert_eq!(std::fs::read_to_string(&events).unwrap(), discovered);
@@ -1234,6 +1248,7 @@ asyncio.run(main())
             controller.state.session_id.as_deref(),
             Some(original.as_str())
         );
+        inspect(&mut controller, &mut transport).await;
         let actions = controller.resume(original.clone());
         send_actions(&mut controller, &mut transport, actions).await;
         settle(&mut controller, &mut transport).await;

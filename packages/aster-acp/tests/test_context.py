@@ -250,6 +250,7 @@ def test_block_boundaries_schemas_and_unicode_preserve_the_reported_total() -> N
             BlockPart(key="system_prompt", content="PRIVATE_SYSTEM"),
             BlockPart(key="repository_instructions", content="PRIVATE_RULES 中文"),
             BlockPart(key="skills", content="PRIVATE_SKILLS"),
+            BlockPart(key="text_skill_catalog", content="PRIVATE_SKILL_CATALOG"),
             TextPart(text="</context>"),
         ]
     )
@@ -264,7 +265,7 @@ def test_block_boundaries_schemas_and_unicode_preserve_the_reported_total() -> N
         tools=[{"type": "function", "function": {"name": "example", "parameters": {}}}],
         output_model=ReplySchema,
         context_stats=ContextWindowStats(
-            context_blocks_count=3,
+            context_blocks_count=4,
             events_count=1,
             model_context_window=1000,
             reserved_output_tokens=200,
@@ -285,6 +286,7 @@ def test_block_boundaries_schemas_and_unicode_preserve_the_reported_total() -> N
     }
     items = {item["key"]: item for item in metadata["items"]}
     assert items["repository_instructions"]["chars"] == len("PRIVATE_RULES 中文")
+    assert items["text_skill_catalog"]["category"] == "skills"
     assert items["API tool schemas"]["tokens"] > 0
     assert items["Response schema"]["tokens"] > 0
     assert (metadata["windowTokens"], metadata["reservedOutputTokens"]) == (1000, 200)

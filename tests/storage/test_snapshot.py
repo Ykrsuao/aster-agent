@@ -9,8 +9,12 @@ the class and are never reattached via a snapshot. Tests for the old
 ``snap.methods`` / ``restore()`` method-warning paths have been removed.
 """
 
-from aster import Agent
-from aster.storage.snapshot import AgentSnapshot
+import pytest
+
+from aster import Agent, Context
+from aster.context_blocks import DynamicContext
+from aster.context_blocks.exceptions import ProtectedBlockError
+from aster.storage.snapshot import SNAPSHOT_VERSION, AgentSnapshot
 from aster.unifiedllm import FakeLLMClient
 
 
@@ -98,3 +102,145 @@ class TestSnapshotRoundTripWithUnserializableAttr:
         restored = _SimpleAgent()
         snapshot_from_dict(data).restore(restored)
         assert restored.value == 7
+
+
+class TestDynamicContextPlacement:
+    @pytest.mark.parametrize("prefix", [False, True])
+    @pytest.mark.parametrize("disabled", [False, True])
+    def test_expression_placement_round_trip(self, prefix, disabled):
+        agent = _SimpleAgent()
+        agent.context["status"] = Context(expr="self.value", prefix=prefix)
+        if disabled:
+            agent.context_manager.disable("status")
+
+        snapshot = AgentSnapshot.from_agent(agent).model_dump_json()
+        restored = _SimpleAgent()
+        AgentSnapshot.model_validate_json(snapshot).restore(restored)
+
+        raw = dict(restored.context_manager._raw_items())["status"]
+        assert isinstance(raw, DynamicContext)
+        assert raw.expr == "self.value"
+        assert restored.context_manager.is_static("status") is prefix
+        assert restored.context_manager.is_disabled("status") is disabled
+
+    def test_legacy_expression_defaults_to_suffix(self):
+        snapshot = AgentSnapshot.model_validate(
+            {
+                "version": SNAPSHOT_VERSION,
+                "context": [{"key": "status", "type": "dynamic", "expr": "self.value"}],
+            }
+        )
+        restored = _SimpleAgent()
+        snapshot.restore(restored)
+
+        assert not restored.context_manager.is_static("status")
+        assert dict(restored.context_manager._raw_items())["status"].expr == "self.value"
+
+    @pytest.mark.parametrize("prefix", [False, True])
+    def test_external_protected_expression_keeps_protection(self, prefix):
+        snapshot = AgentSnapshot.model_validate(
+            {
+                "version": SNAPSHOT_VERSION,
+                "context": [
+                    {"key": "state", "type": "dynamic", "expr": "self.value", "prefix": prefix}
+                ],
+                "disabled_context": ["state"],
+            }
+        )
+        restored = _SimpleAgent()
+        assert "state" in restored.context_manager.protected_keys
+        snapshot.restore(restored)
+
+        assert restored.context_manager.is_static("state") is prefix
+        assert restored.context_manager.is_disabled("state")
+        assert dict(restored.context_manager._raw_items())["state"].expr == "self.value"
+        with pytest.raises(ProtectedBlockError):
+            restored.context_manager.set_dynamic("state", "None")
+        assert all(block.key != "state" for block in AgentSnapshot.from_agent(restored).context)
+
+
+class TestOptionalContextSnapshot:
+    @pytest.mark.parametrize("prefix", [False, True])
+    @pytest.mark.parametrize("expression", [False, True])
+    @pytest.mark.parametrize("disabled", [False, True])
+    def test_optional_block_round_trip(self, prefix, expression, disabled):
+        agent = _SimpleAgent()
+        content = {"expr": "self.value"} if expression else {"value": "catalog"}
+        agent.context["catalog"] = Context(**content, prefix=prefix, optional=True)
+        if disabled:
+            agent.context_manager.disable("catalog")
+
+        snapshot = AgentSnapshot.from_agent(agent).model_dump_json()
+        saved = AgentSnapshot.model_validate_json(snapshot)
+        block = next(block for block in saved.context if block.key == "catalog")
+        assert block.optional
+
+        restored = _SimpleAgent()
+        saved.restore(restored)
+        assert restored.context_manager.is_optional("catalog")
+        assert restored.context_manager.is_disabled("catalog") is disabled
+        raw = dict(restored.context_manager._raw_items())["catalog"]
+        if expression:
+            assert isinstance(raw, DynamicContext)
+            assert raw.expr == "self.value"
+            assert restored.context_manager.is_static("catalog") is prefix
+        else:
+            assert raw == "catalog"
+            # Literal placement remains unchanged by this snapshot-format addition.
+            assert not restored.context_manager.is_static("catalog")
+
+    @pytest.mark.parametrize("expression", [False, True])
+    def test_legacy_block_is_required(self, expression):
+        block = {"key": "catalog", "type": "dynamic", "expr": "self.value"}
+        if not expression:
+            block = {"key": "catalog", "type": "static", "value": "catalog"}
+        restored = _SimpleAgent()
+        restored.context["catalog"] = Context("previous", optional=True)
+        AgentSnapshot.model_validate({"context": [block]}).restore(restored)
+
+        assert not restored.context_manager.is_optional("catalog")
+
+    @pytest.mark.parametrize("expression", [False, True])
+    def test_optional_protected_block_stays_protected(self, expression):
+        block = {"key": "state", "type": "static", "value": ["catalog"], "optional": True}
+        if expression:
+            block = {
+                "key": "state",
+                "type": "dynamic",
+                "expr": "self.value",
+                "optional": True,
+                "prefix": True,
+            }
+        restored = _SimpleAgent()
+        AgentSnapshot.model_validate({"context": [block], "disabled_context": ["state"]}).restore(
+            restored
+        )
+
+        assert restored.context_manager.is_optional("state")
+        assert restored.context_manager.is_disabled("state")
+        with pytest.raises(ProtectedBlockError):
+            restored.context_manager.set_dynamic("state", "None")
+        if not expression:
+            assert dict(restored.context_manager._raw_items())["state"] == ["catalog"]
+
+    def test_optional_literal_keeps_arbitrary_value_type(self):
+        agent = _SimpleAgent()
+        agent.context_manager.set_dynamic("catalog", value=[1, {"x": 2}])
+        agent.context_manager.set_optional("catalog", True)
+        restored = _SimpleAgent()
+        AgentSnapshot.model_validate_json(
+            AgentSnapshot.from_agent(agent).model_dump_json()
+        ).restore(restored)
+
+        assert dict(restored.context_manager._raw_items())["catalog"] == [1, {"x": 2}]
+        assert restored.context_manager.is_optional("catalog")
+
+    def test_legacy_null_literal_still_suppresses_block(self):
+        restored = _SimpleAgent()
+        restored.context["catalog"] = "previous"
+        AgentSnapshot.model_validate(
+            {"context": [{"key": "catalog", "type": "static", "value": None}]}
+        ).restore(restored)
+
+        assert "catalog" not in restored.context_manager
+        assert restored.context_manager.is_disabled("catalog")

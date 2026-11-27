@@ -290,6 +290,8 @@ def test_acp_command_leaves_the_key_alone_for_other_providers():
 
 
 class _MCPTools:
+    __nosnapshot__ = True
+
     async def lookup(self, query: str) -> str:
         """Look up a value in the test MCP server."""
         return query
@@ -1534,6 +1536,200 @@ async def test_adapter_preserves_prompt_whitespace(tmp_path):
     await adapter.close()
 
 
+async def test_hud_bootstraps_before_mcp_discovery_and_first_prompt_waits(tmp_path):
+    client = _RegistrationAwareClient()
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def discover(*args, **kwargs):
+        started.set()
+        await release.wait()
+        return _MCPTools()
+
+    server = McpServerStdio(name="lookup", command="lookup-server", args=[], env=[])
+
+    creation: asyncio.Task | None = None
+
+    def register_session(done: asyncio.Task) -> None:
+        if not done.cancelled() and done.exception() is None:
+            client.registered.add(done.result().session_id)
+
+    try:
+        with patch("aster_acp._mcp.MCPManager.create_stdio_server", side_effect=discover):
+            creation = asyncio.create_task(adapter.new_session(str(tmp_path), mcp_servers=[server]))
+            creation.add_done_callback(register_session)
+            created = await asyncio.wait_for(asyncio.shield(creation), timeout=5)
+            client.registered.add(created.session_id)
+            runtime = await _session(adapter, created.session_id)
+            await asyncio.wait_for(started.wait(), timeout=1)
+            await runtime.bootstrap_ready.wait()
+            await runtime.bridge.flush()
+
+            usage = next(
+                (update for _, update in client.accepted if isinstance(update, UsageUpdate)),
+                None,
+            )
+            assert usage is not None, f"accepted={client.accepted!r}, dropped={client.dropped!r}"
+            initial_hud = usage.field_meta["aster"]["hud"]
+            assert initial_hud["environment"]["mcpServers"] == []
+            assert initial_hud["calls"] == 0
+            assert usage.field_meta["aster"]["usagePending"] is True
+            assert not release.is_set()
+
+            prompt = asyncio.create_task(
+                adapter.prompt(created.session_id, [text_block("do the work")])
+            )
+            await asyncio.sleep(0.05)
+            assert not prompt.done()
+            release.set()
+            response = await asyncio.wait_for(prompt, timeout=30)
+            assert response.stop_reason == "end_turn"
+            startup_usage = next(
+                update
+                for _, update in client.accepted
+                if isinstance(update, UsageUpdate)
+                and update.field_meta["aster"]["hud"]["environment"]["mcpServers"] == ["lookup"]
+                and update.field_meta["aster"]["hud"]["calls"] == 0
+            )
+            startup_hud = startup_usage.field_meta["aster"]["hud"]
+            assert startup_hud["streamId"] == initial_hud["streamId"]
+            assert startup_hud["sequence"] > initial_hud["sequence"]
+            assert startup_hud["costSubtotal"] == 0.0
+            assert startup_hud["tokens"] == initial_hud["tokens"]
+            assert startup_hud["days"] == {}
+            assert startup_usage.cost.amount == 0.0
+    finally:
+        release.set()
+        if creation is not None and not creation.done():
+            await creation
+        await adapter.close()
+
+
+async def test_bootstrap_keeps_memory_and_recovery_warnings_during_mcp_discovery(tmp_path):
+    client = _RecordingClient()
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+    started = asyncio.Event()
+    release = asyncio.Event()
+    memory_warning = "Project memory is unavailable; configure an embedding model."
+
+    def block_memory(memory):
+        memory.state = "unavailable"
+        memory.message = memory_warning
+
+    async def discover(*args, **kwargs):
+        started.set()
+        await release.wait()
+        raise RuntimeError("lookup is offline")
+
+    server = McpServerStdio(name="lookup", command="lookup-server", args=[], env=[])
+    try:
+        with (
+            patch("aster_acp.server.ProjectMemory.reload", autospec=True, side_effect=block_memory),
+            patch("aster_acp._mcp.MCPManager.create_stdio_server", side_effect=discover),
+        ):
+            created = await adapter.new_session(str(tmp_path), mcp_servers=[server])
+            runtime = await _session(adapter, created.session_id)
+            action_id = runtime.handle.actions.begin("shell", "interrupted command", str(tmp_path))
+            runtime.handle.actions.finish(action_id, outcome="interrupted", requires_review=True)
+            await asyncio.wait_for(started.wait(), timeout=1)
+            await runtime.bootstrap_ready.wait()
+            await runtime.bridge.flush()
+
+            rendered = "\n".join(
+                update.content.text
+                for update in client.updates
+                if isinstance(update, AgentMessageChunk)
+                and isinstance(update.content, TextContentBlock)
+            )
+            assert memory_warning in rendered
+            assert "Use /recovery to inspect them" in rendered
+            assert any(isinstance(update, UsageUpdate) for update in client.updates)
+            assert runtime.startup_warnings == (memory_warning,)
+            assert not release.is_set()
+
+            release.set()
+            assert runtime.mcp_startup_task is not None
+            await runtime.mcp_startup_task
+            await runtime.bridge.flush()
+            assert memory_warning in runtime.startup_warnings
+            assert any("lookup" in warning for warning in runtime.startup_warnings)
+            messages = [
+                update.content.text
+                for update in client.updates
+                if isinstance(update, AgentMessageChunk)
+                and isinstance(update.content, TextContentBlock)
+            ]
+            assert sum(memory_warning in message for message in messages) == 1
+            assert any("lookup" in message for message in messages)
+    finally:
+        release.set()
+        await adapter.close()
+
+
+async def test_cancel_and_close_while_prompt_waits_for_mcp_startup(tmp_path):
+    client = _RegistrationAwareClient()
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingMCP:
+        def __init__(self, agent, root, mcp_servers):
+            self.on_change = None
+            self.is_closed = False
+
+        async def start(self):
+            started.set()
+            try:
+                await release.wait()
+            finally:
+                cancelled.set()
+
+        def startup_warnings(self):
+            return ()
+
+        async def close(self):
+            self.is_closed = True
+            release.set()
+
+    try:
+        with patch("aster_acp.server.SessionMCP", BlockingMCP):
+            created = await adapter.new_session(str(tmp_path), mcp_servers=[object()])
+            client.registered.add(created.session_id)
+            runtime = await _session(adapter, created.session_id)
+            await runtime.bootstrap_ready.wait()
+            assert runtime.mcp_startup_task is not None
+            await asyncio.wait_for(started.wait(), timeout=1)
+            submit = AsyncMock()
+            runtime.dispatcher.submit = submit
+            cancelled_prompt = asyncio.create_task(
+                adapter.prompt(created.session_id, [text_block("do the work")])
+            )
+            await asyncio.sleep(0.05)
+            assert not cancelled_prompt.done()
+            await adapter.cancel(created.session_id)
+            cancelled_response = await asyncio.wait_for(cancelled_prompt, timeout=1)
+            assert cancelled_response.stop_reason == "cancelled"
+            submit.assert_not_awaited()
+            assert not cancelled.is_set()
+
+            closing_prompt = asyncio.create_task(
+                adapter.prompt(created.session_id, [text_block("do the work")])
+            )
+            await asyncio.sleep(0.05)
+            await adapter.close()
+            closing_response = await asyncio.wait_for(closing_prompt, timeout=1)
+        assert cancelled.is_set()
+        assert closing_response.stop_reason == "cancelled"
+        submit.assert_not_awaited()
+    finally:
+        await adapter.close()
+
+
 async def test_adapter_connects_baseline_stdio_mcp_servers(tmp_path):
     client = _RecordingClient()
     adapter = CodingACPAdapter(_completed_llm)
@@ -1550,19 +1746,21 @@ async def test_adapter_connects_baseline_stdio_mcp_servers(tmp_path):
         new=AsyncMock(return_value=_MCPTools()),
     ) as create:
         session = await adapter.new_session(str(tmp_path), mcp_servers=[server])
-
-    create.assert_awaited_once_with(
-        "lookup",
-        command="lookup-server",
-        args=["--stdio"],
-        env={"TOKEN": "test"},
-        cwd=str(tmp_path.resolve()),
-        call_observer=ANY,
-        safe_errors=True,
-    )
-    runtime = await _session(adapter, session.session_id)
-    assert "mcp.lookup" in runtime.agent.skills.loaded()
-    assert "mcp.lookup" in runtime.agent.skills.activated()
+        runtime = await _session(adapter, session.session_id)
+        await runtime.bootstrap_ready.wait()
+        assert runtime.mcp_startup_task is not None
+        await runtime.mcp_startup_task
+        create.assert_awaited_once_with(
+            "lookup",
+            command="lookup-server",
+            args=["--stdio"],
+            env={"TOKEN": "test"},
+            cwd=str(tmp_path.resolve()),
+            call_observer=ANY,
+            safe_errors=True,
+        )
+        assert "mcp.lookup" in runtime.agent.skills.loaded()
+        assert "mcp.lookup" in runtime.agent.skills.activated()
     await adapter.close()
 
 
@@ -1590,30 +1788,32 @@ async def test_adapter_connects_forwarded_http_and_sse_mcp_servers(tmp_path):
         new=AsyncMock(side_effect=[_MCPTools(), _MCPTools()]),
     ) as create:
         session = await adapter.new_session(str(tmp_path), mcp_servers=servers)
-
-    assert create.await_args_list == [
-        call(
-            "remote-http",
-            "https://mcp.example.test/mcp",
-            headers={"Authorization": "Bearer test"},
-            transport="streamable-http",
-            call_observer=ANY,
-            allow_oauth_refresh=False,
-            safe_errors=True,
-        ),
-        call(
-            "remote-sse",
-            "https://mcp.example.test/sse",
-            headers={},
-            transport="sse",
-            call_observer=ANY,
-            allow_oauth_refresh=False,
-            safe_errors=True,
-        ),
-    ]
-    runtime = await _session(adapter, session.session_id)
-    assert {"mcp.remote-http", "mcp.remote-sse"}.issubset(runtime.agent.skills.loaded())
-    assert {"mcp.remote-http", "mcp.remote-sse"}.issubset(runtime.agent.skills.activated())
+        runtime = await _session(adapter, session.session_id)
+        await runtime.bootstrap_ready.wait()
+        assert runtime.mcp_startup_task is not None
+        await runtime.mcp_startup_task
+        assert create.await_args_list == [
+            call(
+                "remote-http",
+                "https://mcp.example.test/mcp",
+                headers={"Authorization": "Bearer test"},
+                transport="streamable-http",
+                call_observer=ANY,
+                allow_oauth_refresh=False,
+                safe_errors=True,
+            ),
+            call(
+                "remote-sse",
+                "https://mcp.example.test/sse",
+                headers={},
+                transport="sse",
+                call_observer=ANY,
+                allow_oauth_refresh=False,
+                safe_errors=True,
+            ),
+        ]
+        assert {"mcp.remote-http", "mcp.remote-sse"}.issubset(runtime.agent.skills.loaded())
+        assert {"mcp.remote-http", "mcp.remote-sse"}.issubset(runtime.agent.skills.activated())
     await adapter.close()
 
 
@@ -1640,6 +1840,9 @@ async def test_adapter_skips_forwarded_acp_transport_mcp_server(tmp_path):
     client.registered.add(created.session_id)
     await asyncio.sleep(0)
     runtime = await _session(adapter, created.session_id)
+    await runtime.bootstrap_ready.wait()
+    assert runtime.mcp_startup_task is not None
+    await runtime.mcp_startup_task
     await runtime.bridge.flush()
     warning = next(
         update.content.text
@@ -1680,20 +1883,21 @@ async def test_adapter_loads_healthy_mcp_when_another_server_fails(tmp_path):
         ),
     ):
         created = await adapter.new_session(str(tmp_path), mcp_servers=servers)
-
-    client.registered.add(created.session_id)
-    await asyncio.sleep(0)
-    runtime = await _session(adapter, created.session_id)
-    await runtime.bridge.flush()
-    assert "mcp.offline" not in runtime.agent.skills.loaded()
-    assert "mcp.healthy" in runtime.agent.skills.loaded()
-    warning = next(
-        update.content.text
-        for _, update in client.accepted
-        if isinstance(update, AgentMessageChunk)
-    )
-    assert "MCP server 'offline' was not loaded" in warning
-    assert "ConnectionRefusedError: refused" not in warning
+        client.registered.add(created.session_id)
+        runtime = await _session(adapter, created.session_id)
+        await runtime.bootstrap_ready.wait()
+        assert runtime.mcp_startup_task is not None
+        await runtime.mcp_startup_task
+        await runtime.bridge.flush()
+        assert "mcp.offline" not in runtime.agent.skills.loaded()
+        assert "mcp.healthy" in runtime.agent.skills.loaded()
+        warning = next(
+            update.content.text
+            for _, update in client.accepted
+            if isinstance(update, AgentMessageChunk)
+        )
+        assert "MCP server 'offline' was not loaded" in warning
+        assert "ConnectionRefusedError: refused" not in warning
     await adapter.close()
 
 
@@ -2010,18 +2214,20 @@ async def test_adapter_loads_durable_session_when_forwarded_mcp_is_unavailable(t
         ),
     ):
         await load_adapter.load_session(str(tmp_path), created.session_id, mcp_servers=[server])
-
-    await asyncio.sleep(0)
-    runtime = await _session(load_adapter, created.session_id)
-    await runtime.bridge.flush()
-    assert "mcp.offline" not in runtime.agent.skills.loaded()
-    warning = next(
-        update.content.text
-        for update in load_client.updates
-        if isinstance(update, AgentMessageChunk)
-    )
-    assert "session is still usable" in warning
-    assert "ConnectionRefusedError: refused" not in warning
+        await asyncio.sleep(0)
+        runtime = await _session(load_adapter, created.session_id)
+        await runtime.bootstrap_ready.wait()
+        assert runtime.mcp_startup_task is not None
+        await runtime.mcp_startup_task
+        await runtime.bridge.flush()
+        assert "mcp.offline" not in runtime.agent.skills.loaded()
+        warning = next(
+            update.content.text
+            for update in load_client.updates
+            if isinstance(update, AgentMessageChunk)
+        )
+        assert "session is still usable" in warning
+        assert "ConnectionRefusedError: refused" not in warning
     await load_adapter.close()
 
 
@@ -2081,17 +2287,20 @@ async def test_adapter_skips_duplicate_mcp_names_without_failing_startup(tmp_pat
         ) as create_url,
     ):
         created = await adapter.new_session(str(tmp_path), mcp_servers=servers)
-
-    create_stdio.assert_awaited_once()
-    create_url.assert_not_awaited()
-    await asyncio.sleep(0)
-    runtime = await _session(adapter, created.session_id)
-    await runtime.bridge.flush()
-    assert "mcp.lookup" in runtime.agent.skills.loaded()
-    warning = next(
-        update.content.text for update in client.updates if isinstance(update, AgentMessageChunk)
-    )
-    assert "another server has the same name" in warning
+        runtime = await _session(adapter, created.session_id)
+        await runtime.bootstrap_ready.wait()
+        assert runtime.mcp_startup_task is not None
+        await runtime.mcp_startup_task
+        create_stdio.assert_awaited_once()
+        create_url.assert_not_awaited()
+        await runtime.bridge.flush()
+        assert "mcp.lookup" in runtime.agent.skills.loaded()
+        warning = next(
+            update.content.text
+            for update in client.updates
+            if isinstance(update, AgentMessageChunk)
+        )
+        assert "another server has the same name" in warning
     await adapter.close()
 
 
@@ -2292,6 +2501,9 @@ async def test_mcp_server_named_like_a_core_tool_cannot_replace_it(tmp_path):
         created = await adapter.new_session(str(tmp_path), mcp_servers=[server])
 
     session = await _session(adapter, created.session_id)
+    await session.bootstrap_ready.wait()
+    assert session.mcp_startup_task is not None
+    await session.mcp_startup_task
     assert type(session.agent.shell).__name__ == "ActivityShellTools"
     assert any("shell" in warning for warning in session.startup_warnings)
     await adapter.close()
@@ -2311,6 +2523,9 @@ async def test_mcp_server_with_a_reserved_name_does_not_kill_the_session(tmp_pat
         created = await adapter.new_session(str(tmp_path), mcp_servers=[server])
 
     session = await _session(adapter, created.session_id)
+    await session.bootstrap_ready.wait()
+    assert session.mcp_startup_task is not None
+    await session.mcp_startup_task
     assert any("runtime" in warning for warning in session.startup_warnings)
     await adapter.close()
 
@@ -2331,9 +2546,13 @@ async def test_a_skipped_mcp_server_is_reported_to_the_client(tmp_path):
         "aster_acp._mcp.MCPManager.create_stdio_server",
         new=AsyncMock(return_value=_MCPTools()),
     ):
-        await adapter.new_session(str(tmp_path), mcp_servers=[server])
+        created = await adapter.new_session(str(tmp_path), mcp_servers=[server])
 
-    await asyncio.sleep(0.1)  # let the deferred bootstrap publish
+    runtime = await _session(adapter, created.session_id)
+    await runtime.bootstrap_ready.wait()
+    assert runtime.mcp_startup_task is not None
+    await runtime.mcp_startup_task
+    await runtime.bridge.flush()
     rendered = "".join(str(update) for update in client.updates)
     assert "shell" in rendered, rendered[:400]
     await adapter.close()

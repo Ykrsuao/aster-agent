@@ -259,6 +259,17 @@ async def _mcp_status(connection, session_id: str, *, reconnect: bool = False):
     )
 
 
+async def _wait_for_mcp_status(connection, session_id: str):
+    async with asyncio.timeout(_HANG_TIMEOUT):
+        while True:
+            status = await _mcp_status(connection, session_id)
+            if status["servers"] and all(
+                server["state"] != "connecting" for server in status["servers"]
+            ):
+                return status
+            await asyncio.sleep(0.02)
+
+
 async def test_acp_subprocess_mcp_stdio_reload_resume_and_cleanup(tmp_path, monkeypatch):
     """A real peer follows the session cwd, reconnects, and is closed after every operation."""
     monkeypatch.setenv("ASTER_USER_DIR", str(tmp_path / "user-config"))
@@ -277,7 +288,7 @@ async def test_acp_subprocess_mcp_stdio_reload_resume_and_cleanup(tmp_path, monk
         initialized = await connection.initialize(PROTOCOL_VERSION)
         assert initialized.field_meta["aster"]["mcp"] is True
         session = await connection.new_session(str(tmp_path))
-        status = await _mcp_status(connection, session.session_id)
+        status = await _wait_for_mcp_status(connection, session.session_id)
         assert [(row["name"], row["source"], row["state"]) for row in status["servers"]] == [
             ("probe", "project", "ready")
         ]
@@ -299,7 +310,9 @@ async def test_acp_subprocess_mcp_stdio_reload_resume_and_cleanup(tmp_path, monk
         await connection.close_session(session.session_id)
 
         await connection.load_session(str(tmp_path), session.session_id)
-        assert (await _mcp_status(connection, session.session_id))["servers"][0]["state"] == "ready"
+        assert (await _wait_for_mcp_status(connection, session.session_id))["servers"][0][
+            "state"
+        ] == "ready"
         await connection.prompt(session.session_id, [text_block("call again after resume")])
         assert any(
             isinstance(update, AgentMessageChunk)
@@ -347,7 +360,7 @@ async def test_acp_subprocess_mcp_trust_and_client_precedence(tmp_path, monkeypa
     ) as (connection, _process):
         await connection.initialize(PROTOCOL_VERSION)
         session = await connection.new_session(str(tmp_path))
-        status = await _mcp_status(connection, session.session_id)
+        status = await _wait_for_mcp_status(connection, session.session_id)
         assert status["servers"][0]["source"] == "user"
         assert status["servers"][0]["state"] == "ready"
         assert status["warnings"]
@@ -364,7 +377,7 @@ async def test_acp_subprocess_mcp_trust_and_client_precedence(tmp_path, monkeypa
         session = await connection.new_session(
             str(tmp_path), mcp_servers=[client_server, duplicate]
         )
-        status = await _mcp_status(connection, session.session_id)
+        status = await _wait_for_mcp_status(connection, session.session_id)
         assert status["servers"][0]["source"] == "client"
         assert status["servers"][0]["state"] == "ready"
         assert status["warnings"]
@@ -373,7 +386,7 @@ async def test_acp_subprocess_mcp_trust_and_client_precedence(tmp_path, monkeypa
 
         workspace_trust.trust(tmp_path)
         session = await connection.new_session(str(tmp_path))
-        status = await _mcp_status(connection, session.session_id)
+        status = await _wait_for_mcp_status(connection, session.session_id)
         assert status["servers"][0]["source"] == "project"
         assert status["servers"][0]["state"] == "ready"
         await connection.close_session(session.session_id)
@@ -499,7 +512,7 @@ async def test_acp_subprocess_mcp_http_credentials_errors_and_recovery(tmp_path,
             ) as (connection, _process):
                 await connection.initialize(PROTOCOL_VERSION)
                 session = await connection.new_session(str(tmp_path))
-                failed = await _mcp_status(connection, session.session_id)
+                failed = await _wait_for_mcp_status(connection, session.session_id)
                 assert failed["servers"][0]["state"] == "failed"
                 assert "401" in failed["servers"][0]["error"]
 
@@ -520,7 +533,7 @@ async def test_acp_subprocess_mcp_http_credentials_errors_and_recovery(tmp_path,
                 await _mcp_status(connection, session.session_id, reconnect=True)
                 await connection.close_session(session.session_id)
                 await connection.load_session(str(tmp_path), session.session_id)
-                assert (await _mcp_status(connection, session.session_id))["servers"][0][
+                assert (await _wait_for_mcp_status(connection, session.session_id))["servers"][0][
                     "state"
                 ] == "ready"
                 await connection.prompt(

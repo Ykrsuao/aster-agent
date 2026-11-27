@@ -31,6 +31,7 @@ _BLOCK_CATEGORIES = {
     "python_tools": "system_tools",
     "repository_instructions": "memory_files",
     "skills": "skills",
+    "text_skill_catalog": "skills",
     "skill_instructions": "skills",
     **dict.fromkeys(
         (

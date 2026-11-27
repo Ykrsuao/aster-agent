@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from aster.context_blocks import DynamicContext, ResolvedBlock, Role
+from aster.context_blocks import Context, DynamicContext, ResolvedBlock, Role
 from aster.context_blocks.events import ToolCallEvent, ToolResult, UserEvent
 
 # ---------------------------------------------------------------------------
@@ -98,6 +98,19 @@ class TestApplyOverrides:
             static_expr=lambda k: "unused",
         )
         assert result[-1].metadata.expr == "self.x()"
+
+    @pytest.mark.parametrize(
+        "value", ["required", DynamicContext("'required'"), Context("required")]
+    )
+    async def test_replacing_optional_block_clears_optional(self, value):
+        from aster.context_blocks import BlockMetadata
+        from aster.runtime.context_builder import _apply_overrides
+
+        block = _block("catalog").model_copy(update={"metadata": BlockMetadata(optional=True)})
+        result = await _apply_overrides(
+            [block], {"catalog": value}, _identity_resolve, static_expr=lambda k: k
+        )
+        assert result[0].metadata.optional is False
 
     @pytest.mark.asyncio
     async def test_none_removes(self):
@@ -669,6 +682,36 @@ class TestPhasePersistentBlocksErrors:
 
 
 class TestBuildContext:
+    @pytest.mark.parametrize("source", ["persistent", "strategy", "decorator", "scoped"])
+    @pytest.mark.parametrize("expression", [False, True])
+    async def test_optional_prefix_reaches_metadata_from_every_source(self, source, expression):
+        from aster.runtime.context_builder import build_context
+
+        value = (
+            Context(expr="'catalog'", prefix=True, optional=True)
+            if expression
+            else Context("catalog", prefix=True, optional=True)
+        )
+        cm = _make_context_manager({"catalog": value} if source == "persistent" else {})
+        strategy = None
+        if source == "strategy":
+            strategy = MagicMock()
+            strategy.get_block_overrides.return_value = {"catalog": value}
+            strategy.get_static_block_keys.return_value = set()
+            strategy.get_block_order.return_value = None
+        result = await build_context(
+            context_manager=cm,
+            event_manager=_make_event_manager(),
+            strategy=strategy,
+            resolve_fn=_identity_resolve,
+            decorator_context={"catalog": value} if source == "decorator" else None,
+            scoped_context={"catalog": value} if source == "scoped" else None,
+        )
+        block = next(block for block in result.blocks if block.key == "catalog")
+        assert block.metadata.optional is True
+        assert block.metadata.static is True
+        assert "catalog" in block.content
+
     @pytest.mark.asyncio
     async def test_returns_build_result(self):
         from aster.runtime.context_builder import BuildResult, build_context

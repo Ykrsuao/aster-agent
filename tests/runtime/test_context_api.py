@@ -5,7 +5,7 @@
 import pytest
 
 from aster import Agent
-from aster.context_blocks import DynamicContext
+from aster.context_blocks import Context, DynamicContext
 from aster.context_blocks.exceptions import DynamicNotResolvedError, ProtectedBlockError
 from aster.runtime.context import ContextApi
 from aster.unifiedllm import FakeLLMClient
@@ -36,10 +36,104 @@ def test_setitem_raises_on_protected_key():
         ctx["system_prompt"] = "overwrite"
 
 
+def test_set_plain_value_still_rejects_protected_key():
+    with pytest.raises(ProtectedBlockError):
+        _ctx().set("system_prompt", "overwrite")
+
+
+@pytest.mark.parametrize("value", [{"key": "value"}, ["one", "two"]])
+def test_set_plain_value_preserves_existing_structured_values(value):
+    ctx = _ctx()
+    ctx.set("data", value)
+    assert ctx["data"] is value
+    assert not ctx._context.is_optional("data")
+
+
 def test_setitem_accepts_dynamic_context_value():
     ctx = _ctx()
     ctx["dynamic"] = DynamicContext("'expr'")
     assert "dynamic" in ctx._context
+
+
+@pytest.mark.parametrize("expr", [None, "'catalog'"])
+@pytest.mark.parametrize("prefix", [False, True])
+def test_set_preserves_optional_independently_of_content_and_placement(expr, prefix):
+    ctx = _ctx()
+    ctx.set("catalog", "catalog" if expr is None else None, expr=expr, prefix=prefix, optional=True)
+    assert ctx._context.is_optional("catalog")
+    assert ctx._context.is_static("catalog") is prefix
+    ctx.set("catalog", "required", prefix=prefix)
+    assert not ctx._context.is_optional("catalog")
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["assign", "context", "dynamic", "static", "override", "delete", "pop", "none"],
+)
+def test_replacing_or_removing_a_block_clears_optional(operation):
+    cm = _ctx()._context
+    cm["catalog"] = Context("catalog", prefix=True, optional=True)
+    assert cm.is_optional("catalog")
+    if operation == "assign":
+        cm["catalog"] = "required"
+    elif operation == "context":
+        cm["catalog"] = Context("required")
+    elif operation == "dynamic":
+        cm.set_dynamic("catalog", "'required'")
+    elif operation == "static":
+        cm.set_static("catalog", "required")
+    elif operation == "override":
+        cm.apply_override("catalog", "required")
+    elif operation == "delete":
+        del cm["catalog"]
+    elif operation == "pop":
+        cm.pop("catalog")
+    else:
+        cm["catalog"] = None
+    assert not cm.is_optional("catalog")
+
+
+@pytest.mark.parametrize("operation", ["static", "dynamic", "remove", "none", "override"])
+def test_protected_block_changes_clear_optional(operation):
+    cm = _ctx()._context
+    cm["system_prompt"] = Context("catalog", prefix=True, optional=True)
+    assert cm.is_optional("system_prompt")
+    if operation == "static":
+        cm.set_static_protected("system_prompt", "required")
+    elif operation == "dynamic":
+        cm.set_dynamic_protected("system_prompt", value="required")
+    elif operation == "remove":
+        cm.remove_protected("system_prompt")
+    elif operation == "none":
+        cm["system_prompt"] = None
+    else:
+        cm.apply_override("system_prompt", None)
+    assert not cm.is_optional("system_prompt")
+
+
+def test_optional_survives_disable_enable_and_failed_replacement():
+    cm = _ctx()._context
+    cm["catalog"] = Context("catalog", optional=True)
+    cm.disable("catalog")
+    cm.enable("catalog")
+    with pytest.raises(TypeError):
+        cm.set_static("catalog", "value", expr="'invalid'")
+    assert cm.is_optional("catalog")
+    cm.set_optional("catalog", False)
+    assert not cm.is_optional("catalog")
+    with pytest.raises(KeyError):
+        cm.set_optional("missing", True)
+
+
+def test_class_and_instance_context_preserve_optional():
+    class OptionalAgent(Agent, llm=_llm, context={"catalog": Context("class", optional=True)}):
+        pass
+
+    assert OptionalAgent().context_manager.is_optional("catalog")
+    assert not OptionalAgent(context={"catalog": "required"}).context_manager.is_optional("catalog")
+    assert OptionalAgent(
+        context={"catalog": Context(expr="'instance'", prefix=True, optional=True)}
+    ).context_manager.is_optional("catalog")
 
 
 def test_set_static_expr_lands_in_static_partition():

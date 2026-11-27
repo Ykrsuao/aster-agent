@@ -599,6 +599,99 @@ class TestRenderContextEventSerialization:
         assert "pre-existing content" in user_msg["content"]
 
 
+class TestOptionalContextBudget:
+    @pytest.mark.parametrize("prefix", [False, True])
+    def test_optional_block_is_evicted_before_live_state(self, prefix):
+        blocks = [
+            ResolvedBlock(
+                key="rules", content="Required instructions.", metadata=BlockMetadata(static=True)
+            ),
+            ResolvedBlock(
+                key="catalog",
+                content="Directory entry. " * 100,
+                metadata=BlockMetadata(static=prefix, optional=True, user_block=True),
+            ),
+            ResolvedBlock(key="state", content="Current variables."),
+            ResolvedBlock(key="queues", content="Pending user message."),
+        ]
+        result = render_context(
+            blocks,
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+            context_limit=200,
+            count_tokens=len,
+        )
+        content = str(result.output)
+        assert "Directory entry." not in content
+        assert "Required instructions." in content
+        assert "Current variables." in content
+        assert "Pending user message." in content
+        assert result.stats.context_blocks_dropped == 1
+        assert result.stats.context_blocks_chars <= 200
+        assert blocks[1].content == "Directory entry. " * 100
+
+    def test_optional_block_stays_complete_when_it_fits(self):
+        blocks = [
+            ResolvedBlock(
+                key="catalog",
+                content="Directory entry.",
+                metadata=BlockMetadata(static=True, optional=True),
+            )
+        ]
+        result = render_context(
+            blocks,
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+            context_limit=100,
+            count_tokens=len,
+        )
+        assert "Directory entry." in str(result.output)
+        assert result.stats.context_blocks_dropped == 0
+
+    def test_evicted_prefix_is_stable_when_token_calibration_changes(self):
+        from aster.context_blocks.renderers.cached import CachedBlockFormatter
+
+        blocks = [
+            ResolvedBlock(
+                key="catalog",
+                content="Directory entry. " * 1000,
+                metadata=BlockMetadata(static=True, optional=True),
+            )
+        ]
+        results = [
+            render_context(
+                blocks,
+                block_formatter=CachedBlockFormatter(),
+                provider_formatter=OpenAIProviderFormatter(),
+                context_limit=1000,
+                count_tokens=lambda text, ratio=ratio: round(len(text) * ratio),
+            )
+            for ratio in (0.30, 0.31)
+        ]
+        assert all(result.stats.context_blocks_dropped == 1 for result in results)
+        assert results[0].output == results[1].output
+
+    def test_eviction_counts_the_marker_before_preserving_other_blocks(self):
+        blocks = [
+            ResolvedBlock(key="rules", content="R" * 80, metadata=BlockMetadata(static=True)),
+            ResolvedBlock(
+                key="catalog",
+                content="C" * 300,
+                metadata=BlockMetadata(static=True, optional=True),
+            ),
+            ResolvedBlock(key="notes", content="N" * 100, metadata=BlockMetadata(user_block=True)),
+        ]
+        result = render_context(
+            blocks,
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+            context_limit=180,
+            count_tokens=len,
+        )
+        assert result.stats.context_blocks_dropped == 2
+        assert result.stats.context_blocks_chars <= 180
+
+
 class TestCountTokens:
     """Tests for count_tokens parameter in render_context()."""
 

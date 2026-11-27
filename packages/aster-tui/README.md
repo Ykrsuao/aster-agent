@@ -325,13 +325,13 @@ cancels in-flight MCP work and cleans up its transports.
 ## Context and cost
 
 The HUD's usage row is present from startup. Before the first response, a known
-model capacity displays `context ░░░░░░ 0k / 1.0m`, with an empty bar and `0k`
+model capacity displays `context ░░░░░░░░░░ 0k / 1.0m`, with an empty bar and `0k`
 as pending placeholders. The bar respects `context_bar` and available width.
 The context inspector still waits for a reported measurement. An unknown capacity
-displays `context —`. After a response, the row shows the latest reported input
-usage in the selected `context_value` format (percentage or token counts).
-In `tokens` and `both` formats, used tokens stay in `k` (thousands), while capacity
-uses its compact unit; for example, `12.3k / 1.0m`.
+displays `context —`. After a response, the row shows the latest reported percentage used. `tokens` and
+`both` also show used tokens and capacity, for example, `18% used · 12.3k / 1.0m`;
+`remaining` shows the number of tokens left. Used tokens stay in `k` (thousands),
+while capacity uses its compact unit.
 If the window is unknown, it shows the reported token count instead. A missing
 usage report displays `context n/a`; it does not imply an empty context.
 
