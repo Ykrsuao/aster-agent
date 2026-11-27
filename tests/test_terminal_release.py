@@ -33,6 +33,8 @@ def _wheel(
     purelib="false",
     wheel_tags=None,
     terminal=b"MZfake-test-terminal",
+    requirements=(),
+    extras=(),
 ):
     normalized = name.replace("-", "_")
     tag = tag or ("py3-none-win_amd64" if name == "aster-cli" else "py3-none-any")
@@ -40,7 +42,10 @@ def _wheel(
     with zipfile.ZipFile(path, "w") as archive:
         prefix = f"{normalized}-{version}.dist-info"
         archive.writestr(
-            f"{prefix}/METADATA", f"Metadata-Version: 2.3\nName: {name}\nVersion: {version}\n"
+            f"{prefix}/METADATA",
+            f"Metadata-Version: 2.3\nName: {name}\nVersion: {version}\n"
+            + "".join(f"Provides-Extra: {extra}\n" for extra in extras)
+            + "".join(f"Requires-Dist: {requirement}\n" for requirement in requirements),
         )
         if duplicate_metadata:
             archive.writestr(
@@ -289,6 +294,91 @@ def test_installer_preserves_foreign_launcher_and_reinstalls_its_own_tool(bundle
         assert result.returncode == 0, result.stderr
         assert (tmp_path / "owned-bin/aster.exe").is_file()
         assert (tmp_path / "owned-bin/aster-acp.exe").is_file()
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32" or not shutil.which("uv"), reason="Windows uv installer"
+)
+@pytest.mark.parametrize("explicit_python", [False, True], ids=["reuse-python", "explicit-python"])
+def test_installer_preserves_sandbox_with_new_dependency_bounds(bundle, tmp_path, explicit_python):
+    _wheel(
+        bundle / "wheels",
+        "aster",
+        extras=("sandbox", "arc"),
+        requirements=(
+            "cloudpickle>=2,<3; extra == 'sandbox'",
+            "microsandbox>=1,<3; extra == 'sandbox'",
+            "cloudpickle>=5; python_version < '3.12' and extra == 'sandbox'",
+            "microsandbox>=5; sys_platform == 'not-windows' and extra == 'sandbox'",
+            "rich>=1; extra == 'arc'",
+            "arc-agi>=1; extra == 'arc'",
+        ),
+    )
+    release.assemble_bundle(bundle, commit="a" * 40, dirty=False)
+    dependencies = tmp_path / "dependencies"
+    dependencies.mkdir()
+    old_dependencies = [
+        _wheel(dependencies, name)
+        for name in ("cloudpickle", "microsandbox", "unrelated-probe", "rich")
+    ]
+    _wheel(dependencies, "cloudpickle", version="2.0.0")
+    tools, binaries = tmp_path / "tools", tmp_path / "bin"
+    environment = {
+        **os.environ,
+        "UV_TOOL_DIR": str(tools),
+        "UV_TOOL_BIN_DIR": str(binaries),
+        "UV_CACHE_DIR": str(tmp_path / "cache"),
+        "UV_FIND_LINKS": str(dependencies),
+        "UV_NO_INDEX": "1",
+        "UV_PYTHON_DOWNLOADS": "never",
+    }
+    uv = shutil.which("uv")
+    seed = [
+        uv,
+        "tool",
+        "install",
+        "--no-config",
+        "--offline",
+        "--python",
+        sys.executable,
+        str(next((bundle / "wheels").glob("aster_cli-*.whl"))),
+    ]
+    for dependency in old_dependencies:
+        seed += ["--with", str(dependency)]
+    result = subprocess.run(seed, env=environment, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    python = tools / "aster-cli/Scripts/python.exe"
+    inspect = (
+        "import importlib.metadata as m,json,sys; "
+        "print(json.dumps({'python':sys._base_executable, "
+        "'packages':{d.metadata['Name']:d.version for d in m.distributions()}}))"
+    )
+    before = json.loads(subprocess.check_output([str(python), "-I", "-c", inspect], text=True))
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(bundle / "install.ps1"),
+        "-ToolsDirectory",
+        str(tools),
+        "-BinDirectory",
+        str(binaries),
+        "-Offline",
+    ]
+    if explicit_python:
+        command += ["-Python", sys.executable]
+    result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    after = json.loads(subprocess.check_output([str(python), "-I", "-c", inspect], text=True))
+    assert Path(after["python"]) == Path(before["python"])
+    assert after["packages"]["cloudpickle"] == "2.0.0"
+    assert after["packages"]["microsandbox"] == "1.2.3"
+    assert "unrelated-probe" not in after["packages"]
+    assert "arc-agi" not in after["packages"]
+    assert set(release.PACKAGES) <= after["packages"].keys()
 
 
 def test_installed_smoke_binds_versions_and_native_bytes_to_clean_bundle(bundle):

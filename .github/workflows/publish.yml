@@ -194,6 +194,14 @@ jobs:
         with:
           name: terminal-release
           path: terminal/
+      - name: Generate terminal bundle checksum
+        run: |
+          set -euo pipefail
+          cd terminal
+          shopt -s nullglob
+          archives=(aster-terminal-*-windows-x64.zip)
+          test "${#archives[@]}" -eq 1
+          sha256sum "${archives[0]}" > "${archives[0]}.sha256"
       # The tag name goes through `env:`, not `${{ }}` inside the script.
       # GitHub expands `${{ }}` textually *before* bash parses the line, so a
       # tag containing `$(...)` or backticks would execute — double quotes do

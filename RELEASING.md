@@ -54,12 +54,23 @@ The extracted `install.ps1` validates the bundle and installs the isolated
 Run a trusted bundle with
 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1`; this
 sets policy only for that process, avoiding a permanent policy change.
-It requires uv and can obtain Python 3.12 and third-party packages from the
-configured index/cache. These dependencies are not inside the ZIP. Close Aster
-before reinstalling. Use `-ToolsDirectory` and `-BinDirectory` for an isolated
-test installation; `-Python` selects an existing supported interpreter and
-`-Offline` forbids downloads. Workspace and user configuration are not migrated
+It requires uv and defaults to Python 3.12 on the first install. Updates reuse
+the installed tool's supported Python 3.12 or 3.13 and preserve installed sandbox
+dependencies using the new release's dependency requirements. `-Python`
+overrides the interpreter selection. Python and third-party packages can be
+downloaded from the configured index/cache; they are not inside the ZIP.
+Close Aster before reinstalling. Use `-ToolsDirectory` and `-BinDirectory` for
+an isolated test installation; `-Offline` forbids downloads. Workspace and user configuration are not migrated
 or deleted by the installer. Checksums detect corruption, not publisher identity.
+
+The one-line bootstrap in `scripts/install.ps1` downloads the latest stable
+GitHub Release's `aster-terminal-*-windows-x64.zip` and its matching
+`.zip.sha256` asset. The Publish workflow generates this outer archive checksum
+from the accepted ZIP and uploads both files to the release. The bootstrap
+checks the ZIP before extraction, then runs the bundle's own installer to
+validate its contents and install Aster. This outer checksum is separate from
+the bundle's `MANIFEST.json` and `SHA256SUMS` file checksums. The one-line
+command becomes usable only after a stable release has both required assets.
 
 The Windows CI job builds and installs this bundle outside the checkout, runs
 `scripts/terminal_release_smoke.py seed`, reinstalls, then runs `verify` with the

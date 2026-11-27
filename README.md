@@ -9,9 +9,35 @@ its changes, and return to the same conversation later.
 Aster combines a Rust / Ratatui interface, a Python agent framework, and an ACP
 runtime shared by the terminal and editor integrations.
 
-**[Install on Windows](#install-a-windows-terminal-bundle)** · **[Run from source](#run-aster-from-a-source-checkout)** · **[Terminal guide](packages/aster-tui/README.md)** · **[Framework docs](docs/README.md)** · **[Framework quick start](#quick-start)** · **[Examples](examples/README.md)**
+**[Install on Windows](#install-on-windows)** · **[Run from source](#run-aster-from-a-source-checkout)** · **[Terminal guide](packages/aster-tui/README.md)** · **[Framework docs](docs/README.md)** · **[Framework quick start](#quick-start)** · **[Examples](examples/README.md)**
 
-## Install a Windows terminal bundle
+## Install on Windows
+
+Install or update Aster on **Windows x64** with one PowerShell command:
+
+```powershell
+irm https://raw.githubusercontent.com/Ykrsuao/aster-agent/main/scripts/install.ps1 | iex
+```
+
+This requires a published stable `vX.Y.Z` GitHub Release containing the Windows
+bundle and its checksum. **No stable GitHub Release is published yet.** Until
+one is available, use a maintainer-provided bundle or run from source below.
+A Windows CI artifact alone does not make this command available.
+
+The installer downloads the latest stable bundle, installs `uv` if needed, and
+adds Aster's command directory to your user PATH. Open a new terminal afterward.
+On the first run, configure a model, then start Aster in your current directory:
+
+```powershell
+aster connect
+aster
+```
+
+Use `aster -w PATH` to open another workspace. To update, exit all running Aster
+sessions and run the same installation command again. Your model configuration,
+workspace files, conversations, and drafts remain in their existing locations.
+
+### Install a Windows terminal bundle
 
 The Windows x64 bundle includes the native terminal and matching Aster Python
 packages. With [uv](https://docs.astral.sh/uv/getting-started/installation/)
@@ -26,19 +52,20 @@ aster -w C:\path\to\project
 
 The installer checks bundle hashes, installs an isolated `aster-cli` tool, and
 prints the command location. If that directory is not on PATH, run
-`uv tool update-shell` and open a new terminal. It can download Python 3.12 and
-the pinned third-party dependencies; the bundle does not contain them. Rust is
-not needed. `-Offline` works only when the requested Python and dependencies
-are already cached.
+`uv tool update-shell` and open a new terminal. A first install defaults to
+Python 3.12; an update keeps an existing supported Python 3.12 or 3.13 and any
+installed sandbox dependencies. The installer can download Python and pinned
+third-party dependencies; the bundle does not contain them. Rust is not needed.
+`-Offline` works only when the requested Python and dependencies are already cached.
 
 Run only a bundle from a trusted source. The execution-policy option applies to
 this PowerShell process and does not change your machine's saved policy.
 
 Close Aster and run the new bundle's installer to replace the installed tool.
 Your workspace files, model configuration, conversations and drafts stay outside
-the tool environment. No public download channel is configured in this checkout;
-maintainers can [build the bundle](RELEASING.md#windows-terminal-bundle), and the
-Windows CI job uploads it as an artifact.
+the tool environment. Maintainers can
+[build the bundle](RELEASING.md#windows-terminal-bundle), and the Windows CI job
+uploads it as an artifact.
 
 ## Run Aster from a source checkout
 

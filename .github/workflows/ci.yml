@@ -531,6 +531,8 @@ jobs:
         run: >-
           uv run --no-sync python -m pytest -q
           tests/test_terminal_release.py
+          tests/test_install_bootstrap.py
+          tests/test_install_path.py
           tests/test_terminal_acceptance.py
           tests/test_terminal_acceptance_ci.py
           tests/test_terminal_acceptance_workflow.py

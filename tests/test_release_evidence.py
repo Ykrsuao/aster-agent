@@ -757,6 +757,16 @@ def test_workflows_require_candidate_evidence_without_breaking_ordinary_ci(gate)
     assert 'cd "$RUNNER_TEMP"' in smoke["run"]
     assert "push" not in publish["on"]
     assert publish["on"]["release"]["types"] == ["published"]
+    release_steps = publish["jobs"]["attach-to-release"]["steps"]
+    checksum = next(
+        step for step in release_steps if step.get("name") == "Generate terminal bundle checksum"
+    )
+    attach = next(
+        step for step in release_steps if step.get("name") == "Attach artifacts to the release"
+    )
+    assert release_steps.index(checksum) < release_steps.index(attach)
+    assert 'sha256sum "${archives[0]}" > "${archives[0]}.sha256"' in checksum["run"]
+    assert "terminal/*" in attach["run"]
     for job in ("publish-testpypi", "publish-pypi"):
         assert publish["jobs"][job]["needs"] == "verify-candidate"
     controller = publish["jobs"]["verify-candidate"]["steps"][0]

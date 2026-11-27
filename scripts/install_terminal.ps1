@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 [CmdletBinding()]
 param(
-    [string]$Python = '3.12',
+    [string]$Python,
     [string]$ToolsDirectory,
     [string]$BinDirectory,
     [switch]$Offline
@@ -62,6 +62,46 @@ $previousBin = $env:UV_TOOL_BIN_DIR
 try {
     if ($ToolsDirectory) { $env:UV_TOOL_DIR = [IO.Path]::GetFullPath($ToolsDirectory) }
     if ($BinDirectory) { $env:UV_TOOL_BIN_DIR = [IO.Path]::GetFullPath($BinDirectory) }
+    $toolDirectory = & $uv tool dir --no-config
+    if ($LASTEXITCODE -ne 0) { throw 'Could not locate the existing tool directory.' }
+    $existingPython = Join-Path $toolDirectory 'aster-cli/Scripts/python.exe'
+    $preservedRequirements = @()
+    if (Test-Path -LiteralPath $existingPython -PathType Leaf) {
+        # Keep existing sandbox dependencies within the new release's supported bounds.
+        $inspect = @'
+import email.parser
+import importlib.metadata
+import json
+import re
+import sys
+import zipfile
+
+normalize = lambda name: re.sub(r"[-_.]+", "-", name).lower()
+installed = {normalize(item.metadata["Name"]) for item in importlib.metadata.distributions()}
+requirements = []
+for wheel in sys.argv[1:]:
+    with zipfile.ZipFile(wheel) as archive:
+        entry = next(name for name in archive.namelist() if name.endswith(".dist-info/METADATA"))
+        metadata = email.parser.BytesParser().parsebytes(archive.read(entry))
+    for raw in metadata.get_all("Requires-Dist", []):
+        requirement, _, marker = raw.partition(";")
+        name = re.match(r"[A-Za-z0-9_.-]+", requirement).group()
+        if metadata["Name"] != "aster" or normalize(name) not in {"cloudpickle", "microsandbox"}:
+            continue
+        sandbox = r"""\bextra\s*==\s*(['"])sandbox\1"""
+        if normalize(name) in installed and re.search(sandbox, marker):
+            marker = re.sub(sandbox, "'sandbox' == 'sandbox'", marker)
+            requirements.append(f"{requirement.strip()}; {marker.strip()}")
+python = sys._base_executable if sys.version_info[:2] in ((3, 12), (3, 13)) else None
+print(json.dumps({"python": python, "requirements": list(dict.fromkeys(requirements))}))
+'@
+        $existing = $inspect | & $existingPython -I - @($wheels.Values)
+        if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the existing Aster tool environment.' }
+        $existing = $existing | ConvertFrom-Json
+        if (-not $Python) { $Python = $existing.python }
+        $preservedRequirements = @($existing.requirements)
+    }
+    if (-not $Python) { $Python = '3.12' }
     $arguments = @('tool', 'install', '--no-config', '--python', $Python,
         '--constraints', (Join-Path $bundle 'constraints.txt'), '--with-executables-from', 'aster-acp',
         $wheels['aster-cli'])
@@ -69,6 +109,7 @@ try {
         $arguments += @('--reinstall-package', $package)
         if ($package -ne 'aster-cli') { $arguments += @('--with', $wheels[$package]) }
     }
+    foreach ($requirement in $preservedRequirements) { $arguments += @('--with', $requirement) }
     if ($Offline) { $arguments += '--offline' }
     & $uv @arguments
     if ($LASTEXITCODE -ne 0) { throw "uv tool install failed (exit $LASTEXITCODE)." }
