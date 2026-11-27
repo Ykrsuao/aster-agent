@@ -49,6 +49,7 @@ class ContextManager:
         self.protected_keys: set[str] = set()
         self._dynamic_cache: dict[str, Any] = {}
         self._static: dict[str, bool] = {}
+        self._optional: set[str] = set()
         self.disabled_keys: set[str] = set()
 
     def __setitem__(self, key: str, value: Any) -> None:
@@ -69,6 +70,7 @@ class ContextManager:
         """
         if value is None:
             self.disable(key)
+            self._optional.discard(key)
             if key in self._blocks and key not in self.protected_keys:
                 del self._blocks[key]
                 self._static.pop(key, None)
@@ -96,6 +98,7 @@ class ContextManager:
                         self.set_dynamic_protected(key, value=value.value)
                     else:
                         self.set_dynamic(key, value=value.value)
+            self.set_optional(key, value.optional)
             return
         if isinstance(value, DynamicContext):
             if key in self.protected_keys:
@@ -106,7 +109,13 @@ class ContextManager:
         self.set_dynamic(key, value=value)
 
     def set(
-        self, key: str, value: str | None = None, *, expr: str | None = None, prefix: bool = False
+        self,
+        key: str,
+        value: str | None = None,
+        *,
+        expr: str | None = None,
+        prefix: bool = False,
+        optional: bool = False,
     ) -> None:
         """Set a context block — convenience method with keyword arguments.
 
@@ -118,19 +127,17 @@ class ContextManager:
             value: Literal text content (mutually exclusive with expr).
             expr: Python expression re-evaluated each LLM turn.
             prefix: Place in cacheable prefix if True, volatile suffix if False.
+            optional: Evict this block first when over the context budget.
         """
         if value is not None and expr is not None:
             raise TypeError("set() takes value or expr, not both")
         if value is None and expr is None:
             self[key] = None
             return
-        if expr is not None:
-            self[key] = Context(expr=expr, prefix=prefix)
+        if expr is not None or prefix or optional:
+            self[key] = Context(value, expr=expr, prefix=prefix, optional=optional)
         else:
-            if prefix:
-                self[key] = Context(value, prefix=True)
-            else:
-                self[key] = value
+            self[key] = value
 
     def set_static(self, key: str, value: Any = _SENTINEL, *, expr: str | None = None) -> None:
         """Set a static context block (placed in the cacheable prefix).
@@ -172,6 +179,7 @@ class ContextManager:
             raise TypeError("set_static() requires either value or expr=")
 
         self._static[key] = True
+        self._optional.discard(key)
         self.disabled_keys.discard(key)
         self._invalidate(key)
 
@@ -203,12 +211,26 @@ class ContextManager:
         else:
             raise TypeError("set_dynamic() requires either expr or value=")
         self._static[key] = False
+        self._optional.discard(key)
         self.disabled_keys.discard(key)
         self._invalidate(key)
 
     def is_static(self, key: str) -> bool:
         """Return True if the block is in the static (cacheable) partition."""
         return self._static.get(key, False)
+
+    def is_optional(self, key: str) -> bool:
+        """Return whether the block is evicted first when the context is over budget."""
+        return key in self._optional
+
+    def set_optional(self, key: str, optional: bool) -> None:
+        """Set eviction metadata for an existing block without changing its value."""
+        if key not in self._blocks:
+            raise KeyError(key)
+        if optional:
+            self._optional.add(key)
+        else:
+            self._optional.discard(key)
 
     def __getitem__(self, key: str) -> Any:
         """Get the value of a context block.
@@ -248,6 +270,7 @@ class ContextManager:
             raise ProtectedBlockError(key, "remove")
         del self._blocks[key]
         self._static.pop(key, None)
+        self._optional.discard(key)
         self.disabled_keys.discard(key)
         self._invalidate(key)
 
@@ -334,6 +357,7 @@ class ContextManager:
 
         del self._blocks[key]
         self._static.pop(key, None)
+        self._optional.discard(key)
         self.disabled_keys.discard(key)
         self._invalidate(key)
         return value
@@ -361,6 +385,7 @@ class ContextManager:
 
         if value is None:
             self.disable(key)
+            self._optional.discard(key)
             if not is_protected and key in self._blocks:
                 # Remove block definition without clearing disabled_keys
                 # (pop() would discard from disabled_keys, undoing the disable)
@@ -417,6 +442,7 @@ class ContextManager:
             self._blocks[key] = value
         self.protected_keys.add(key)
         self._static[key] = True
+        self._optional.discard(key)
         self.disabled_keys.discard(key)
         self._invalidate(key)
 
@@ -441,6 +467,7 @@ class ContextManager:
             raise TypeError("set_dynamic_protected() requires either expr or value=")
         self.protected_keys.add(key)
         self._static[key] = False
+        self._optional.discard(key)
         self.disabled_keys.discard(key)
         self._invalidate(key)
 
@@ -458,5 +485,6 @@ class ContextManager:
         del self._blocks[key]
         self.protected_keys.discard(key)
         self._static.pop(key, None)
+        self._optional.discard(key)
         self.disabled_keys.discard(key)
         self._invalidate(key)

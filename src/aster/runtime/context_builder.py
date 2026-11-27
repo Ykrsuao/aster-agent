@@ -95,8 +95,10 @@ async def _apply_overrides(
 
         # Normalize Context to DynamicContext/str for the pipeline
         context_prefix = None
+        optional = False
         if isinstance(value, Context):
             context_prefix = value.prefix
+            optional = value.optional
             if value.is_dynamic:
                 assert value.expr is not None  # guaranteed by is_dynamic
                 value = DynamicContext(value.expr)
@@ -124,9 +126,9 @@ async def _apply_overrides(
             is_block_static = not isinstance(value, DynamicContext)
 
         if isinstance(value, DynamicContext):
-            meta = BlockMetadata(expr=value.expr, static=is_block_static)
+            meta = BlockMetadata(expr=value.expr, static=is_block_static, optional=optional)
         else:
-            meta = BlockMetadata(expr=static_expr(key), static=is_block_static)
+            meta = BlockMetadata(expr=static_expr(key), static=is_block_static, optional=optional)
 
         new_block = ResolvedBlock(key=key, content=content, role=Role.SYSTEM, metadata=meta)
         if key in index:
@@ -311,6 +313,7 @@ async def _phase_persistent_blocks(
                 expr=value.expr,
                 user_block=is_user,
                 static=is_static,
+                optional=context_manager.is_optional(key),
                 source_dynamic=True,
             )
             # Cache the resolved value for __getitem__ access
@@ -325,7 +328,10 @@ async def _phase_persistent_blocks(
                 kwargs = context_block_format.model_dump() if context_block_format else {}
                 content = _pformat_value(value, unquote_strings=True, **kwargs)
             meta = BlockMetadata(
-                expr=f'self.context["{key}"]', user_block=is_user, static=is_static
+                expr=f'self.context["{key}"]',
+                user_block=is_user,
+                static=is_static,
+                optional=context_manager.is_optional(key),
             )
 
         blocks = [

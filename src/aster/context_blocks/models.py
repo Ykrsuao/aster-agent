@@ -59,11 +59,14 @@ class DynamicContext(BaseModel):
 
 
 class Context(BaseModel):
-    """Unified context block value — controls content and placement.
+    """Unified context block value — controls content, placement and eviction.
 
     Two orthogonal axes:
     - **Content**: literal text (``value``) or re-evaluated expression (``expr``)
     - **Placement**: cacheable prefix (``prefix=True``) or volatile suffix (default)
+
+    ``optional=True`` lets the renderer evict this block before other blocks
+    when the context budget is exceeded, including when it is in the prefix.
 
     Usage in context dicts (class-level, instance-level, @strategy, ScopedContext, runtime)::
 
@@ -93,6 +96,9 @@ class Context(BaseModel):
     prefix: bool = Field(
         default=False, description="Place in cacheable prefix if True, volatile suffix if False"
     )
+    optional: bool = Field(
+        default=False, description="Evict before other blocks when the context budget is exceeded"
+    )
 
     def __init__(
         self,
@@ -100,6 +106,7 @@ class Context(BaseModel):
         *,
         expr: str | None = None,
         prefix: bool = False,
+        optional: bool = False,
         **kwargs: Any,
     ):
         """Create a context block value.
@@ -108,6 +115,7 @@ class Context(BaseModel):
             value: Literal text content (mutually exclusive with expr).
             expr: Python expression re-evaluated each LLM turn (mutually exclusive with value).
             prefix: If True, place in the cacheable prefix partition.
+            optional: If True, evict this block first when over the context budget.
 
         Raises:
             TypeError: If both value and expr are given, or neither is given.
@@ -122,7 +130,7 @@ class Context(BaseModel):
                 compile(expr, "<block_expr>", "eval")
             except SyntaxError as e:
                 raise BlockSyntaxError(key="<context>", expr=expr, original_error=e) from e
-        super().__init__(value=value, expr=expr, prefix=prefix, **kwargs)
+        super().__init__(value=value, expr=expr, prefix=prefix, optional=optional, **kwargs)
 
     @property
     def is_dynamic(self) -> bool:
@@ -142,6 +150,8 @@ class Context(BaseModel):
             parts = [repr(self.value)]
         if self.prefix:
             parts.append("prefix=True")
+        if self.optional:
+            parts.append("optional=True")
         return f"Context({', '.join(parts)})"
 
 
@@ -166,7 +176,11 @@ class BlockMetadata(BaseModel):
         default=False,
         description="Author's declaration that the block's content is stable across "
         "turns. Renderers use this to place the block in a cacheable prefix. "
-        "Does not affect truncation or correctness — only caching behavior.",
+        "Protected from budget eviction unless optional is set.",
+    )
+    optional: bool = Field(
+        default=False,
+        description="Evict this block before other blocks when over budget, even if static.",
     )
     source_dynamic: bool = Field(
         default=False,

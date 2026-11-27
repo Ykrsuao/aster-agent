@@ -805,14 +805,6 @@ impl State {
             })
     }
 
-    pub fn slash_choice_is_exact(&self, choice: &Choice) -> bool {
-        let command = self.editor.lines()[0]
-            .split_whitespace()
-            .next()
-            .unwrap_or("");
-        command == "/" || choice.value.eq_ignore_ascii_case(command)
-    }
-
     /// Slash commands and inline skill mentions share the composer menu.
     pub fn slash_choices(&self) -> Vec<Choice> {
         self.draft_completion()

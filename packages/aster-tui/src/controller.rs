@@ -4939,15 +4939,7 @@ impl Controller {
                     self.complete_slash(self.state.slash_selected);
                     return vec![];
                 }
-                KeyCode::Enter => {
-                    let choice = &choices[self.state.slash_selected];
-                    if !self.state.slash_choice_fills_draft(choice)
-                        && !self.state.slash_choice_is_exact(choice)
-                    {
-                        return self.send_editor(self.state.editor.lines().join("\n"));
-                    }
-                    return self.choose_slash(self.state.slash_selected);
-                }
+                KeyCode::Enter => return self.choose_slash(self.state.slash_selected),
                 KeyCode::Esc => {
                     self.state.escape_confirmation = None;
                     self.state.slash_dismissed = true;
@@ -8268,31 +8260,56 @@ mod tests {
 
     #[test]
     fn inline_slash_enter_executes_selected_command_without_opening_modal() {
+        for (input, selected, expected) in [
+            ("/compact", 0, "/compact"),
+            ("/comp", 0, "/compact"),
+            ("/comp", 1, "/compare"),
+        ] {
+            let mut c = ready();
+            for name in ["/compact", "/compare"] {
+                c.state.commands.push(Command {
+                    name: name.into(),
+                    ..Command::default()
+                });
+            }
+            for ch in input.chars() {
+                c.key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+            }
+            for _ in 0..selected {
+                c.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            }
+            assert_eq!(c.state.slash_choices()[selected].value, expected);
+            let actions = c.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert!(c.state.overlay.is_none());
+            assert!(matches!(
+                actions.first(),
+                Some(Action::Request {
+                    method: "session/new",
+                    pending: Pending::Prepare,
+                    ..
+                })
+            ));
+            assert_eq!(
+                c.state.queued.front().map(MessageDraft::as_str),
+                Some(expected)
+            );
+            assert!(c.state.editor.lines().is_empty() || c.state.editor.lines() == [""]);
+        }
+    }
+
+    #[test]
+    fn inline_model_prefix_enters_model_settings_instead_of_being_rejected() {
         let mut c = ready();
-        c.state.commands.push(Command {
-            name: "/compact".into(),
-            description: "Compact context".into(),
-            ..Command::default()
-        });
-        c.key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-        for ch in "compact".chars() {
+        c.state.runtime_supported = true;
+        for ch in "/mod".chars() {
             c.key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
         }
-        let actions = c.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(c.state.overlay.is_none());
-        assert!(matches!(
-            &actions[0],
-            Action::Request {
-                method: "session/new",
-                pending: Pending::Prepare,
-                ..
-            }
+        assert!(c.state.slash_choices().iter().any(|choice| choice.value == "/model"));
+        let _actions = c.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(c.state.overlay, Some(Overlay::Models));
+        assert!(!c.state.entries.iter().any(
+            |entry| matches!(entry, Entry::Notice { text, .. } if text.contains("Unknown command: /mod"))
         ));
-        assert_eq!(
-            c.state.queued.front().map(MessageDraft::as_str),
-            Some("/compact")
-        );
-        assert!(c.state.editor.lines().is_empty() || c.state.editor.lines() == [""]);
     }
 
     #[test]
@@ -8476,8 +8493,13 @@ mod tests {
         let mut c = ready();
         c.state.session_id = Some("s".into());
         text_skill_commands(&mut c, &["review"]);
-        for text in ["/skill", "/skill inspect", "/unknown-missing-skill  "] {
+        for text in [
+            "/skill inspect",
+            "/unknown-missing-skill",
+            "/unknown-missing-skill  ",
+        ] {
             c.set_draft(text);
+            assert!(c.state.slash_choices().is_empty());
             assert!(c
                 .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
                 .is_empty());
@@ -8490,6 +8512,10 @@ mod tests {
         c.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(c.state.editor.lines(), &["/skills "]);
         assert!(c.state.overlay.is_none());
+
+        c.set_draft("/skill");
+        c.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(c.state.overlay, Some(Overlay::Skills));
     }
 
     #[test]

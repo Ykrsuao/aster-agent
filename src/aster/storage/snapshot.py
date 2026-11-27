@@ -27,6 +27,7 @@ class StaticContextBlock(BaseModel):
     key: str
     type: Literal["static"] = "static"
     value: Any = None
+    optional: bool = False
 
 
 class DynamicContextBlock(BaseModel):
@@ -35,6 +36,8 @@ class DynamicContextBlock(BaseModel):
     key: str
     type: Literal["dynamic"] = "dynamic"
     expr: str
+    prefix: bool = False
+    optional: bool = False
 
 
 class AgentSnapshot(BaseModel):
@@ -87,7 +90,14 @@ class AgentSnapshot(BaseModel):
             if key in protected:
                 continue  # Framework blocks are recreated by __init__
             if isinstance(value, DynamicContext):
-                context_blocks.append(DynamicContextBlock(key=key, expr=value.expr))
+                context_blocks.append(
+                    DynamicContextBlock(
+                        key=key,
+                        expr=value.expr,
+                        prefix=agent.context_manager.is_static(key),
+                        optional=agent.context_manager.is_optional(key),
+                    )
+                )
             else:
                 try:
                     serialized, allowlist = serialize(value, strict=strict)
@@ -96,7 +106,11 @@ class AgentSnapshot(BaseModel):
                     raise SerializationError(
                         f"Context block {key!r} is not serializable: {exc}"
                     ) from exc
-                context_blocks.append(StaticContextBlock(key=key, value=serialized))
+                context_blocks.append(
+                    StaticContextBlock(
+                        key=key, value=serialized, optional=agent.context_manager.is_optional(key)
+                    )
+                )
 
         attributes: dict[str, Any] = {}
         agent_cls = type(agent)
@@ -175,7 +189,12 @@ class AgentSnapshot(BaseModel):
             # restored via the protected setters rather than corrupting state.
             is_protected = block.key in agent.context_manager.protected_keys
             if isinstance(block, DynamicContextBlock):
-                if is_protected:
+                if block.prefix:
+                    if is_protected:
+                        agent.context_manager.set_static_protected(block.key, expr=block.expr)
+                    else:
+                        agent.context_manager.set_static(block.key, expr=block.expr)
+                elif is_protected:
                     agent.context_manager.set_dynamic_protected(block.key, block.expr)
                 else:
                     agent.context_manager.set_dynamic(block.key, block.expr)
@@ -185,6 +204,8 @@ class AgentSnapshot(BaseModel):
                     agent.context_manager.set_static_protected(block.key, value)
                 else:
                     agent.context_manager[block.key] = value
+            if block.key in agent.context_manager:
+                agent.context_manager.set_optional(block.key, block.optional)
 
         if self.disabled_context:
             agent.context_manager.disable(*self.disabled_context)

@@ -187,7 +187,13 @@ class ContextApi(Skill):
         return self._context.is_enabled(key)
 
     def set(
-        self, key: str, value: str | None = None, *, expr: str | None = None, prefix: bool = False
+        self,
+        key: str,
+        value: str | None = None,
+        *,
+        expr: str | None = None,
+        prefix: bool = False,
+        optional: bool = False,
     ) -> None:
         """Set a context block — convenience method with keyword arguments.
 
@@ -199,6 +205,7 @@ class ContextApi(Skill):
             value: Literal text content (mutually exclusive with expr).
             expr: Python expression re-evaluated each LLM turn.
             prefix: Place in cacheable prefix if True, volatile suffix if False.
+            optional: Evict this block first when over the context budget.
 
         Examples:
             self.context.set("role", "You are an expert")
@@ -206,20 +213,7 @@ class ContextApi(Skill):
             self.context.set("shell", expr="doc(self.shell)", prefix=True)
             self.context.set("old_block", None)  # suppress
         """
-        if value is not None and expr is not None:
-            raise TypeError("set() takes value or expr, not both")
-        if value is None and expr is None:
-            self._context[key] = None
-            return
-        from aster.context_blocks import Context
-
-        if expr is not None:
-            self._context[key] = Context(expr=expr, prefix=prefix)
-        else:
-            if prefix:
-                self._context[key] = Context(value, prefix=True)
-            else:
-                self._context[key] = value
+        self._context.set(key, value, expr=expr, prefix=prefix, optional=optional)
 
     def all_keys(self) -> "set[str]":
         """Return all block keys including protected framework and well-known strategy keys.

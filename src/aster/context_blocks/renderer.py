@@ -87,8 +87,8 @@ def _apply_context_total_limit(
 ) -> tuple[list[ResolvedBlock], int]:
     """Mark over-budget context blocks as EVICTED in-place.
 
-    Two-pass strategy: select user blocks (``self.context``) from the end first,
-    then remaining blocks from the end until the total fits. Selected blocks
+    Drop optional blocks first, including cacheable prefixes, then user blocks
+    and remaining non-static blocks from the end until the total fits. Selected blocks
     keep their original key/position and render an EVICTED label with per-block
     size stats.
     """
@@ -96,45 +96,58 @@ def _apply_context_total_limit(
     if total <= total_limit:
         return blocks, 0
 
-    to_evict: set[int] = set()
-    evicted_sizes: dict[int, int] = {}
+    replacements: dict[int, str] = {}
+
+    def evict(index: int) -> None:
+        nonlocal total
+        block = blocks[index]
+        size = count_fn(block.content)
+        message = "EVICTED: over context budget"
+        if not (block.metadata.optional and block.metadata.static):
+            message += f" (block_tokens={size:,})"
+        saved = size - count_fn(message)
+        if saved > 0:
+            total -= saved
+            replacements[index] = message
 
     for i in range(len(blocks) - 1, -1, -1):
         if total <= total_limit:
             break
-        if blocks[i].metadata.user_block and not blocks[i].metadata.static:
-            size = count_fn(blocks[i].content)
-            total -= size
-            to_evict.add(i)
-            evicted_sizes[i] = size
+        if blocks[i].metadata.optional:
+            evict(i)
+
+    for i in range(len(blocks) - 1, -1, -1):
+        if total <= total_limit:
+            break
+        if (
+            i not in replacements
+            and blocks[i].metadata.user_block
+            and not blocks[i].metadata.static
+        ):
+            evict(i)
 
     if total > total_limit:
         for i in range(len(blocks) - 1, -1, -1):
             if total <= total_limit:
                 break
-            if i not in to_evict and not blocks[i].metadata.static:
-                size = count_fn(blocks[i].content)
-                total -= size
-                to_evict.add(i)
-                evicted_sizes[i] = size
+            if i not in replacements and not blocks[i].metadata.static:
+                evict(i)
 
     rendered: list[ResolvedBlock] = []
     for i, block in enumerate(blocks):
-        if i not in to_evict:
+        if i not in replacements:
             rendered.append(block)
             continue
-        size = evicted_sizes.get(i, count_fn(block.content))
-        msg = f"EVICTED: over context budget (block_tokens={size:,})"
         rendered.append(
             block.model_copy(
                 update={
-                    "content": msg,
+                    "content": replacements[i],
                     "metadata": block.metadata.model_copy(update={"truncated": True}),
                 }
             )
         )
 
-    return rendered, len(to_evict)
+    return rendered, len(replacements)
 
 
 def _utf8_safe_text(text: str) -> str:

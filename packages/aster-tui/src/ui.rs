@@ -5074,12 +5074,8 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
                         &choices[state.slash_selected.min(choices.len() - 1)],
                     ) {
                         "complete"
-                    } else if state.slash_choice_is_exact(
-                        &choices[state.slash_selected.min(choices.len() - 1)],
-                    ) {
-                        "run"
                     } else {
-                        "send"
+                        "run"
                     },
                 ),
                 ("Esc", "close"),
@@ -7685,6 +7681,39 @@ mod tests {
                 .map(|span| span.content.as_ref())
                 .collect();
             assert_eq!(highlighted, expected);
+        }
+    }
+
+    #[test]
+    fn inline_command_footer_matches_the_selected_action() {
+        use crate::state::Command;
+
+        for (draft, expected) in [
+            ("/mc", "Enter:run"),
+            ("/mcp", "Enter:run"),
+            ("/rev", "Enter:complete"),
+            ("/rep", "Enter:complete"),
+        ] {
+            let mut state = State::new("workspace".into(), "model".into(), false);
+            state.phase = Phase::Ready;
+            state.commands_received = true;
+            state.commands.extend([
+                Command {
+                    name: "/review".into(),
+                    is_skill: true,
+                    ..Command::default()
+                },
+                Command {
+                    name: "/report".into(),
+                    argument_hint: "[format]".into(),
+                    ..Command::default()
+                },
+            ]);
+            state.editor.insert_str(draft);
+            let (text, hits) = snapshot(&mut state, 80, 24);
+            assert!(!hits.slash_rows.is_empty(), "{draft}: {text}");
+            let footer = text.lines().last().unwrap();
+            assert!(footer.contains(expected), "{draft}: {footer}");
         }
     }
 

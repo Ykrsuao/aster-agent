@@ -114,6 +114,16 @@ class TestBlockMetadata:
         assert meta.expr is None
         assert meta.tag is None
         assert meta.truncated is False
+        assert meta.optional is False
+
+    def test_context_optional_is_independent_of_prefix(self):
+        from aster.context_blocks.models import Context
+
+        block = Context(expr="'catalog'", prefix=True, optional=True)
+        assert block.optional is True
+        assert block.prefix is True
+        assert "optional=True" in repr(block)
+        assert Context("required").optional is False
 
     def test_with_expr(self):
         """BlockMetadata with expr field."""
