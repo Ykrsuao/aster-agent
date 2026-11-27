@@ -302,7 +302,7 @@ impl Hud {
         for element in config::ELEMENTS {
             let shown = self.config.elements.iter().any(|item| item == element);
             options.push((
-                format!("{} {element}", if shown { "[x]" } else { "[ ]" }),
+                format!("{} {element}", if shown { "[✓]" } else { "[ ]" }),
                 "Enter toggles this row; /hud set elements [...] changes its order".into(),
                 format!("{} {element}", if shown { "hide" } else { "show" }),
             ));
