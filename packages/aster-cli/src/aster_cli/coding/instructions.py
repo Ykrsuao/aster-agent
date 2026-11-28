@@ -118,6 +118,23 @@ def _opened_file_path(fd: int) -> Path:
         if not written or written >= len(buffer):
             raise OSError("Cannot resolve opened repository instruction file")
         return _without_extended_prefix(buffer.value)
+    if sys.platform == "darwin":
+        import fcntl
+
+        # Darwin F_GETPATH requires MAXPATHLEN (1024) bytes, including the NUL.
+        buffer = fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024))
+        if not isinstance(buffer, bytes) or len(buffer) != 1024:
+            raise OSError("Cannot resolve opened repository instruction file")
+        name, terminator, _ = buffer.partition(b"\0")
+        path = Path(os.fsdecode(name))
+        if not terminator or not path.is_absolute() or ".." in path.parts:
+            raise OSError("Cannot resolve opened repository instruction file")
+        # F_GETPATH can retain an unlinked name while another hardlink survives.
+        named = os.stat(path, follow_symlinks=False)
+        opened = os.fstat(fd)
+        if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino):
+            raise OSError("Repository instruction file changed while opening")
+        return path
     if sys.platform == "linux":
         path = os.readlink(f"/proc/self/fd/{fd}")
         if path.endswith(" (deleted)"):

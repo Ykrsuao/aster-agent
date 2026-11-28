@@ -220,6 +220,8 @@ jobs:
             tests/tools/test_shell_lifecycle.py \
             tests/storage/test_sqlite_public_options.py \
             tests/test_secrets.py \
+            packages/aster-cli/tests/test_coding_instructions.py \
+            packages/aster-cli/tests/test_workspace_files.py \
             packages/aster-acp/tests \
             --junitxml=artifacts/macos-native.xml
       - name: Upload macOS native results

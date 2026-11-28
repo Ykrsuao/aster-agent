@@ -3,7 +3,9 @@
 """Repository instruction reads stay within the selected workspace."""
 
 import os
-from pathlib import Path
+import sys
+from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 import pytest
 from aster_cli.coding import instructions
@@ -170,7 +172,6 @@ def test_windows_handle_paths_normalize_dos_and_unc_prefixes(
     tmp_path, monkeypatch, handle_path, expected
 ):
     import ctypes
-    from types import SimpleNamespace
 
     def get_path(handle, buffer, size, flags):
         if buffer is None:
@@ -188,3 +189,138 @@ def test_windows_handle_paths_normalize_dos_and_unc_prefixes(
 
     with path.open() as stream:
         assert instructions._opened_file_path(stream.fileno()) == Path(expected)
+
+
+@pytest.mark.parametrize(
+    "name", ["AGENTS.md", "项目说明.md", "a" * 1018], ids=["ascii", "utf8", "maxpathlen"]
+)
+def test_macos_handle_path_uses_getpath_buffer(monkeypatch, name):
+    expected = f"/tmp/{name}"
+    encoded = os.fsencode(expected)
+
+    def get_path(fd, command, buffer):
+        assert (fd, command) == (73, 50)
+        assert buffer == bytes(1024)
+        return (encoded + b"\0").ljust(1024, b"\0")
+
+    monkeypatch.setattr(instructions, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(instructions, "Path", PurePosixPath)
+    monkeypatch.setitem(sys.modules, "fcntl", SimpleNamespace(F_GETPATH=50, fcntl=get_path))
+    identity = SimpleNamespace(st_dev=1, st_ino=2)
+
+    def stat_path(path, *, follow_symlinks):
+        assert path == PurePosixPath(expected)
+        assert follow_symlinks is False
+        return identity
+
+    monkeypatch.setattr(
+        instructions,
+        "os",
+        SimpleNamespace(fsdecode=os.fsdecode, stat=stat_path, fstat=lambda fd: identity),
+    )
+
+    assert instructions._opened_file_path(73) == PurePosixPath(expected)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        b"",
+        bytes(1024),
+        b"relative/AGENTS.md\0".ljust(1024, b"\0"),
+        b"/" + b"a" * 1023,
+        b"/tmp/../outside\0".ljust(1024, b"\0"),
+    ],
+)
+def test_macos_handle_path_rejects_invalid_response(monkeypatch, response):
+    monkeypatch.setattr(instructions, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(instructions, "Path", PurePosixPath)
+    monkeypatch.setitem(
+        sys.modules,
+        "fcntl",
+        SimpleNamespace(F_GETPATH=50, fcntl=lambda *args: response),
+    )
+
+    with pytest.raises(OSError):
+        instructions._opened_file_path(73)
+
+
+def test_macos_handle_path_propagates_getpath_failure(monkeypatch):
+    error = OSError("F_GETPATH unavailable for this descriptor")
+
+    def get_path(*args):
+        raise error
+
+    monkeypatch.setattr(instructions, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setitem(sys.modules, "fcntl", SimpleNamespace(F_GETPATH=50, fcntl=get_path))
+
+    with pytest.raises(OSError) as caught:
+        instructions._opened_file_path(73)
+    assert caught.value is error
+
+
+@pytest.mark.parametrize("missing", [False, True], ids=["replaced", "unlinked"])
+def test_macos_handle_path_rejects_stale_cached_name(monkeypatch, missing):
+    response = b"/tmp/AGENTS.md\0".ljust(1024, b"\0")
+
+    def stat_path(path, *, follow_symlinks):
+        if missing:
+            raise FileNotFoundError(path)
+        return SimpleNamespace(st_dev=1, st_ino=3)
+
+    monkeypatch.setattr(instructions, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(instructions, "Path", PurePosixPath)
+    monkeypatch.setitem(
+        sys.modules, "fcntl", SimpleNamespace(F_GETPATH=50, fcntl=lambda *args: response)
+    )
+    monkeypatch.setattr(
+        instructions,
+        "os",
+        SimpleNamespace(
+            fsdecode=os.fsdecode,
+            stat=stat_path,
+            fstat=lambda fd: SimpleNamespace(st_dev=1, st_ino=2),
+        ),
+    )
+
+    with pytest.raises(OSError):
+        instructions._opened_file_path(73)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Native macOS descriptor paths")
+@pytest.mark.parametrize("directory", [False, True])
+def test_macos_handle_path_tracks_utf8_rename(tmp_path, directory):
+    source = tmp_path / "项目说明"
+    moved = tmp_path / "已移动"
+    if directory:
+        source.mkdir()
+    else:
+        source.write_text("original", encoding="utf-8")
+    fd = os.open(source, os.O_RDONLY)
+    try:
+        assert instructions._opened_file_path(fd) == source.resolve()
+        source.rename(moved)
+        if directory:
+            source.mkdir()
+        else:
+            source.write_text("replacement", encoding="utf-8")
+        assert instructions._opened_file_path(fd) == moved.resolve()
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Native macOS unlink semantics")
+def test_macos_instruction_read_rejects_unlinked_open_file(tmp_path, monkeypatch):
+    source = tmp_path / "AGENTS.md"
+    source.write_text("removed-rule", encoding="utf-8")
+    real_open = os.open
+
+    def unlinked_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if Path(path) == source:
+            source.unlink()
+        return fd
+
+    monkeypatch.setattr(os, "open", unlinked_open)
+
+    assert instructions.render_agent_instructions(tmp_path) == ""

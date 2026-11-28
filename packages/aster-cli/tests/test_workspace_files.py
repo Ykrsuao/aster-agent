@@ -118,7 +118,7 @@ async def test_windows_junctions_are_not_traversed(tmp_path):
     assert (await reader.search("canary"))["matches"] == []
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="POSIX special files")
+@pytest.mark.skipif(sys.platform not in {"linux", "darwin"}, reason="POSIX special files")
 async def test_fifo_is_refused_without_blocking(tmp_path):
     os.mkfifo(tmp_path / "pipe")
     reader = WorkspaceFiles(tmp_path)
@@ -138,6 +138,46 @@ async def test_replaced_workspace_root_is_not_silently_reauthorized(tmp_path):
         await reader.read("secret.txt")
     with pytest.raises(PermissionError):
         await reader.list()
+
+
+@pytest.mark.skipif(sys.platform not in {"linux", "darwin"}, reason="POSIX directory rename")
+@pytest.mark.parametrize("operation", ["read", "list"])
+async def test_directory_replaced_after_open_cannot_redirect_inspection(
+    tmp_path, monkeypatch, operation
+):
+    root = tmp_path / "workspace"
+    directory = root / "files"
+    directory.mkdir(parents=True)
+    (directory / "note.txt").write_text("original", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "note.txt").write_text("outside canary", encoding="utf-8")
+    moved = tmp_path / "moved"
+    reader = WorkspaceFiles(root)
+    real_open = os.open
+    opened = []
+
+    def open_then_replace(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        opened.append(fd)
+        if os.fspath(path) == "files" and kwargs.get("dir_fd") is not None:
+            directory.rename(moved)
+            directory.symlink_to(outside, target_is_directory=True)
+        return fd
+
+    monkeypatch.setattr(os, "open", open_then_replace)
+    with pytest.raises(PermissionError):
+        if operation == "read":
+            await reader.read("files/note.txt")
+        else:
+            await reader.list("files")
+
+    assert moved.is_dir()
+    assert (outside / "note.txt").read_text(encoding="utf-8") == "outside canary"
+    assert (moved / "note.txt").read_text(encoding="utf-8") == "original"
+    for fd in opened:
+        with pytest.raises(OSError):
+            os.fstat(fd)
 
 
 async def test_opened_handle_is_checked_before_reading(tmp_path, monkeypatch):

@@ -113,8 +113,8 @@ class WorkspaceFiles:
         from aster_cli.coding.instructions import _opened_file_path
 
         relative = self._relative(relative.as_posix())
-        if sys.platform not in {"linux", "win32"}:
-            raise OSError("Workspace inspection is available on Linux and Windows.")
+        if sys.platform not in {"linux", "darwin", "win32"}:
+            raise OSError("Workspace inspection is available on Linux, macOS and Windows.")
         with ExitStack() as stack:
             parent_fd = None
             path = self._root
