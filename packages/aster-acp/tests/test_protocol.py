@@ -152,6 +152,7 @@ def test_protocol_subprocess_imports_this_checkout(tmp_path):
 class _RecordingClient:
     def __init__(self) -> None:
         self.updates: list[tuple[str, object]] = []
+        self.update_received = asyncio.Event()
         self.tool_started = asyncio.Event()
         self.commands_updated = asyncio.Event()
         self.sandbox_ready = asyncio.Event()
@@ -168,6 +169,7 @@ class _RecordingClient:
 
     async def session_update(self, session_id: str, update: object, **kwargs) -> None:
         self.updates.append((session_id, update))
+        self.update_received.set()
         if isinstance(update, ToolCallStart) and not _is_prompt_activity(update):
             self.tool_started.set()
         if isinstance(update, ToolCallStart | ToolCallProgress) and _is_prompt_activity(update):
@@ -188,6 +190,16 @@ class _RecordingClient:
             and update.content.text == "ASTER ACP smoke test passed."
         ):
             self.smoke_received.set()
+
+    async def wait_for_message(self, text: str) -> None:
+        # RPC responses can arrive before the SDK dispatches earlier notifications.
+        async with asyncio.timeout(_HANG_TIMEOUT):
+            while not any(
+                isinstance(update, AgentMessageChunk) and update.content.text == text
+                for _, update in self.updates
+            ):
+                self.update_received.clear()
+                await self.update_received.wait()
 
 
 def _mcp_stdio_config(workspace: Path, *, label: str = "project"):
@@ -294,6 +306,7 @@ async def test_acp_subprocess_mcp_stdio_reload_resume_and_cleanup(tmp_path, monk
         ]
         assert status["servers"][0]["toolCount"] == 1
         await connection.prompt(session.session_id, [text_block("call the MCP probe")])
+        await client.wait_for_message("MCP probe: project: wire")
         assert any(
             isinstance(update, AgentMessageChunk)
             and update.content.text == "MCP probe: project: wire"
@@ -314,11 +327,13 @@ async def test_acp_subprocess_mcp_stdio_reload_resume_and_cleanup(tmp_path, monk
             "state"
         ] == "ready"
         await connection.prompt(session.session_id, [text_block("call again after resume")])
+        await client.wait_for_message("MCP probe: recovered: wire")
         assert any(
             isinstance(update, AgentMessageChunk)
             and update.content.text == "MCP probe: recovered: wire"
             for _, update in client.updates
         )
+        await client.wait_for_message("MCP durable state restored")
         assert any(
             isinstance(update, AgentMessageChunk)
             and update.content.text == "MCP durable state restored"
