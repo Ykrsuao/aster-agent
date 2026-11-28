@@ -14,6 +14,7 @@ import os
 import socket
 import sqlite3
 import subprocess
+import sys
 import threading
 import typing
 import uuid
@@ -27,7 +28,6 @@ from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import ValidationError as PydanticValidationError
 
-from aster._platform import is_native_windows
 from aster.context_blocks import Event, EventBase, EventStatus, Metadata
 from aster.context_blocks.events import _EVENT_REGISTRY
 from aster.events import (
@@ -720,7 +720,7 @@ def _acquire_session_lock(lock_path: str) -> int:
     """
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0), 0o644)
     try:
-        if is_native_windows():
+        if sys.platform == "win32":
             import msvcrt
 
             # Lock away from the owner record so competing processes can still
@@ -758,7 +758,7 @@ def _acquire_session_lock(lock_path: str) -> int:
 def _release_session_lock(fd: int) -> None:
     """Release and close a lock fd returned by ``_acquire_session_lock``."""
     try:
-        if is_native_windows():
+        if sys.platform == "win32":
             import msvcrt
 
             os.lseek(fd, 2**31 - 1, os.SEEK_SET)

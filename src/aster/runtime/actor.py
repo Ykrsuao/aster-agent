@@ -15,7 +15,7 @@ import math
 import re as _re
 import types
 import warnings
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime
@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     )
     from aster.runtime.event_query import EventQuery
     from aster.runtime.restrictions import RestrictionsConfig
+    from aster.unifiedllm import CacheBoundary, LLMResponse
 
 from aster.events import (
     DecisionCallEnd,
@@ -164,7 +165,9 @@ warnings.filterwarnings(
 _TRAILING_CONTEXT_RE = _re.compile(r"^(.*?)(<context>.*?</context>)\s*\Z", _re.DOTALL)
 
 
-def _extract_trailing_context_envelope(messages: list[dict[str, Any]]) -> str:
+def _extract_trailing_context_envelope(
+    messages: "Sequence[dict[str, Any] | LLMResponse | CacheBoundary]",
+) -> str:
     """Pull the trailing ``<context>…</context>`` envelope from messages.
 
     ``CachedBlockFormatter`` emits dynamic SYSTEM-role blocks as a
@@ -191,7 +194,9 @@ def _extract_trailing_context_envelope(messages: list[dict[str, Any]]) -> str:
 
 
 def _snapshot_llm_request(
-    event_manager: Any, messages: list[dict[str, Any]], generation_id: str
+    event_manager: Any,
+    messages: "Sequence[dict[str, Any] | LLMResponse | CacheBoundary]",
+    generation_id: str,
 ) -> str:
     """Snapshot the rendered request for observability consumers (e.g. ATIF).
 
@@ -1639,9 +1644,9 @@ class ActorRuntime:
                 # which excludes time spent in brokered host calls.
                 timed_runner = getattr(sandbox_executor, "run_cell_with_timeout", None)
                 if callable(timed_runner):
-                    result = cast(
-                        ExecutionResult,
-                        await timed_runner(code, execution_count=execution_count, timeout=timeout),
+                    timed_runner = cast(Callable[..., Awaitable[ExecutionResult]], timed_runner)
+                    result = await timed_runner(
+                        code, execution_count=execution_count, timeout=timeout
                     )
                 else:
                     result = cast(
@@ -3124,7 +3129,7 @@ class ActorRuntime:
         max_output_tokens: int | None = None,
         request_params: dict[str, Any] | None = None,
         llm_client: Any = None,
-    ) -> list[dict[str, Any]]:
+    ) -> "list[dict[str, Any] | LLMResponse | CacheBoundary]":
         """Build messages for LLM API.
 
         Calls _prepare_context() to gather and resolve all blocks,
