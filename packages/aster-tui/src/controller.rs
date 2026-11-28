@@ -3607,7 +3607,9 @@ impl Controller {
     }
 
     pub fn cancel(&mut self) -> Vec<Action> {
-        self.state.queue_paused = true;
+        if self.operation != "prompt" {
+            self.state.queue_paused = true;
+        }
         if self.state.preparing() {
             self.recall_waiting_message();
             return vec![];
@@ -3883,7 +3885,7 @@ impl Controller {
                 self.state.active_turn_id = None;
                 let reason = result["stopReason"].as_str().unwrap_or("unknown");
                 let cancelled = self.cancelled || reason == "cancelled";
-                if cancelled || reason != "end_turn" {
+                if !matches!(reason, "end_turn" | "cancelled") {
                     self.state.recovery = self.in_flight.take();
                 } else {
                     self.in_flight = None;
@@ -3893,7 +3895,7 @@ impl Controller {
                     self.state
                         .notice(format!("Request stopped: {reason}"), true);
                 }
-                if cancelled || reason != "end_turn" {
+                if !matches!(reason, "end_turn" | "cancelled") {
                     self.state.queue_paused = true;
                 }
                 self.finish_steering(if cancelled {
@@ -7703,7 +7705,7 @@ mod tests {
         assert!(c
             .key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
             .is_empty());
-        assert!(c.state.queue_paused);
+        assert!(!c.state.queue_paused);
         assert_eq!(c.state.queued.len(), 1);
     }
 
@@ -8943,17 +8945,119 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_prompt_does_not_drain_queue_even_if_backend_reports_end_turn() {
+    fn cancelled_prompt_keeps_history_without_requeueing_old_input() {
+        for reason in ["cancelled", "end_turn"] {
+            let mut c = ready();
+            c.state.session_id = Some("s".into());
+            let original = "  你好\n原始输入  \n";
+            c.input(original.into());
+            c.paste("keep this draft".into());
+            esc(&mut c);
+            assert!(reply(&mut c, Pending::Prompt, json!({"stopReason":reason})).is_empty());
+            assert_eq!(c.state.editor.lines(), &["keep this draft"]);
+            c.history_move(true);
+            assert_eq!(c.state.editor.lines().join("\n"), original);
+            c.history_move(false);
+            assert_eq!(c.state.editor.lines(), &["keep this draft"]);
+
+            c.set_draft("new message");
+            let actions = c.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert_eq!(prompt_text(&actions), "new message");
+            assert!(c.state.queued.is_empty());
+            assert!(c.state.recovery.is_none());
+            assert!(reply(&mut c, Pending::Prompt, json!({"stopReason":"end_turn"})).is_empty());
+            c.set_draft("third message");
+            let actions = c.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert_eq!(prompt_text(&actions), "third message");
+            assert!(c.state.queued.is_empty());
+            assert_eq!(c.history, [original, "new message", "third message"]);
+        }
+    }
+
+    #[test]
+    fn cancelled_prompt_does_not_return_as_recovery_after_restart() {
+        let workspace = tempfile::tempdir().unwrap();
         let mut c = ready();
         c.state.session_id = Some("s".into());
-        c.input("first".into());
-        c.input("second".into());
-        c.cancel();
-        assert!(reply(&mut c, Pending::Prompt, json!({"stopReason":"end_turn"})).is_empty());
-        assert!(c.state.queue_paused);
-        assert_eq!(c.state.queued.front().unwrap(), "second");
-        let actions = c.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
-        assert_eq!(prompt_text(&actions), "second");
+        c.attach_drafts(DraftStore::for_workspace(workspace.path()).unwrap());
+        c.input("cancelled old input".into());
+        c.paste("unsent draft".into());
+        c.state.attachments.push(polish_attachment("draft.png"));
+        let attachments = c.state.attachments.clone();
+        esc(&mut c);
+        assert!(reply(&mut c, Pending::Prompt, json!({"stopReason":"cancelled"})).is_empty());
+        assert!(c.autosave_draft());
+
+        let mut restored = Controller::new(
+            State::new(
+                workspace.path().to_string_lossy().into_owned(),
+                "test".into(),
+                false,
+            ),
+            Some("s".into()),
+            false,
+        );
+        restored.attach_drafts(DraftStore::for_workspace(workspace.path()).unwrap());
+        assert_eq!(restored.state.editor.lines(), &["unsent draft"]);
+        assert_eq!(restored.state.attachments, attachments);
+        assert!(restored.state.recovery.is_none());
+        assert!(restored.state.queued.is_empty());
+    }
+
+    #[test]
+    fn cancelled_prompt_waits_for_confirmation_then_sends_new_input_once() {
+        for reason in ["cancelled", "end_turn"] {
+            let mut c = ready();
+            c.state.session_id = Some("s".into());
+            c.input("old message".into());
+            esc(&mut c);
+            c.paste("new message".into());
+            assert!(c
+                .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .is_empty());
+            assert_eq!(c.state.phase, Phase::Cancelling);
+            assert_eq!(
+                c.state
+                    .queued
+                    .iter()
+                    .map(MessageDraft::as_str)
+                    .collect::<Vec<_>>(),
+                ["new message"]
+            );
+            assert!(esc(&mut c).is_empty());
+            let actions = reply(&mut c, Pending::Prompt, json!({"stopReason":reason}));
+            assert_eq!(actions.len(), 1);
+            assert_eq!(prompt_text(&actions), "new message");
+            assert!(c.state.queued.is_empty());
+            assert!(c.state.recovery.is_none());
+            assert!(reply(&mut c, Pending::Prompt, json!({"stopReason":"end_turn"})).is_empty());
+            assert_eq!(c.history, ["old message", "new message"]);
+        }
+    }
+
+    #[test]
+    fn cancelled_prompt_continues_queued_work_unless_it_was_already_paused() {
+        for reason in ["cancelled", "end_turn"] {
+            for paused in [false, true] {
+                let mut c = ready();
+                c.state.session_id = Some("s".into());
+                c.input("first".into());
+                c.input("second".into());
+                c.state.queue_paused = paused;
+                c.cancel();
+                let actions = reply(&mut c, Pending::Prompt, json!({"stopReason":reason}));
+                assert_eq!(c.state.queue_paused, paused);
+                assert!(c.state.recovery.is_none());
+                if paused {
+                    assert!(actions.is_empty());
+                    assert_eq!(c.state.queued.front().unwrap(), "second");
+                    assert_eq!(prompt_text(&c.continue_queue()), "second");
+                } else {
+                    assert_eq!(prompt_text(&actions), "second");
+                }
+                assert!(c.state.queued.is_empty());
+            }
+        }
     }
 
     #[test]
@@ -8963,17 +9067,26 @@ mod tests {
             json!({"result":{"stopReason":"max_tokens"}}),
             json!({"result":{"stopReason":"refusal"}}),
         ] {
-            let mut c = ready();
-            c.state.session_id = Some("s".into());
-            c.input("first".into());
-            c.input("second".into());
-            c.registered(2, Pending::Prompt);
-            let mut message = result;
-            message["id"] = json!(2);
-            assert!(c.message(message).is_empty());
-            assert!(c.state.queue_paused);
-            assert_eq!(c.state.queued.front().unwrap(), "second");
-            assert_eq!(c.state.phase, Phase::Ready);
+            for cancelled in [false, true] {
+                let mut c = ready();
+                c.state.session_id = Some("s".into());
+                c.input("first".into());
+                c.input("second".into());
+                if cancelled {
+                    c.cancel();
+                }
+                c.registered(2, Pending::Prompt);
+                let mut message = result.clone();
+                message["id"] = json!(2);
+                assert!(c.message(message).is_empty());
+                assert!(c.state.queue_paused);
+                assert_eq!(c.state.queued.front().unwrap(), "second");
+                assert_eq!(
+                    c.state.recovery.as_ref().map(MessageDraft::as_str),
+                    Some("first")
+                );
+                assert_eq!(c.state.phase, Phase::Ready);
+            }
         }
     }
 

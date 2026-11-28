@@ -14,6 +14,7 @@ import os
 import socket
 import sqlite3
 import subprocess
+import sys
 import threading
 import typing
 import uuid
@@ -27,7 +28,6 @@ from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import ValidationError as PydanticValidationError
 
-from aster._platform import is_native_windows
 from aster.context_blocks import Event, EventBase, EventStatus, Metadata
 from aster.context_blocks.events import _EVENT_REGISTRY
 from aster.events import (
@@ -525,14 +525,23 @@ class SQLiteEventBackend:
     def insert_active_tag(self, tag: str, index: int) -> None:
         with self._lock:
             with self._conn:
-                # Shift existing positions >= index up by 1
+                # Collapses leave gaps: a list index is not a stored position.
+                rows = self._conn.execute(
+                    "SELECT position FROM active_tags ORDER BY position"
+                ).fetchall()
+                if index < 0:
+                    index = max(0, len(rows) + index)
+                if index < len(rows):
+                    position = rows[index][0]
+                else:
+                    position = rows[-1][0] + 1 if rows else 0
                 self._conn.execute(
                     "UPDATE active_tags SET position = position + 1 WHERE position >= ?",
-                    (index,),
+                    (position,),
                 )
                 self._conn.execute(
                     "INSERT INTO active_tags (position, tag) VALUES (?, ?)",
-                    (index, tag),
+                    (position, tag),
                 )
 
     def remove_active_tag(self, tag: str) -> bool:
@@ -711,7 +720,7 @@ def _acquire_session_lock(lock_path: str) -> int:
     """
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0), 0o644)
     try:
-        if is_native_windows():
+        if sys.platform == "win32":
             import msvcrt
 
             # Lock away from the owner record so competing processes can still
@@ -749,7 +758,7 @@ def _acquire_session_lock(lock_path: str) -> int:
 def _release_session_lock(fd: int) -> None:
     """Release and close a lock fd returned by ``_acquire_session_lock``."""
     try:
-        if is_native_windows():
+        if sys.platform == "win32":
             import msvcrt
 
             os.lseek(fd, 2**31 - 1, os.SEEK_SET)

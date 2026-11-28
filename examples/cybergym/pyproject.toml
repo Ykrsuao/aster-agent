@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "aster[tracing]",
-    "pydantic>=2.5.0",
+    "pydantic>=2.14.2",
 ]
 
 [project.optional-dependencies]
@@ -41,3 +41,8 @@ constraint-dependencies = [
     "openinference-instrumentation==0.1.54",
     "openinference-instrumentation-litellm==0.1.34",
 ]
+
+[tool.uv.exclude-newer-package]
+# Pydantic 2.14.3 and its matching core include the 2.14.2 security fixes.
+pydantic = "2026-11-05T23:59:59Z"
+pydantic-core = "2026-11-05T23:59:59Z"

@@ -710,7 +710,7 @@ class TestStandaloneAgentIdSharding:
     """`prompt_cache_key` sharding contract for standalone functions.
 
     Each standalone call creates a fresh agent stub. The stub's ``_agent_id``
-    feeds the actor's default ``prompt_cache_key = f"{agent_id}-{strategy_tag}"``.
+    feeds the actor's bounded default ``prompt_cache_key`` together with the strategy.
     The id must satisfy three properties:
 
     1. Same function in the same process → same shard (fan-out cache hits).
@@ -745,9 +745,8 @@ class TestStandaloneAgentIdSharding:
         assert len(fake_llm.prompt_cache_keys) == 2
         assert fake_llm.prompt_cache_keys[0] == fake_llm.prompt_cache_keys[1]
         assert fake_llm.prompt_cache_keys[0] is not None
-        # The id must carry function identity so two different functions diverge
-        # (asserted in the next test) — sanity-check the format here.
-        assert "classify" in fake_llm.prompt_cache_keys[0]
+        assert 0 < len(fake_llm.prompt_cache_keys[0]) <= 64
+        assert fake_llm.prompt_cache_keys[0].isascii()
 
     @pytest.mark.asyncio
     async def test_different_functions_get_different_cache_keys(self) -> None:
@@ -801,8 +800,8 @@ class TestStandaloneAgentIdSharding:
         )
 
     @pytest.mark.asyncio
-    async def test_agent_id_carries_per_process_token(self) -> None:
-        """The id format must include the module-level per-process token.
+    async def test_cache_key_separates_process_tokens(self, monkeypatch) -> None:
+        """The cache key must distinguish the module-level per-process token.
 
         This is what spreads load when the same code is run as N separate
         Python processes — each gets a different ``_PROCESS_AGENT_ID`` at
@@ -811,16 +810,27 @@ class TestStandaloneAgentIdSharding:
         """
         from aster import standalone as standalone_mod
 
-        fake_llm = _CaptureKwargsLLM(scripted_responses=[_resp('{"value": "x"}')])
+        fake_llm = _CaptureKwargsLLM(
+            scripted_responses=[_resp('{"value": "x"}'), _resp('{"value": "y"}')]
+        )
 
-        @strategy(PredictStrategy(), llm=fake_llm)
-        async def summarise(text: str) -> str:
-            """Summarise {text}."""
-            ...
+        def make_wrapper():
+            @strategy(PredictStrategy(), llm=fake_llm)
+            async def summarise(text: str) -> str:
+                """Summarise the text."""
+                ...
 
-        await summarise("input")
+            return summarise
+
+        monkeypatch.setattr(standalone_mod, "_PROCESS_AGENT_ID", "process-a")
+        first = make_wrapper()
+        monkeypatch.setattr(standalone_mod, "_PROCESS_AGENT_ID", "process-b")
+        second = make_wrapper()
+        await first("input")
+        await second("input")
 
         assert fake_llm.prompt_cache_keys[0] is not None
         # Locks in the contract: if anyone ever drops the per-process token
         # the cybergym-style multi-trial collision returns.
-        assert standalone_mod._PROCESS_AGENT_ID in fake_llm.prompt_cache_keys[0]
+        assert fake_llm.prompt_cache_keys[1] is not None
+        assert fake_llm.prompt_cache_keys[0] != fake_llm.prompt_cache_keys[1]

@@ -108,6 +108,66 @@ async def test_stop_selected_background_job_leaves_other_work_running(tmp_path):
         await agent.close()
 
 
+async def test_stop_during_shutdown_waits_for_shared_job_cleanup(tmp_path, monkeypatch):
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    tracker = TaskTracker(agent)
+    started, cleaning, release, cleaned, stopping = (asyncio.Event() for _ in range(5))
+    cancel_calls = 0
+    shutdown = stop = None
+
+    async def work():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()
+            cleaned.set()
+
+    agent.queue_manager.queue("checks")
+    handle = agent.queue_manager.spawn(work(), channel="checks", label="Background check")
+    original_cancel = handle._task.cancel
+
+    def count_cancel(msg=None):
+        nonlocal cancel_calls
+        cancel_calls += 1
+        return original_cancel(msg)
+
+    monkeypatch.setattr(handle._task, "cancel", count_cancel)
+    try:
+        async with asyncio.timeout(3):
+            await started.wait()
+            job_id = tracker.snapshot()["jobs"][0]["id"]
+            shutdown = asyncio.create_task(agent.queue_manager.shutdown())
+            await cleaning.wait()
+            assert cancel_calls == 1
+
+            async def stop_selected():
+                stopping.set()
+                return await tracker.stop(job_id)
+
+            stop = asyncio.create_task(stop_selected())
+            await stopping.wait()
+            assert cancel_calls == 1
+            assert not shutdown.done()
+            assert not stop.done()
+            assert not cleaned.is_set()
+
+            release.set()
+            assert await stop is True
+            await shutdown
+            assert cleaned.is_set()
+            assert cancel_calls == 1
+            assert handle.state == "cancelled"
+            assert agent.queue_manager.job_handles() == []
+    finally:
+        release.set()
+        await asyncio.gather(
+            *(task for task in (shutdown, stop) if task is not None), return_exceptions=True
+        )
+        await agent.close()
+
+
 @pytest.mark.parametrize("stop_order", [(0, 1), (1, 0)])
 async def test_same_channel_jobs_have_stable_ids_and_stop_independently(
     tmp_path: Path, stop_order: tuple[int, int]

@@ -6,6 +6,34 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Cancelling a terminal prompt no longer requeues its old input or pauses new
+  messages. An unpaused queue continues after the backend confirms completion;
+  failures and cancellation timeouts still pause it. The cancelled prompt's text
+  remains available through input history.
+
+- Keep Microsandbox pinned to 0.7.15 with its matching adapter and bundled runtime.
+  The 0.8.3 migration is deferred until the Linux/KVM bind-mounted ELF regression
+  (upstream #2121) is fixed and passes the workspace-executable regression on both
+  Linux and Windows. See `docs/microsandbox-assessment.md` before upgrading.
+
+- **Security:** require Pydantic 2.14.2 or newer and lock Pydantic 2.14.3 /
+  pydantic-core 2.50.4 in the workspace and CyberGym example. These versions
+  include upstream validation fixes; JSON inputs that match a disabled alias
+  or field name now follow the model's extra-field policy.
+
+- Repeated event collapses now preserve summary order in SQLite, including
+  after reopening a session. Insertion uses the active list index even when
+  earlier collapses have left gaps in stored positions. Existing histories
+  are not automatically reordered.
+- Cancelling a caller while it waits for background-job or queue cleanup now
+  propagates cancellation. Interrupted queue races return unread items, and
+  shutdown cancels jobs together while retaining unfinished jobs for cleanup.
+  Repeated stops and channel removal or replacement no longer interrupt a
+  background job already unwinding after cancellation.
+- Default prompt cache keys now use a bounded, stable digest for both agent
+  methods and standalone generation functions. Explicit keys are unchanged;
+  existing provider caches may need to warm again after the default changes.
+
 - Windows ACP startup no longer waits for the first provider-code cache build
   before answering the protocol handshake. Cache preparation runs off the event
   loop when the first session needs a model; concurrent sessions share it, and

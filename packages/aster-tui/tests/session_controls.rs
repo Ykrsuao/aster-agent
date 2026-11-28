@@ -585,26 +585,40 @@ fn permissions_for_another_session_or_a_finished_turn_are_rejected() {
 }
 
 #[test]
-fn failed_or_cancelled_prompts_dismiss_pending_approvals_and_pause_queued_work() {
-    for result in [
-        json!({"stopReason": "cancelled"}),
-        json!({"stopReason": "max_tokens"}),
-    ] {
+fn terminal_prompts_dismiss_approvals_before_continuing_or_pausing_queued_work() {
+    for reason in ["cancelled", "max_tokens"] {
         let mut client = Client::ready();
         let prompt = client.start_prompt();
+        assert!(client.controller.input("next message".into()).is_empty());
         client.controller.paste("keep this draft".into());
         client
             .controller
             .permission_request(&permission("approval-1", "session-a"));
 
-        let actions = client.answer(prompt, result);
+        let actions = client.answer(prompt, json!({"stopReason": reason}));
 
         assert_cancelled_permission(&actions, "approval-1");
         assert!(client.controller.state.approvals.is_empty());
         assert_eq!(client.controller.state.overlay, None);
         assert_eq!(client.controller.state.editor.lines(), &["keep this draft"]);
-        assert!(client.controller.state.queue_paused);
-        assert_eq!(client.controller.state.phase, Phase::Ready);
+        if reason == "cancelled" {
+            assert!(
+                matches!(actions.as_slice(), [Action::Reply { .. }, Action::Request {
+                method: "session/prompt", params, ..
+            }] if params["prompt"][0]["text"] == "next message")
+            );
+            assert!(!client.controller.state.queue_paused);
+            assert!(client.controller.state.queued.is_empty());
+            assert_eq!(client.controller.state.phase, Phase::Busy);
+        } else {
+            assert_eq!(actions.len(), 1);
+            assert!(client.controller.state.queue_paused);
+            assert_eq!(
+                client.controller.state.queued.front().unwrap(),
+                "next message"
+            );
+            assert_eq!(client.controller.state.phase, Phase::Ready);
+        }
     }
 }
 

@@ -176,6 +176,8 @@ def main() -> None:
             "memory",
             "--extra",
             "bench",
+            "--extra",
+            "sandbox",
             "--no-emit-workspace",
             "--no-hashes",
             "--no-annotate",
