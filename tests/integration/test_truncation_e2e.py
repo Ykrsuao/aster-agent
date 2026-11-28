@@ -21,6 +21,8 @@ content from L3.
 Inline tests use FakeLLMClient (no API calls).
 """
 
+from xml.etree.ElementTree import fromstring
+
 import pytest
 
 from aster import Agent
@@ -406,9 +408,11 @@ class TestL4ContextBlockEviction:
     def test_boundary_block_just_under_then_second_pushes_over(self):
         """One block fits just under the budget; adding a second pushes
         total over the limit and triggers eviction of the newest block."""
-        # Budget = 100 tokens. Static system prompt ~1 token.
-        # Block A = 380 chars = 95 tokens → fits (1 + 95 = 96 ≤ 100)
-        # Block B = 40 chars = 10 tokens → total 106 > 100 → B gets evicted
+        # Budget = 100 tokens. Static system prompt = 1 token.
+        # Block A = 352 chars = 88 tokens → fits (1 + 88 = 89 ≤ 100).
+        # Block B = 80 chars = 20 tokens → total 109 > 100.
+        # B's EVICTED notice costs 11 tokens, leaving exactly 100 tokens.
+        # B must be larger than its notice for eviction to save tokens.
         blocks = [
             ResolvedBlock(
                 key="system_prompt",
@@ -418,13 +422,13 @@ class TestL4ContextBlockEviction:
             ),
             ResolvedBlock(
                 key="block_a",
-                content="a" * 380,  # 95 tokens, fits under 100
+                content="a" * 352,  # 88 tokens, leaving room for B's notice
                 role=Role.SYSTEM,
                 metadata=BlockMetadata(),
             ),
             ResolvedBlock(
                 key="block_b",
-                content="b" * 40,  # 10 tokens, pushes total over 100
+                content="b" * 80,  # 20 tokens, pushes total over 100
                 role=Role.SYSTEM,
                 metadata=BlockMetadata(),
             ),
@@ -438,11 +442,16 @@ class TestL4ContextBlockEviction:
         )
         output_str = str(result.output)
         # Block A (oldest non-static) should survive
-        assert "a" * 380 in output_str, "Block A should survive — it was added first"
+        assert "a" * 352 in output_str, "Block A should survive — it was added first"
         # Block B (newest non-static) should be evicted
-        assert "b" * 40 not in output_str, "Block B should be evicted — it's newest"
+        assert "b" * 80 not in output_str, "Block B should be evicted — it's newest"
         assert result.stats.context_blocks_dropped == 1
         assert "EVICTED" in output_str
+        # The budget counts block bodies, including eviction notices, without XML wrappers.
+        rendered_blocks = fromstring(f"<blocks>{result.output[0]['content']}</blocks>")
+        assert (
+            sum(_count_tokens((block.text or "").strip("\n")) for block in rendered_blocks) == 100
+        )
 
     def test_boundary_single_block_exactly_at_limit_no_eviction(self):
         """A single non-static block that exactly fills the budget should
