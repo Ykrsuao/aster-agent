@@ -6,6 +6,11 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- macOS native ACP can inspect workspace files in plan/recovery mode and use
+  `accept_edits` with the same workspace, identity and permission checks as
+  Linux/Windows. Open-file path verification uses macOS `F_GETPATH`; native
+  macOS CI also exercises repository instructions and workspace file guards.
+
 - Cancelling a terminal prompt no longer requeues its old input or pauses new
   messages. An unpaused queue continues after the backend confirms completion;
   failures and cancellation timeouts still pause it. The cancelled prompt's text

@@ -460,7 +460,7 @@ def file_edit_executor(
     a missing parent directory also requires normal approval.
     """
     operation = _parse_operation(code)
-    if operation is None or sys.platform not in {"win32", "linux"}:
+    if operation is None or sys.platform not in {"win32", "linux", "darwin"}:
         return None
     directory = Path(cwd).resolve()
     target = host_path(operation.path) if host_path is not None else operation.path
