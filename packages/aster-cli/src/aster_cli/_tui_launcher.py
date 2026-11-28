@@ -9,6 +9,7 @@ import subprocess
 import sys
 import sysconfig
 import zipfile
+from importlib import metadata
 from pathlib import Path
 
 _MAX_LAUNCHER_SCRIPT_BYTES = 16 * 1024
@@ -137,7 +138,8 @@ def launch_tui(
 
     # Inherit the terminal directly. Shell quoting and redirected pipes would
     # interfere with raw keyboard input and paths containing spaces.
-    child = subprocess.Popen(arguments)
+    environment = os.environ | {"ASTER_APP_VERSION": metadata.version("aster-cli")}
+    child = subprocess.Popen(arguments, env=environment)
     while True:
         try:
             returncode = child.wait()

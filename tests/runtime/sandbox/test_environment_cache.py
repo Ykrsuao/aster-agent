@@ -176,6 +176,26 @@ async def test_concurrent_executors_prepare_only_once(store, tmp_path):
     assert len(store.destroyed) == 1
 
 
+@pytest.mark.parametrize("legacy_group", [False, True], ids=["fresh-store", "legacy-store"])
+async def test_distinct_environments_share_group_without_reusing_snapshot(
+    store, tmp_path, legacy_group
+):
+    if legacy_group:
+        store.seed(name="previous-environment", group="aster-runtime")
+    first_executor = _executor(tmp_path / "workspace-a")
+    second_executor = _executor(tmp_path / "workspace-b")
+    second_executor._dependencies = lambda: [*DEPENDENCIES, "example-package==1.0"]
+
+    first = await first_executor._prepare(store.sdk, IMAGE)
+    second = await second_executor._prepare(store.sdk, IMAGE)
+
+    assert first.name != second.name
+    assert first.group == second.group == "aster-runtime"
+    assert (await first_executor._prepare(store.sdk, IMAGE)).id == first.id
+    assert (await second_executor._prepare(store.sdk, IMAGE)).id == second.id
+    assert store.preparation_count == 2
+
+
 @pytest.mark.parametrize("group", ["aster-runtime", "aster-prepare-legacy"])
 @pytest.mark.parametrize("error,kind", [("permission", PermissionError), ("corrupt", ValueError)])
 async def test_lookup_errors_do_not_trigger_reinstallation(store, tmp_path, group, error, kind):
@@ -198,6 +218,37 @@ async def test_changing_storage_home_does_not_reuse_another_stores_snapshot(
 
     assert second.id != first.id
     assert other.preparation_count == 1
+
+
+async def test_stable_snapshot_with_different_image_is_rejected(store, tmp_path):
+    store.seed(group="aster-runtime", image="python:unexpected")
+
+    with pytest.raises(backend.SandboxUnavailable, match="different image"):
+        await _executor(tmp_path / "workspace")._prepare(store.sdk, IMAGE)
+
+    assert store.preparation_count == 0
+
+
+async def test_deleted_legacy_candidate_falls_back_to_previous_snapshot(
+    store, tmp_path, monkeypatch
+):
+    previous = store.seed()
+    newest = store.seed(group="aster-prepare-newest")
+    open_snapshot = _Snapshot.open
+    lookups = []
+
+    async def remove_before_open(snapshot):
+        lookups.append(snapshot.id)
+        if snapshot.id == newest.id:
+            newest.path.unlink()
+        return await open_snapshot(snapshot)
+
+    monkeypatch.setattr(_Snapshot, "open", remove_before_open)
+    result = await _executor(tmp_path / "workspace")._prepare(store.sdk, IMAGE)
+
+    assert result.id == previous.id
+    assert lookups == [newest.id, previous.id]
+    assert store.preparation_count == 0
 
 
 async def test_deleted_snapshot_is_prepared_again(store, tmp_path):

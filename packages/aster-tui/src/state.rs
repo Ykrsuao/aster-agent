@@ -362,6 +362,7 @@ pub(crate) struct RemovedAttachment {
 }
 
 pub struct State {
+    pub app_version: String,
     pub workspace: String,
     pub model: String,
     pub sandbox: bool,
@@ -471,6 +472,8 @@ pub struct State {
 impl State {
     pub fn new(workspace: String, model: String, sandbox: bool) -> Self {
         Self {
+            app_version: std::env::var("ASTER_APP_VERSION")
+                .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").into()),
             workspace,
             model,
             sandbox,

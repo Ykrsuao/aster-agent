@@ -22,7 +22,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "pydantic>=2.14",
+    "pydantic>=2.14.2",
     # context_blocks + unifiedllm now ship as aster.context_blocks /
     # aster.unifiedllm subpackages — pull their formerly-external deps in.
     # >=1.97.0: routes GPT-5.4 tool calls through Responses and replays reasoning_items;
@@ -91,6 +91,9 @@ constraint-dependencies = [
 ]
 
 [tool.uv.exclude-newer-package]
+# Pydantic 2.14.3 and its matching core include the 2.14.2 security fixes.
+pydantic = "2026-11-05T23:59:59Z"
+pydantic-core = "2026-11-05T23:59:59Z"
 # virtualenv 21.14.13 fixes activation-script injection (GHSA-cx6f-vjhg-g3cc).
 virtualenv = "2026-10-22T23:59:59Z"
 microsandbox = "2026-11-13T23:59:59Z"
@@ -158,7 +161,8 @@ viewer = [
 # trace_explorer is now aster.trace_explorer (internal, no extra deps)
 sandbox = [
     "cloudpickle>=3.1,<4",
-    "microsandbox>=0.7.15,<0.8",
+    # Hold until the Linux bind-mount ELF regression (#2121) is fixed and verified.
+    "microsandbox==0.7.15",
 ]
 # mcp lives at aster.mcp; install with `uv sync --extra mcp`
 # (kept optional so glibc<2.28 hosts can `uv sync` without pulling

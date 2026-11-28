@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Terminal-chat command validation, configuration, and lazy startup."""
 
+import os
 import subprocess
 import sys
 import zipfile
@@ -754,6 +755,14 @@ def test_launcher_preserves_arguments_with_spaces_and_waits_through_parent_inter
     binary = tmp_path / "bin with spaces" / binary_name()
     workspace = tmp_path / "工作目录 with spaces"
     monkeypatch.setattr(launcher, "find_tui_binary", lambda: binary)
+    monkeypatch.setenv("ASTER_APP_VERSION", "stale-version")
+    parent_environment = dict(os.environ)
+
+    def package_version(name):
+        assert name == "aster-cli"
+        return "9.8.7.dev6"
+
+    monkeypatch.setattr(launcher.metadata, "version", package_version)
     calls = []
     outcomes = iter([KeyboardInterrupt(), 0])
 
@@ -763,7 +772,9 @@ def test_launcher_preserves_arguments_with_spaces_and_waits_through_parent_inter
             raise result
         return result
 
-    def popen(arguments):
+    def popen(arguments, *, env):
+        assert env == parent_environment | {"ASTER_APP_VERSION": "9.8.7.dev6"}
+        assert dict(os.environ) == parent_environment
         calls.append(arguments)
         return SimpleNamespace(wait=wait)
 

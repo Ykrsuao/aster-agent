@@ -5138,7 +5138,7 @@ pub fn draw(frame: &mut Frame, state: &mut State) -> HitAreas {
             } else {
                 "/drafts recover saved input · /sessions history"
             },
-            concat!("Aster ", env!("CARGO_PKG_VERSION")),
+            &format!("Aster {}", state.app_version),
             p.muted(),
             p.muted(),
         );
@@ -5315,6 +5315,25 @@ mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn welcome_footer_shows_installed_app_version() {
+        for version in ["0.0.13.dev48", "0.0.14"] {
+            for columns in [48, 80, 120] {
+                let mut state = State::new("C:/workspace".into(), "model".into(), false);
+                state.app_version = version.into();
+                for phase in [Phase::Connecting, Phase::Ready] {
+                    state.phase = phase;
+                    let (text, _) = snapshot(&mut state, columns, 32);
+                    let footer = text.lines().last().unwrap();
+                    assert!(
+                        footer.trim_end().ends_with(&format!("Aster {version}")),
+                        "{footer}"
+                    );
+                }
+            }
+        }
+    }
 
     fn mcp_state() -> State {
         let mut state = State::new("C:/workspace".into(), "model".into(), false);

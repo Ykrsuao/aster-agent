@@ -168,11 +168,11 @@ class JobHandle:
         """Cancel the underlying task and await its unwinding."""
         if self._task.done():
             return
-        self._task.cancel()
-        try:
-            await self._task
-        except (asyncio.CancelledError, Exception):
-            pass
+        # A repeated request would interrupt the job's asynchronous cleanup.
+        if not self._task.cancelling():
+            self._task.cancel()
+        # Collect the job's cancellation while propagating our caller's.
+        await asyncio.gather(self._task, return_exceptions=True)
         if self.state == "running":
             self.state = "cancelled"
 
@@ -858,7 +858,8 @@ class QueueManager:
         remaining: list[JobHandle] = []
         for h in self._handles:
             if h.name == name:
-                h._task.cancel()
+                if not h._task.cancelling():
+                    h._task.cancel()
                 if h.state == "running":
                     h.state = "cancelled"
             else:
@@ -1001,11 +1002,8 @@ class QueueManager:
             done, pending = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
             for t in pending:
                 t.cancel()
-            for t in pending:
-                try:
-                    await t
-                except BaseException:
-                    pass
+            # Caller cancellation must reach the handler that restores consumed items.
+            await asyncio.gather(*pending, return_exceptions=True)
 
             # Check if a queue-channel drain won (not the notify sentinel).
             drain_done = [t for t in done if tasks[t] is not None]
@@ -1153,13 +1151,15 @@ class QueueManager:
     async def shutdown(self) -> None:
         """Cancel and await all outstanding spawned jobs.
 
-        Safe to call multiple times. After shutdown, the handles list
-        is cleared.
+        Cancel all jobs concurrently. Completed handles are removed; any
+        unfinished handles remain tracked if shutdown is interrupted.
+        Safe to call multiple times.
         """
         handles = list(self._handles)
-        self._handles.clear()
-        for h in handles:
-            await h.cancel()
+        try:
+            await asyncio.gather(*(h.cancel() for h in handles), return_exceptions=True)
+        finally:
+            self._handles[:] = [h for h in self._handles if h not in handles or not h._task.done()]
 
     # ---- job registry ----------------------------------------------------
 

@@ -449,10 +449,12 @@ draft. The Ctrl+K palette inserts commands with arguments only when the composer
 is empty; an existing draft, cursor and undo history are preserved.
 Type `/resume ` followed by a session ID or unique prefix. You can draft a
 message during execution; Enter queues ordinary messages and shows what is next
-above the composer. Messages run one at a time after a successful turn. Cancel or
-errors pause the queue; Ctrl+S continues. Ctrl+E opens the queue: Enter takes an
-item back for editing when the composer is empty, and Delete removes it. Taking
-an item back also pauses the remaining queue. Drafts, queued messages and their
+above the composer. Messages run one at a time after the current turn finishes,
+including a confirmed cancellation. Errors and cancellation timeouts pause the
+queue; Ctrl+S continues. An already paused queue stays paused. Ctrl+E opens the
+queue: Enter takes an item back for editing when the composer is empty, and Delete
+removes it. Taking an item back also pauses the remaining queue. Drafts, queued
+messages and their
 attachment snapshots are autosaved separately from submitted conversation history;
 recovered inputs always start paused. See [Recovery](#recovery).
 Finish or remove queued messages before switching to another conversation.
@@ -468,12 +470,16 @@ you submit it again. Input history and conversation messages are recorded only
 when a prompt is dispatched. Unused prepared sessions are cleaned up on normal
 close. Preparation errors remain visible and preserve pending input.
 
-Esc cancels the running task from the main conversation. With a panel or slash
-suggestions open, Esc closes that view first and keeps the draft. Cancellation
-keeps the queue paused until the operation actually finishes. After 20 seconds
-without a terminal response, the TUI reports that it is still waiting and stays
-open; it does not stop the backend automatically. Press Ctrl+C twice within two
-seconds to leave, or use Ctrl+Q or `/exit`.
+Esc cancels the running task from the main conversation and keeps any draft you
+are editing. With a panel or slash suggestions open, Esc closes that view first.
+The TUI waits for the operation's terminal response before sending another prompt;
+then an unpaused queue continues with the next message. The cancelled prompt is
+not added back to the queue or `/retry`; its original text remains in input
+history and can be recalled with Up for editing. After 20 seconds without a
+terminal response, the TUI pauses the queue, reports that it is still waiting and
+stays open; it does not stop the backend automatically. The queue stays paused
+even if cancellation subsequently finishes. Press Ctrl+C twice within two seconds
+to leave, or use Ctrl+Q or `/exit`.
 
 With no text selected, the first Ctrl+C shows an exit confirmation:
 it does not cancel the task or clear your draft. Another key, a paste, or a mouse action dismisses confirmation;
@@ -669,8 +675,10 @@ includes drafts saved before a first message was sent. Select a draft and press
 Enter to restore it.
 
 Restored queues stay paused until Ctrl+S. `/retry` recalls only the current
-conversation's interrupted input for editing before Enter sends it. If another
-draft is present, the recovered message goes into the paused queue.
+conversation's input retained after a failed or interrupted request, including a
+lost connection, for editing before Enter sends it. A confirmed cancellation does
+not create a retry draft; use input history to recall its text. If another draft
+is present, the recovered message goes into the paused queue.
 
 `/reconnect` restarts the ACP connection and restores a saved conversation when
 available. Stop an active prompt before reconnecting. After an ambiguous delivery

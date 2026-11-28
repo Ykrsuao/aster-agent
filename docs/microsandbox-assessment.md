@@ -1,13 +1,15 @@
 # Aster 沙箱替换与原生 Windows 支持
 
-更新日期：2026-11-13。实现保留 `CodeActConfig.execution_backend` 的 `inprocess` / `sandbox` 两种使用方式。
+更新日期：2026-11-27。实现保留 `CodeActConfig.execution_backend` 的 `inprocess` / `sandbox` 两种使用方式。
+
+**已回退并固定 Microsandbox 0.7.15，暂缓 0.8.3。** 2026-11-27 用户确认：Linux 不可用则先用旧版，待修复后再升级。依赖、锁文件和执行器一起回退到已验证的 0.7.15，移除 0.8.3 专用 `microsandbox-core`，保留挂载工作区 ELF 的回归测试。此前 0.8.3 在 Linux/WSL2 KVM 中执行绑定工作区的 ELF 返回 `126 / Permission denied`，同机 0.7.15 成功；对应上游 [#2121](https://github.com/superradcompany/microsandbox/issues/2121)。后续升级须先验证修复版在 Linux 与 Windows 均通过，再更新 SDK、适配器和锁文件。
 
 ## 实现与运行
 
 - `sandbox` 现在只创建 microsandbox microVM，运行一个长期 Python interpreter；旧的 host fork/Pipe 执行器不再启动，也没有回退路径。
 - `inprocess` 原生支持 Windows，无需 WSL、WHP 或平台跳过环境变量。Windows shell 使用 PowerShell，Linux/macOS 继续使用 bash。
 - 框架导入和 CLI 启动的 Windows 拦截已移除；SQLite/模型密钥文件锁和 `monitor()` 的 Windows 进程清理已适配。
-- 沙箱依赖为 `microsandbox>=0.7.15,<0.8` 与 cloudpickle，使用 `uv sync --extra sandbox` 安装；关闭沙箱时不初始化 SDK。官方 0.7.15 已包含 Windows 目录联接扫描与旧存储兼容修复，无需本地候选构建。
+- 沙箱依赖固定为 `microsandbox==0.7.15` 与 cloudpickle；使用含配套 runtime 与 firmware 的完整发行包，不安装 0.8 的独立 core。`uv sync --extra sandbox` 安装已固定的版本；关闭沙箱时不初始化 SDK。
 - ACP 支持 `--sandbox` / `--no-sandbox` 和 `ASTER_SANDBOX`；每个 ACP session 使用独立策略，其沙箱 workspace 设置为该 session 的仓库根目录。显式 `--no-sandbox` 覆盖环境设置，默认使用原生执行。
 
 在仓库根目录启用 ACP 沙箱：
@@ -26,7 +28,39 @@ Windows 授权 workspace 在 guest 中使用 `/workspace`，额外 allow 路径�
 
 现有 `self.*` 工具仍按框架语义在宿主执行；这些工具动作的授权由工具接口负责。microVM 限制约束 guest Python 的直接操作。
 
-## 已执行验证
+## 0.7.15 回退验证（2026-11-27）
+
+依赖、锁文件、旧版适配器和发行约束一起回退后，本轮验证结果如下：
+
+| 环境与范围 | 结果 |
+|---|---|
+| Windows：宿主沙箱回归与发行安装链路 | 325 passed，134 deselected |
+| Windows x64/WHP：真实 VM、挂载 ELF 和 ACP stdio/取消/会话复用 | 16 passed，376.74 秒 |
+| Linux/WSL2 KVM x86_64：当前 Aster 适配器的真实 VM 回归 | 3 passed，297.76 秒 |
+| Linux/WSL2 KVM x86_64：独立 SDK 同字节 ELF 挂载执行 | 退出码 0 |
+| 执行器 Pyright | 0 errors |
+
+已离线重建并安装本机 Aster `0.0.13.dev48`，实际安装的 Microsandbox 为 `0.7.15`，`microsandbox-core` 已移除；468 个安装文件与新构建包匹配。安装后验证了会话恢复不重新执行旧操作、继续对话和原始输入字节保留。这是同一 `dev48` 的重装，不作为跨版本升级验证。实际安装的 Python 3.13 环境也完成真实 VM 探针，验证持久变量、宿主工具返回 `18`、Linux guest 执行和 VM 正常关闭。
+
+回退验证使用独立 `MSB_HOME`。确认没有活动 VM 后，已将默认 0.8 缓存目录在同卷完整改名备份，并建立空的默认 home，保留旧存储供后续恢复。本轮未覆盖 macOS、ARM64 或真实模型调用；Linux 结论限定于上述 WSL2/KVM x86_64 环境。详细日志与安装证据保存在仓库同级的 `evidence/microsandbox-rollback-20261127/`。
+
+## 0.8.3 历史评估（已暂缓）
+
+以下是回退前候选版本的验证记录，不是当前 0.7.15 实现。降级不能只替换 Python 接口，必须同时使用 0.7.15 配套 runtime。0.8.3 的 catalog、settings 与快照可能不被旧工具接受；保留新版存储，回退验证使用独立 `MSB_HOME`，不自动转换或删除用户缓存。
+
+单个磁盘快照使用 `Checkpoint`，通过 `LocalContext.checkpoints` 访问；`Snapshot` 现在表示历史组，`vm.name` 是同步字符串。准备 VM、缓存查询/发布和执行 VM 的创建/恢复共享一个 `LocalContext`。创建上下文时固定本次启动的绝对 `MSB_HOME`，文件锁使用同一路径，避免等待期间环境变量变化导致查询与锁错位。
+
+0.8 的历史组绑定源 VM；不能再把多个准备 VM 的快照写进同一个 `aster-runtime` 组，也不能向旧版未绑定的组追加。新缓存采用 `aster-prepare-<uuid>` 组，成员名仍保存环境键；删除缓存后重建会使用新组。旧 `aster-runtime` 组和旧 `aster-prepare-*` 组保留读取兼容。
+
+最终验证：Python 3.12 的沙箱普通回归与安装链路 326 项通过；Python 3.13 普通沙箱回归 283 项通过。Windows x64/WHP 的后端、挂载 ELF 和 ACP stdio/取消/会话复用 16 项通过，另有 Python 3.13 真 VM 1 项通过。执行器 Pyright、相关 Python 文件 Ruff/格式/SPDX、两份锁文件检查通过。
+
+两个 0.7.15 磁盘快照复制到全新存储后，在 0.8.3 中成功恢复并读写，Aster 实际缓存查询命中旧组；不同环境与同键重建也成功发布到独立历史组。复制未沿用旧数据库、运行目录或硬链接，原存储文件状态与小元数据哈希未变。旧 RAW 层没有记录完整性摘要，SDK `verify()` 返回不完整覆盖，不能把恢复成功视作全部磁盘字节完整性认证。
+
+本次 Linux/KVM 的 0.7.15 / 0.8.3 对照使用各自官方完整 SDK 和配套 firmware，证明发行包整体升级回归，未单独隔离 runtime 与 firmware 的因果。Windows x64/WHP 已验证挂载 ELF 可以执行，不能据此解除 Linux 发布阻断。尚未验证 ARM64、macOS、旧 CPU 或 TLS 存储回滚；不新增平台支持承诺。
+
+管理员策略或自定义 `paths.snapshots` 可覆盖 SDK 的实际存储位置，Python SDK 未公开最终解析路径；本次不新增内部配置解析，也不承诺这类共享目录配置的跨进程锁语义。标准 `MSB_HOME` 布局是本次验证范围。
+
+## 历史验证（0.7.15 及此前）
 
 - 官方 Microsandbox 0.7.15 升级：335 项原生与模拟后端回归通过；主环境及沙箱入口环境各完成一次真实 ACP stdio 验证，在 Windows 用户目录中进入 Linux guest、输出 `42`、正常退出且没有新增 VM 残留。两套环境的 SDK、运行时和 firmware 均通过官方发行文件校验。
 - 原生 Windows：23 项导入、CLI、inprocess、shell/原始 stdin、SQLite 和配置测试通过；默认环境的 `windows_smoke.py` 通过。
@@ -38,9 +72,9 @@ Windows 授权 workspace 在 guest 中使用 `/workspace`，额外 allow 路径�
 
 ## 环境缓存与启动诊断
 
-环境快照按基础镜像、固定 uv 版本和依赖版本列表生成缓存键，不包含工作区路径，因此相同环境可由多个工作区共享。新快照存入 `aster-runtime` 组，用 `Snapshot.open("aster-runtime:aster-runtime-<hash>")` 查找；旧版 `aster-prepare-*` 组中同名、同镜像的快照也可直接复用。
+环境快照按基础镜像、固定 uv 版本和依赖版本列表生成缓存键，不包含工作区路径，因此相同环境可由多个工作区共享。0.7.15 使用 `Snapshot.open("aster-runtime:aster-runtime-<hash>")` 查找固定组，再查找 `aster-prepare-*` 组中同名、同镜像的成员，通过 `item.open()` 重新读取候选，以处理查询后删除的竞态。新建快照写入 `aster-runtime` 组。
 
-在当前 `MSB_HOME`（默认 `~/.microsandbox`）中按环境键加文件锁，覆盖查找、依赖安装和快照发布全过程，避免不同进程同时创建同一环境。等待锁会让出事件循环，取消或退出会释放锁。只把 `FileNotFoundError` 视作缓存未命中，权限和损坏错误正常上报；每次查询当前存储，避免返回已经删除或来自其他存储目录的旧缓存对象。
+在 `MSB_HOME`（默认 `~/.microsandbox`）中按环境键加文件锁，覆盖查找、依赖安装和快照发布全过程，避免标准存储布局下不同进程同时创建同一环境。等待锁会让出事件循环，取消或退出会释放锁。只把 SDK 的 `FileNotFoundError` 视作缓存未命中，其余权限和损坏错误正常上报；每次查询当前存储，避免返回已经删除或来自其他存储目录的旧缓存对象。组内选择器会校验成员文件；SDK 后续底层再次读取文件时仍可能把某些 I/O 错误归为不存在，本适配不扩大异常吞并范围。
 
 ACP 可通过 `ASTER_STARTUP_TIMING=1` 在 stderr 记录导入、配置及会话准备各阶段的墙钟和 CPU 耗时，不记录模型配置或请求内容。自动探测默认本地 tracing viewer 的超时缩短为 0.1 秒；显式配置端点保留原有默认值，`OTLP_PROBE_TIMEOUT` 仍可覆盖。新的进程不等于开机冷启动，首次启动性能还需区分操作系统和安全软件的缓存影响。
 
